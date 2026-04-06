@@ -34,6 +34,11 @@
 # They are recorded in a fixup table and resolved after EOT (same mechanism
 # as fam1). Labels may be defined before or after first reference.
 #
+# Branch relaxation: B-type label targets are automatically relaxed to an
+# inverted-branch + JAL trampoline pair (8 bytes), converting the fixup to
+# J-type (±1 MB range) so programs up to ~1 MB are supported. Numeric
+# B-type offsets remain compact (4 bytes, ±4 KB).
+#
 # Register convention:
 #   s0  = token length          s1  = output buf base
 #   s2  = output write ptr      s3  = symtab base
@@ -44,12 +49,11 @@
 #   sp  = descending stack      t0-t6, a0-a7, ra = scratch
 #
 # Memory layout (relative to auipc at init):
-#   +0x08000   output buffer (32 KB — kept well clear of fam3's ~10 KB code.
-#              symtab at +0x10000 bounds output to 32 KB headroom)
-#   +0x10000   symtab (24-byte entries: 16B padded name + 4B value + 4B kind,
-#              kind=0 for code labels, 1 for .equ/.set constants)
-#   +0x20000   fixup tab (24-byte entries: 16B padded name + 4B patch offset +
-#              4B slot type)
+#   +0x10000   output buffer (512 KB)
+#   +0x90000   symtab (256 KB, 24-byte entries: 16B padded name + 4B value +
+#              4B kind; kind=0 for code labels, 1 for .equ/.set constants)
+#   +0xD0000   fixup tab (256 KB, 24-byte entries: 16B padded name + 4B patch
+#              offset + 4B slot type)
 #              slot_type: 0=B (PC-rel 12-bit signed), 1=J (PC-rel 20-bit signed),
 #                         2=U_hi20 (absolute upper 20 of symbol),
 #                         3=I_lo12 (absolute low 12 signed of symbol),
@@ -57,8 +61,13 @@
 #                         7=U_hi20_pcrel (delta = sym-patch_PC),
 #                         8=I_lo12_pcrel_prev (delta = sym-(patch_PC-4), uses
 #                           the previous auipc's PC for pcrel)
-#   +0x30000   token buffer (32 bytes, zero-padded)
-#   +0x40000   stack top
+#   +0x110000  token buffer (64 KB: 32B token, flags, local-label counters,
+#              frame stack, macro table+body+expansion+args, multi_expr_buf)
+#   +0x120000  stack top
+#
+# Buffer end pointers (stored at s10 offsets for bounds checking):
+#   488(s10) = output_end    492(s10) = symtab_end
+#   496(s10) = fixup_end     500(s10) = expbuf_end
 #
 # Calling convention inside this program:
 #   - args in a0..a7, returns in a0 (and a1 for two-value returns)
@@ -211,27 +220,40 @@ after_reg_tab:
     li      s6, 10
     lui     s5, 0x10000                 # UART base
     auipc   a0, 0                       # a0 = PC base for data regions
-    lui     t2, 8
-    add     s1, a0, t2                  # output buf  = PC + 0x8000
-    mv      s2, s1
     lui     t2, 0x10
-    add     s3, a0, t2                  # symtab      = PC + 0x10000
+    add     s1, a0, t2                  # output buf  = PC + 0x10000 (512 KB)
+    mv      s2, s1
+    lui     t2, 0x90
+    add     s3, a0, t2                  # symtab      = PC + 0x90000 (256 KB)
     mv      s4, s3
-    lui     t2, 0x20
-    add     s7, a0, t2                  # fixup tab   = PC + 0x20000
+    lui     t2, 0xD0
+    add     s7, a0, t2                  # fixup tab   = PC + 0xD0000 (256 KB)
     mv      s8, s7
-    lui     t2, 0x30
-    add     s10, a0, t2                 # token buf   = PC + 0x30000
+    lui     t2, 0x110
+    add     s10, a0, t2                 # token buf   = PC + 0x110000 (64 KB)
     sb      x0, 32(s10)                 # sticky EOT flag at token_buf+32
     # Zero counters, frame depth, macro globals, eol/pushback/pending flags
     addi    t2, s10, 64
-    addi    t3, s10, 484
+    addi    t3, s10, 488
 ll_cnt_z:
     sw      x0, 0(t2)
     addi    t2, t2, 4
     bne     t2, t3, ll_cnt_z
-    lui     t2, 0x40
-    add     sp, a0, t2                  # stack top   = PC + 0x40000
+    # Store buffer end addresses for bounds checking
+    lui     t2, 0x90
+    add     t2, a0, t2
+    sw      t2, 488(s10)                # output_end  = PC + 0x90000
+    lui     t2, 0xD0
+    add     t2, a0, t2
+    sw      t2, 492(s10)                # symtab_end  = PC + 0xD0000
+    lui     t2, 0x110
+    add     t2, a0, t2
+    sw      t2, 496(s10)                # fixup_end   = PC + 0x110000
+    li      t2, 14336
+    add     t2, s10, t2
+    sw      t2, 500(s10)                # expbuf_end  = s10 + 14336
+    lui     t2, 0x120
+    add     sp, a0, t2                  # stack top   = PC + 0x120000
     j       main_loop
 
 # ============================================================================
@@ -969,6 +991,17 @@ rbt_local_build:
     li      a1, 9
     sub     a2, s2, s1
     lw      a3, 20(sp)                  # slot_type (saved pre-16-push at 4(sp), now 20)
+    bnez    a3, rbt_local_nob           # non-B-type: record as-is
+    # B-type relaxation: record J-type fixup at offset+4
+    addi    a2, a2, 4                   # patch the JAL (2nd instruction)
+    li      a3, 1                       # J-type slot
+    jal     ra, record_fixup_arg
+    li      t0, 1
+    sw      t0, 484(s10)                # set relaxed-branch flag
+    addi    sp, sp, 16
+    li      a0, 0
+    j       rbt_done
+rbt_local_nob:
     jal     ra, record_fixup_arg
     addi    sp, sp, 16
     li      a0, 0
@@ -989,6 +1022,7 @@ rbt_not_local:
     li      t1, 123                     # 'z'+1
     blt     t0, t1, rbt_label
 rbt_imm:
+    sw      x0, 484(s10)               # clear relaxed-branch flag
     mv      a0, s10
     mv      a1, s0
     jal     ra, parse_imm
@@ -997,8 +1031,19 @@ rbt_label:
     # Length check (label name must fit in 16 bytes)
     li      t0, 17
     bge     s0, t0, halt_err
-    sub     a0, s2, s1                  # patch_offset
     lw      a1, 4(sp)                   # slot_type
+    bnez    a1, rbt_label_nob           # non-B-type: record as-is
+    # B-type relaxation: record J-type fixup at offset+4 (for JAL trampoline)
+    sub     a0, s2, s1
+    addi    a0, a0, 4                   # patch the JAL (2nd instruction)
+    li      a1, 1                       # J-type slot
+    jal     ra, record_fixup
+    li      t0, 1
+    sw      t0, 484(s10)                # set relaxed-branch flag
+    li      a0, 0
+    j       rbt_done
+rbt_label_nob:
+    sub     a0, s2, s1                  # patch_offset
     jal     ra, record_fixup
     li      a0, 0
 rbt_done:
@@ -1026,6 +1071,9 @@ define_label:
     lw      ra, 0(sp)
     addi    sp, sp, 8
     bnez    a2, halt_err                # duplicate
+    addi    t5, s4, 24
+    lw      t6, 492(s10)                # symtab_end
+    bltu    t6, t5, halt_err            # symtab overflow
     mv      t2, s10
     mv      t3, s4
     li      t4, 16
@@ -1062,6 +1110,9 @@ record_fixup_arg:
     bge     a1, t0, halt_err
     li      t0, 1
     blt     a1, t0, halt_err
+    addi    t5, s8, 24
+    lw      t6, 496(s10)                # fixup_end
+    bltu    t6, t5, halt_err            # fixup table overflow
     mv      t1, a0                      # src
     mv      t2, s8                      # dest
     mv      t3, a1                      # bytes to copy
@@ -1092,6 +1143,9 @@ rfa_fields:
 # ============================================================================
 
 emit_word:
+    addi    t6, s2, 4
+    lw      t5, 488(s10)                # output_end
+    bltu    t5, t6, halt_err            # would overflow output buffer
     sb      a0, 0(s2)
     srli    a0, a0, 8
     sb      a0, 1(s2)
@@ -1203,6 +1257,25 @@ emit_b_inst:
     andi    t1, a0, 0x7F
     or      a0, t0, t1
     j       emit_word
+
+# emit_branch_auto: a0=0x63, a1=rs1, a2=rs2, a3=f3, a4=offset
+# When 484(s10) flag is set (label target), emits a relaxed branch:
+#   inverted-cond branch +8, then JAL x0 (placeholder with J-type fixup).
+# When flag is clear (numeric target), emits compact B-type via emit_b_inst.
+emit_branch_auto:
+    lw      t5, 484(s10)
+    beqz    t5, emit_b_inst             # compact path: tail-call
+    # Relaxed path: inverted branch skips over a JAL trampoline
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    xori    a3, a3, 1                   # invert branch condition
+    li      a4, 8                       # branch +8 to skip the JAL
+    jal     ra, emit_b_inst             # emit inverted branch
+    li      a0, 0x6F                    # JAL x0, 0 (J-type fixup placeholder)
+    jal     ra, emit_word
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
 
 # ============================================================================
 # record_pcrel_pair: reads next token (symbol name), records 2 fixups for an
@@ -1587,42 +1660,14 @@ do_b:
     sw      a0, 12(sp)                  # rs2
     li      a0, 0                       # slot_type B
     jal     ra, read_br_target
-    mv      t0, a0                      # off
+    mv      a4, a0                      # offset
     lw      ra, 0(sp)
-    lw      a1, 4(sp)
-    lw      a2, 8(sp)
-    lw      a3, 12(sp)
+    lw      a3, 4(sp)                   # f3
+    lw      a1, 8(sp)                   # rs1
+    lw      a2, 12(sp)                  # rs2
     addi    sp, sp, 16
-    # Compose B-type
-    li      t1, 0
-    srli    t2, t0, 12
-    andi    t2, t2, 1
-    slli    t2, t2, 31
-    or      t1, t1, t2
-    srli    t2, t0, 5
-    andi    t2, t2, 0x3F
-    slli    t2, t2, 25
-    or      t1, t1, t2
-    andi    a3, a3, 0x1F
-    slli    t2, a3, 20
-    or      t1, t1, t2
-    andi    a2, a2, 0x1F
-    slli    t2, a2, 15
-    or      t1, t1, t2
-    andi    a1, a1, 7
-    slli    t2, a1, 12
-    or      t1, t1, t2
-    srli    t2, t0, 1
-    andi    t2, t2, 0xF
-    slli    t2, t2, 8
-    or      t1, t1, t2
-    srli    t2, t0, 11
-    andi    t2, t2, 1
-    slli    t2, t2, 7
-    or      t1, t1, t2
-    ori     t1, t1, 0x63
-    mv      a0, t1
-    j       emit_word
+    li      a0, 0x63
+    j       emit_branch_auto
 
 # do_u_lui: rd, imm → (imm<<12)|(rd<<7)|0x37
 do_u_lui:
@@ -1838,34 +1883,14 @@ do_ps_beqz:
     sw      a0, 4(sp)                   # rs
     li      a0, 0                       # slot_type B
     jal     ra, read_br_target
-    mv      t0, a0                      # off
+    mv      a4, a0                      # offset
     lw      ra, 0(sp)
-    lw      a2, 4(sp)                   # rs
+    lw      a1, 4(sp)                   # rs1
     addi    sp, sp, 8
-    # B-type with rs1=a2, rs2=0, f3=0
-    li      t1, 0
-    srli    t2, t0, 12
-    andi    t2, t2, 1
-    slli    t2, t2, 31
-    or      t1, t1, t2
-    srli    t2, t0, 5
-    andi    t2, t2, 0x3F
-    slli    t2, t2, 25
-    or      t1, t1, t2
-    andi    a2, a2, 0x1F
-    slli    t2, a2, 15
-    or      t1, t1, t2
-    srli    t2, t0, 1
-    andi    t2, t2, 0xF
-    slli    t2, t2, 8
-    or      t1, t1, t2
-    srli    t2, t0, 11
-    andi    t2, t2, 1
-    slli    t2, t2, 7
-    or      t1, t1, t2
-    ori     t1, t1, 0x63
-    mv      a0, t1
-    j       emit_word
+    li      a2, 0                       # rs2 = x0
+    li      a3, 0                       # f3 = 0 (beq)
+    li      a0, 0x63
+    j       emit_branch_auto
 
 # do_ps_bnez: rs, target → bne rs, x0, target (f3=1)
 do_ps_bnez:
@@ -1875,35 +1900,14 @@ do_ps_bnez:
     sw      a0, 4(sp)
     li      a0, 0                       # slot_type B
     jal     ra, read_br_target
-    mv      t0, a0
+    mv      a4, a0                      # offset
     lw      ra, 0(sp)
-    lw      a2, 4(sp)
+    lw      a1, 4(sp)                   # rs1
     addi    sp, sp, 8
-    li      t1, 0
-    srli    t2, t0, 12
-    andi    t2, t2, 1
-    slli    t2, t2, 31
-    or      t1, t1, t2
-    srli    t2, t0, 5
-    andi    t2, t2, 0x3F
-    slli    t2, t2, 25
-    or      t1, t1, t2
-    andi    a2, a2, 0x1F
-    slli    t2, a2, 15
-    or      t1, t1, t2
-    lui     t2, 1                       # 0x1000 = f3=1 at bit 12
-    or      t1, t1, t2
-    srli    t2, t0, 1
-    andi    t2, t2, 0xF
-    slli    t2, t2, 8
-    or      t1, t1, t2
-    srli    t2, t0, 11
-    andi    t2, t2, 1
-    slli    t2, t2, 7
-    or      t1, t1, t2
-    ori     t1, t1, 0x63
-    mv      a0, t1
-    j       emit_word
+    li      a2, 0                       # rs2 = x0
+    li      a3, 1                       # f3 = 1 (bne)
+    li      a0, 0x63
+    j       emit_branch_auto
 
 
 # do_ps_bltz: rs, target → blt rs, x0, target (f3=4)
@@ -1914,35 +1918,14 @@ do_ps_bltz:
     sw      a0, 4(sp)
     li      a0, 0
     jal     ra, read_br_target
-    mv      t0, a0
+    mv      a4, a0                      # offset
     lw      ra, 0(sp)
-    lw      a2, 4(sp)
+    lw      a1, 4(sp)                   # rs1
     addi    sp, sp, 8
-    li      t1, 0
-    srli    t2, t0, 12
-    andi    t2, t2, 1
-    slli    t2, t2, 31
-    or      t1, t1, t2
-    srli    t2, t0, 5
-    andi    t2, t2, 0x3F
-    slli    t2, t2, 25
-    or      t1, t1, t2
-    andi    a2, a2, 0x1F
-    slli    t2, a2, 15
-    or      t1, t1, t2
-    li      t2, 0x4000
-    or      t1, t1, t2
-    srli    t2, t0, 1
-    andi    t2, t2, 0xF
-    slli    t2, t2, 8
-    or      t1, t1, t2
-    srli    t2, t0, 11
-    andi    t2, t2, 1
-    slli    t2, t2, 7
-    or      t1, t1, t2
-    ori     t1, t1, 0x63
-    mv      a0, t1
-    j       emit_word
+    li      a2, 0                       # rs2 = x0
+    li      a3, 4                       # f3 = 4 (blt)
+    li      a0, 0x63
+    j       emit_branch_auto
 
 # do_ps_bgez: rs, target → bge rs, x0, target (f3=5)
 do_ps_bgez:
@@ -1952,35 +1935,14 @@ do_ps_bgez:
     sw      a0, 4(sp)
     li      a0, 0
     jal     ra, read_br_target
-    mv      t0, a0
+    mv      a4, a0                      # offset
     lw      ra, 0(sp)
-    lw      a2, 4(sp)
+    lw      a1, 4(sp)                   # rs1
     addi    sp, sp, 8
-    li      t1, 0
-    srli    t2, t0, 12
-    andi    t2, t2, 1
-    slli    t2, t2, 31
-    or      t1, t1, t2
-    srli    t2, t0, 5
-    andi    t2, t2, 0x3F
-    slli    t2, t2, 25
-    or      t1, t1, t2
-    andi    a2, a2, 0x1F
-    slli    t2, a2, 15
-    or      t1, t1, t2
-    li      t2, 0x5000
-    or      t1, t1, t2
-    srli    t2, t0, 1
-    andi    t2, t2, 0xF
-    slli    t2, t2, 8
-    or      t1, t1, t2
-    srli    t2, t0, 11
-    andi    t2, t2, 1
-    slli    t2, t2, 7
-    or      t1, t1, t2
-    ori     t1, t1, 0x63
-    mv      a0, t1
-    j       emit_word
+    li      a2, 0                       # rs2 = x0
+    li      a3, 5                       # f3 = 5 (bge)
+    li      a0, 0x63
+    j       emit_branch_auto
 
 # ============================================================================
 # fixup_pass: scan fixup table, resolve each against symtab, patch according
@@ -2664,6 +2626,9 @@ dpe_have:
     # Read EXPR (multi-token), evaluate
     jal     ra, read_multi_expr
     # Append symtab entry: name (0..15 of sp), value, kind=1
+    addi    t5, s4, 24
+    lw      t6, 492(s10)                # symtab_end
+    bltu    t6, t5, halt_err            # symtab overflow
     mv      t1, sp
     mv      t2, s4
     li      t3, 16
@@ -2745,6 +2710,9 @@ dps_nxt:
     addi    t0, t0, 24
     j       dps_scan
 dps_new:
+    addi    t5, s4, 24
+    lw      t6, 492(s10)                # symtab_end
+    bltu    t6, t5, halt_err            # symtab overflow
     mv      t1, sp
     mv      t2, s4
     li      t3, 16
@@ -2774,6 +2742,8 @@ do_ps_byte:
     addi    sp, sp, -4
     sw      ra, 0(sp)
     jal     ra, read_imm_op
+    lw      t5, 488(s10)                # output_end
+    bgeu    s2, t5, halt_err            # output overflow
     sb      a0, 0(s2)
     addi    s2, s2, 1
     lw      ra, 0(sp)
@@ -2788,6 +2758,9 @@ do_ps_half:
     addi    sp, sp, -4
     sw      ra, 0(sp)
     jal     ra, read_imm_op
+    addi    t6, s2, 2
+    lw      t5, 488(s10)                # output_end
+    bltu    t5, t6, halt_err            # output overflow
     sb      a0, 0(s2)
     srli    a0, a0, 8
     sb      a0, 1(s2)
@@ -2817,6 +2790,9 @@ do_ps_zero:
     sw      ra, 0(sp)
     jal     ra, read_imm_op
     mv      t0, a0
+    add     t5, s2, t0                  # projected end
+    lw      t6, 488(s10)                # output_end
+    bltu    t6, t5, halt_err            # output overflow
 dpz_lp:
     beqz    t0, dpz_done
     sb      x0, 0(s2)
@@ -2843,6 +2819,9 @@ do_ps_align:
     and     t3, t2, t1                  # offset mod align
     beqz    t3, dpal_done
     sub     t3, t0, t3                  # pad count
+    add     t5, s2, t3
+    lw      t6, 488(s10)                # output_end
+    bltu    t6, t5, halt_err            # output overflow
 dpal_lp:
     sb      x0, 0(s2)
     addi    s2, s2, 1
@@ -2867,6 +2846,9 @@ do_ps_balign:
     and     t3, t2, t1                  # offset mod align
     beqz    t3, dpba_done
     sub     t3, a0, t3                  # pad count
+    add     t5, s2, t3
+    lw      t6, 488(s10)                # output_end
+    bltu    t6, t5, halt_err            # output overflow
 dpba_lp:
     sb      x0, 0(s2)
     addi    s2, s2, 1
@@ -2893,6 +2875,18 @@ do_ps_fill:
     mv      t2, a0                      # value
     lw      t0, 4(sp)                   # count
     lw      t1, 8(sp)                   # size
+    # Bounds check: compute total = count * size (via repeated add on size)
+    mv      t5, x0                      # accumulator
+    mv      t6, t1                      # iterate size times
+dpf_mul:
+    beqz    t6, dpf_chk
+    add     t5, t5, t0                  # add count each iteration
+    addi    t6, t6, -1
+    j       dpf_mul
+dpf_chk:
+    add     t5, s2, t5                  # projected end
+    lw      t6, 488(s10)                # output_end
+    bltu    t6, t5, halt_err            # output overflow
 dpf_cnt_lp:
     beqz    t0, dpf_done
     mv      t3, t1                      # bytes this chunk
@@ -2935,6 +2929,8 @@ do_ps_asciz:
     sw      ra, 0(sp)
     jal     ra, read_token
     jal     ra, emit_string_body
+    lw      t5, 488(s10)                # output_end
+    bgeu    s2, t5, halt_err            # output overflow
     sb      x0, 0(s2)
     addi    s2, s2, 1
     lw      ra, 0(sp)
@@ -2966,6 +2962,8 @@ esb_lp:
     lbu     t3, 0(t0)
     li      t4, 0x5C                    # '\'
     beq     t3, t4, esb_esc
+    lw      t5, 488(s10)                # output_end
+    bgeu    s2, t5, halt_err            # output overflow
     sb      t3, 0(s2)
     addi    s2, s2, 1
     addi    t0, t0, 1
@@ -2999,6 +2997,8 @@ esb_r:
 esb_0:
     li      t3, 0
 esb_emit:
+    lw      t5, 488(s10)                # output_end
+    bgeu    s2, t5, halt_err            # output overflow
     sb      t3, 0(s2)
     addi    s2, s2, 1
     addi    t0, t0, 1
@@ -3264,7 +3264,7 @@ do_ps_bgt:
     mv      a4, t3
     lw      ra, 0(sp)
     addi    sp, sp, 12
-    j       emit_b_inst
+    j       emit_branch_auto
 
 # ble rs, rt, L → bge rt, rs, L
 do_ps_ble:
@@ -3284,7 +3284,7 @@ do_ps_ble:
     mv      a4, t3
     lw      ra, 0(sp)
     addi    sp, sp, 12
-    j       emit_b_inst
+    j       emit_branch_auto
 
 # bgtu rs, rt, L → bltu rt, rs, L
 do_ps_bgtu:
@@ -3304,7 +3304,7 @@ do_ps_bgtu:
     mv      a4, t3
     lw      ra, 0(sp)
     addi    sp, sp, 12
-    j       emit_b_inst
+    j       emit_branch_auto
 
 # bleu rs, rt, L → bgeu rt, rs, L
 do_ps_bleu:
@@ -3324,7 +3324,7 @@ do_ps_bleu:
     mv      a4, t3
     lw      ra, 0(sp)
     addi    sp, sp, 12
-    j       emit_b_inst
+    j       emit_branch_auto
 
 # ============================================================================
 # build_local_name: a0=digit (0-9), a1=seq, a2=buf → writes 9 bytes
@@ -3376,6 +3376,9 @@ define_local_label:
     lw      t1, 64(t0)
     addi    t1, t1, 1
     sw      t1, 64(t0)
+    addi    t5, s4, 24
+    lw      t6, 492(s10)                # symtab_end
+    bltu    t6, t5, halt_err            # symtab overflow
     mv      t2, s4
     li      t3, 16
 dll_z:
@@ -3856,6 +3859,8 @@ iml_exp_start:
     mv      t5, t4                      # write ptr
 iml_exp:
     beq     t1, t2, iml_done
+    lw      a2, 500(s10)                # expbuf_end
+    bgeu    t5, a2, halt_err            # expansion buffer overflow
     lbu     t6, 0(t1)
     li      a2, 92                      # '\'
     beq     t6, a2, iml_esc
@@ -3892,6 +3897,9 @@ iml_try_named:
     blt     t6, a2, iml_scan_id
 iml_pass1:
     # Not an identifier start: emit '\' + this char raw
+    addi    a2, t5, 2
+    lw      a3, 500(s10)                # expbuf_end
+    bgeu    a2, a3, halt_err            # expansion buffer overflow
     li      a2, 92
     sb      a2, 0(t5)
     addi    t5, t5, 1
@@ -3990,11 +3998,15 @@ iml_not_found:
     lw      a4, 0(sp)                   # id_start
     lw      a5, 4(sp)                   # id_end
     addi    sp, sp, 16
+    lw      a2, 500(s10)                # expbuf_end
+    bgeu    t5, a2, halt_err            # expansion buffer overflow
     li      a2, 92
     sb      a2, 0(t5)
     addi    t5, t5, 1
 iml_nf_cp:
     beq     a4, a5, iml_nf_done
+    lw      a2, 500(s10)                # expbuf_end
+    bgeu    t5, a2, halt_err            # expansion buffer overflow
     lbu     a2, 0(a4)
     sb      a2, 0(t5)
     addi    t5, t5, 1
@@ -4016,6 +4028,8 @@ iml_argc:
     beqz    a3, iml_argd
     lbu     a4, 0(a2)
     beqz    a4, iml_argd
+    lw      a5, 500(s10)                # expbuf_end
+    bgeu    t5, a5, halt_err            # expansion buffer overflow
     sb      a4, 0(t5)
     addi    t5, t5, 1
     addi    a2, a2, 1
@@ -4040,6 +4054,8 @@ iml_at_lp:
 iml_at_dec:
     addi    a4, a4, 48
 iml_at_w:
+    lw      a5, 500(s10)                # expbuf_end
+    bgeu    t5, a5, halt_err            # expansion buffer overflow
     sb      a4, 0(t5)
     addi    t5, t5, 1
     j       iml_at_lp
@@ -4048,6 +4064,8 @@ iml_at_done:
     j       iml_exp
 iml_done:
     # Append trailing newline so the last body token terminates cleanly.
+    lw      a2, 500(s10)                # expbuf_end
+    bgeu    t5, a2, halt_err            # expansion buffer overflow
     li      a2, 10
     sb      a2, 0(t5)
     addi    t5, t5, 1
