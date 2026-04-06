@@ -95,7 +95,7 @@ mnem_table:
     #          34=ps_seqz, 35=ps_snez, 36=ps_sltz, 37=ps_sgtz,
     #          38=ps_bgt, 39=ps_ble, 40=ps_bgtu, 41=ps_bleu,
     #          42=ps_prologue, 43=ps_epilogue, 44=ps_return,
-    #          45=ps_macro
+    #          45=ps_macro, 48=ps_wfi
     .ascii "add";    .zero 5;  .byte 1, 0, 0x00, 0
     .ascii "sub";    .zero 5;  .byte 1, 0, 0x20, 0
     .ascii "sll";    .zero 5;  .byte 1, 1, 0x00, 0
@@ -170,6 +170,7 @@ mnem_table:
     .ascii ".macro"; .zero 2;  .byte 45, 0, 0, 0
     .ascii "bltz";   .zero 4;  .byte 46, 0, 0, 0
     .ascii "bgez";   .zero 4;  .byte 47, 0, 0, 0
+    .ascii "wfi";    .zero 5;  .byte 48, 0, 0, 0
     .zero 12                                 # terminator (name starts with 0)
 after_mnem_tab:
 
@@ -1607,8 +1608,12 @@ d_c46:
     j       do_ps_bltz
 d_c47:
     li      t0, 47
-    bne     a0, t0, d_cend
+    bne     a0, t0, d_c48
     j       do_ps_bgez
+d_c48:
+    li      t0, 48
+    bne     a0, t0, d_cend
+    j       do_ps_wfi
 d_cend:
     li      a0, 1
     j       halt_err
@@ -3312,6 +3317,12 @@ do_ps_nop:
     li      a3, 0
     li      a4, 0
     j       emit_i_inst
+
+# wfi → 0x10500073
+do_ps_wfi:
+    lui     a0, 0x10500
+    addi    a0, a0, 0x73
+    j       emit_word
 
 # neg rd, rs → sub rd, x0, rs
 do_ps_neg:
