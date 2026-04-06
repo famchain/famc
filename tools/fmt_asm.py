@@ -17,6 +17,21 @@ import sys
 import re
 
 
+COMMENT_COL = 40  # target column for comments (tab stop 5)
+TAB = 8            # tab stop width
+
+
+def tabs_to(col, target):
+    """Return enough tabs to advance from col to at least target."""
+    if col >= target:
+        return '\t'  # at least one tab
+    n = 0
+    while col < target:
+        col = (col // TAB + 1) * TAB
+        n += 1
+    return '\t' * n
+
+
 def is_hex_byte(tok):
     """Check if token is a 2-char hex byte."""
     return len(tok) == 2 and all(c in '0123456789ABCDEFabcdef' for c in tok)
@@ -56,9 +71,9 @@ def format_line(line):
             rest = m.group(2).strip()
             if rest:
                 # Label with trailing instruction (unusual, keep on one line)
-                return label + ' ' + rest + ('\t\t' + comment if comment else '')
+                return label + ' ' + rest + (tabs_to(len(label) + 1 + len(rest), COMMENT_COL) + comment if comment else '')
             elif comment:
-                return label + ' ' + comment
+                return label + tabs_to(len(label), COMMENT_COL) + comment
             else:
                 return label
 
@@ -78,21 +93,19 @@ def format_line(line):
 
     # Check if this is a hex data line (first token is hex byte)
     if is_hex_byte(mnemonic):
-        # Hex data line: rejoin all tokens, keep spacing
         hex_part = code_stripped
         if comment:
-            return '\t' + hex_part + '\t\t' + comment
+            return '\t' + hex_part + tabs_to(8 + len(hex_part), 40) + comment
         return '\t' + hex_part
 
     # Regular instruction
-    if operands and comment:
-        return '\t' + mnemonic + '\t' + operands + '\t\t' + comment
-    elif operands:
-        return '\t' + mnemonic + '\t' + operands
-    elif comment:
-        return '\t' + mnemonic + '\t\t' + comment
-    else:
-        return '\t' + mnemonic
+    # Mnemonic starts at col 8, operands at col 16. Align comments to col 40.
+    instr = '\t' + mnemonic + '\t' + operands if operands else '\t' + mnemonic
+    if comment:
+        # Compute current column: 8 + mnemonic rounded to next tab + operands
+        col = 16 + len(operands) if operands else 8 + len(mnemonic)
+        return instr + tabs_to(col, 40) + comment
+    return instr
 
 
 def main():
@@ -105,9 +118,16 @@ def main():
         lines = sys.stdin.readlines()
         inplace = False
 
-    out = []
+    formatted = []
     for line in lines:
-        out.append(format_line(line))
+        formatted.append(format_line(line))
+
+    # Collapse consecutive blank lines: max 1
+    out = []
+    for line in formatted:
+        if line == '' and out and out[-1] == '':
+            continue  # skip consecutive blank
+        out.append(line)
 
     result = '\n'.join(out)
     if not result.endswith('\n'):

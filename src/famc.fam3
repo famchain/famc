@@ -2,7 +2,8 @@
 _start:
 	lui	t0, 0x10000		# Note 2 tabs (same dist for all comments)
 
-loop:                                                                                          
+# Loop
+loop:
 	lbu	t1, 5(t0)		# lbu Note tab after lbu
 	andi	t1, t1, 0x20
 	beqz	t1, loop		# Repeat
@@ -13,6 +14,6 @@ loop:
 	addi	t1, t1, 0x555
 	sw	t1, 0(t0)
 
-hang: # single space before label
+hang:					# single space before label
 	wfi
-	j       hang
+	j	hang			# ok
