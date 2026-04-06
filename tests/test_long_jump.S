@@ -1,7 +1,7 @@
 # test_long_jump.S — verify branch relaxation works across large gaps.
 #
 # Strategy: place a 8KB .fill block between a branch and its target.
-# This exceeds the ±4KB B-type range, so fam3's branch relaxation must
+# This exceeds the +/-4KB B-type range, so fam3's branch relaxation must
 # kick in (inverted branch + JAL trampoline).
 #
 # On success: prints "OK\n" to UART and poweroffs.
@@ -14,10 +14,10 @@ li      a0, 42
 li      a1, 42
 beq     a0, a1, fwd_target
 
-# If the branch didn't fire, we fall through here → FAIL
+# If the branch didn't fire, we fall through here
 j       fail
 
-.fill   2048, 4, 0                  # 8KB gap (2048 × 4 bytes of zeros)
+.fill   2048, 4, 0                  # 8KB gap
 
 fwd_target:
 

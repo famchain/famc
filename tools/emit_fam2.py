@@ -57,18 +57,15 @@ def convert_directive(stmt):
     """Convert a single GNU as directive to hex bytes. Returns hex string or None."""
     stmt = stmt.strip()
 
-    # .ascii "..."
     m = re.match(r'\.ascii\s+"(.*)"', stmt)
     if m:
         return fmt_hex(string_to_hex(m.group(1)))
 
-    # .zero N
     m = re.match(r'\.zero\s+(\d+)', stmt)
     if m:
         n = int(m.group(1))
         return fmt_hex([0] * n)
 
-    # .byte v1, v2, ...
     m = re.match(r'\.byte\s+(.*)', stmt)
     if m:
         vals = [parse_byte_val(v) for v in m.group(1).split(',')]
@@ -100,15 +97,10 @@ def convert_line(line):
     """Convert a single line from fam3.S to fam2 format."""
     stripped = line.rstrip()
 
-    # Pure blank line
-    if stripped.strip() == '':
+    if stripped.strip() == '' or stripped.lstrip().startswith('#'):
         return stripped
 
-    # Pure comment line (possibly indented)
-    if stripped.lstrip().startswith('#'):
-        return stripped
-
-    # Split off trailing comment (careful not to split inside strings)
+    # Split off trailing comment
     code_part = stripped
     comment_part = ''
     in_string = False
@@ -120,7 +112,6 @@ def convert_line(line):
             comment_part = '  ' + stripped[i:]
             break
 
-    # Determine indentation
     indent = ''
     for c in code_part:
         if c in (' ', '\t'):
@@ -128,10 +119,9 @@ def convert_line(line):
         else:
             break
 
-    # Split by semicolons (for multi-directive lines like .ascii "x"; .zero 3; .byte 1,2)
+    # Split by semicolons (for multi-directive lines)
     stmts = split_statements(code_part)
 
-    # Check if ALL statements are directives
     hex_parts = []
     all_directives = True
     for stmt in stmts:
@@ -145,7 +135,6 @@ def convert_line(line):
     if all_directives and hex_parts:
         return indent + '  '.join(hex_parts) + comment_part
 
-    # Not all directives — pass through as-is (instruction, label, etc.)
     return stripped
 
 
