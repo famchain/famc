@@ -1112,12 +1112,10 @@ rbt_local_build:
     sub     a2, s2, s1
     lw      a3, 20(sp)                  # slot_type (saved pre-16-push at 4(sp), now 20)
     bnez    a3, rbt_local_nob           # non-B-type: record as-is
-    # B-type relaxation: record J-type fixup at offset+4
+    # B-type → always relax: record J-type fixup at offset+4
     addi    a2, a2, 4                   # patch the JAL (2nd instruction)
     li      a3, 1                       # J-type slot
     jal     ra, record_fixup_arg
-    li      t0, 1
-    sw      t0, 484(s10)                # set relaxed-branch flag
     addi    sp, sp, 16
     li      a0, 0
     j       rbt_done
@@ -1143,7 +1141,6 @@ rbt_not_local:
     li      t1, 123                     # 'z'+1
     blt     t0, t1, rbt_label
 rbt_imm:
-    sw      x0, 484(s10)               # clear relaxed-branch flag
     mv      a0, s10
     mv      a1, s0
     jal     ra, parse_imm
@@ -1156,13 +1153,11 @@ rbt_label:
     j       halt_err
     lw      a1, 4(sp)                   # slot_type
     bnez    a1, rbt_label_nob           # non-B-type: record as-is
-    # B-type relaxation: record J-type fixup at offset+4 (for JAL trampoline)
+    # B-type → always relax: record J-type fixup at offset+4 (for JAL trampoline)
     sub     a0, s2, s1
     addi    a0, a0, 4                   # patch the JAL (2nd instruction)
     li      a1, 1                       # J-type slot
     jal     ra, record_fixup
-    li      t0, 1
-    sw      t0, 484(s10)                # set relaxed-branch flag
     li      a0, 0
     j       rbt_done
 rbt_label_nob:
@@ -1400,9 +1395,8 @@ emit_b_inst:
 #   inverted-cond branch +8, then JAL x0 (placeholder with J-type fixup).
 # When flag is clear (numeric target), emits compact B-type via emit_b_inst.
 emit_branch_auto:
-    lw      t5, 484(s10)
-    beqz    t5, emit_b_inst             # compact path: tail-call
-    # Relaxed path: inverted branch skips over a JAL trampoline
+    # Always emit relaxed form: inverted branch +8, then JAL trampoline.
+    # The fixup for the label target was recorded as J-type by read_br_target.
     addi    sp, sp, -4
     sw      ra, 0(sp)
     xori    a3, a3, 1                   # invert branch condition

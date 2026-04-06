@@ -77,6 +77,19 @@ def format_line(line):
             else:
                 return label
 
+    # Definition directives: no indent (like labels)
+    DEFS = ('.equ', '.set', '.macro')
+    for d in DEFS:
+        if code_stripped.startswith(d + ' ') or code_stripped.startswith(d + '\t'):
+            parts = code_stripped.split(None, 1)
+            directive = parts[0]
+            args = parts[1] if len(parts) > 1 else ''
+            line_out = directive + '\t' + args if args else directive
+            if comment:
+                col = ((len(directive) // TAB) + 1) * TAB + len(args) if args else len(directive)
+                return line_out + tabs_to(col, COMMENT_COL) + comment
+            return line_out
+
     # Instruction or hex data line
     if not code_stripped:
         # Whitespace-only line with comment

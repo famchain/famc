@@ -1,6 +1,8 @@
+.equ	UART, 0x10000
+
 # Note labels not indented
 _start:
-	lui	t0, 0x10000		# Note 2 tabs (same dist for all comments)
+	lui	t0, UART		# Note 2 tabs (same dist for all comments)
 
 # Loop
 loop:
