@@ -1,0 +1,4067 @@
+# fam3.S — RV32I mnemonic assembler (fourth-stage bootstrap) — skeleton.
+#
+# Reads text from UART (terminated by EOT = 0x04), emits a RISC-V binary
+# back over UART, then poweroffs.
+#
+# This is the skeleton stage: fam2 minus hex passthrough. Subsequent tasks
+# layer on fam3 features (expressions, .equ/.set, data directives, %hi/%lo,
+# more pseudos, local labels, macros, built-in prologue/epilogue).
+#
+# Grammar:
+#   # ... \n                    comment (to end of line)
+#   whitespace / comma          token separators (interchangeable)
+#   name:                       label definition (name <= 16 ASCII chars,
+#                               [A-Za-z_][A-Za-z0-9_]*)
+#   mnemonic operands           RV32I instruction or pseudo
+#
+# Supported mnemonics (RV32I base):
+#   add sub and or xor sll srl sra slt sltu
+#   addi andi ori xori slti sltiu slli srli srai
+#   lb lh lw lbu lhu
+#   sb sh sw
+#   beq bne blt bge bltu bgeu
+#   jal jalr lui auipc
+# Pseudos:
+#   li mv j ret beqz bnez
+#
+# Operands:
+#   registers:   x0..x31 or ABI (zero, ra, sp, gp, tp, t0-t6, s0-s11, fp, a0-a7)
+#   immediates:  decimal (-42) or 0xHEX
+#   memory:      imm(rs)
+#   branch tgt:  label name OR numeric offset
+#
+# Fixups: label references are only valid in B-type and J-type target slots.
+# They are recorded in a fixup table and resolved after EOT (same mechanism
+# as fam1). Labels may be defined before or after first reference.
+#
+# Register convention:
+#   s0  = token length          s1  = output buf base
+#   s2  = output write ptr      s3  = symtab base
+#   s4  = symtab write ptr      s5  = UART base (0x10000000)
+#   s6  = 10 (constant)         s7  = fixup base
+#   s8  = fixup write ptr       s9  = mnem_table base
+#   s10 = token buf base        s11 = reg_table base
+#   sp  = descending stack      t0-t6, a0-a7, ra = scratch
+#
+# Memory layout (relative to auipc at init):
+#   +0x08000   output buffer (32 KB — kept well clear of fam3's ~10 KB code.
+#              symtab at +0x10000 bounds output to 32 KB headroom)
+#   +0x10000   symtab (24-byte entries: 16B padded name + 4B value + 4B kind,
+#              kind=0 for code labels, 1 for .equ/.set constants)
+#   +0x20000   fixup tab (24-byte entries: 16B padded name + 4B patch offset +
+#              4B slot type)
+#              slot_type: 0=B (PC-rel 12-bit signed), 1=J (PC-rel 20-bit signed),
+#                         2=U_hi20 (absolute upper 20 of symbol),
+#                         3=I_lo12 (absolute low 12 signed of symbol),
+#                         4=raw_word, 5=raw_half, 6=raw_byte (absolute symbol),
+#                         7=U_hi20_pcrel (delta = sym-patch_PC),
+#                         8=I_lo12_pcrel_prev (delta = sym-(patch_PC-4), uses
+#                           the previous auipc's PC for pcrel)
+#   +0x30000   token buffer (32 bytes, zero-padded)
+#   +0x40000   stack top
+#
+# Calling convention inside this program:
+#   - args in a0..a7, returns in a0 (and a1 for two-value returns)
+#   - s-regs are global invariants; subroutines must not clobber them
+#   - nested-call functions save/restore ra on stack
+
+# ============================================================================
+# Entry + static tables
+# ============================================================================
+
+_start:
+    jal     t0, after_mnem_tab          # t0 = &mnem_table (byte after jal)
+mnem_table:
+    # Each entry: 8-byte padded name + class[1] + f3[1] + f7[1] + pad[1] = 12B
+    # Classes: 1=R, 2=I_arith, 3=I_shift, 4=I_load, 5=S, 6=B,
+    #          7=U_lui, 8=U_auipc, 9=J_jal, 10=I_jalr,
+    #          11=ps_li, 12=ps_mv, 13=ps_j, 14=ps_ret, 15=ps_beqz, 16=ps_bnez,
+    #          17=ps_equ, 18=ps_set,
+    #          19=ps_byte, 20=ps_half, 21=ps_word,
+    #          22=ps_ascii, 23=ps_asciz, 24=ps_zero,
+    #          25=ps_align, 26=ps_balign, 27=ps_fill,
+    #          28=ps_lla, 29=ps_call, 30=ps_tail,
+    #          31=ps_nop, 32=ps_neg, 33=ps_not,
+    #          34=ps_seqz, 35=ps_snez, 36=ps_sltz, 37=ps_sgtz,
+    #          38=ps_bgt, 39=ps_ble, 40=ps_bgtu, 41=ps_bleu,
+    #          42=ps_prologue, 43=ps_epilogue, 44=ps_return,
+    #          45=ps_macro
+    .ascii "add";    .zero 5;  .byte 1, 0, 0x00, 0
+    .ascii "sub";    .zero 5;  .byte 1, 0, 0x20, 0
+    .ascii "sll";    .zero 5;  .byte 1, 1, 0x00, 0
+    .ascii "slt";    .zero 5;  .byte 1, 2, 0x00, 0
+    .ascii "sltu";   .zero 4;  .byte 1, 3, 0x00, 0
+    .ascii "xor";    .zero 5;  .byte 1, 4, 0x00, 0
+    .ascii "srl";    .zero 5;  .byte 1, 5, 0x00, 0
+    .ascii "sra";    .zero 5;  .byte 1, 5, 0x20, 0
+    .ascii "or";     .zero 6;  .byte 1, 6, 0x00, 0
+    .ascii "and";    .zero 5;  .byte 1, 7, 0x00, 0
+    .ascii "addi";   .zero 4;  .byte 2, 0, 0, 0
+    .ascii "slti";   .zero 4;  .byte 2, 2, 0, 0
+    .ascii "sltiu";  .zero 3;  .byte 2, 3, 0, 0
+    .ascii "xori";   .zero 4;  .byte 2, 4, 0, 0
+    .ascii "ori";    .zero 5;  .byte 2, 6, 0, 0
+    .ascii "andi";   .zero 4;  .byte 2, 7, 0, 0
+    .ascii "slli";   .zero 4;  .byte 3, 1, 0x00, 0
+    .ascii "srli";   .zero 4;  .byte 3, 5, 0x00, 0
+    .ascii "srai";   .zero 4;  .byte 3, 5, 0x20, 0
+    .ascii "lb";     .zero 6;  .byte 4, 0, 0, 0
+    .ascii "lh";     .zero 6;  .byte 4, 1, 0, 0
+    .ascii "lw";     .zero 6;  .byte 4, 2, 0, 0
+    .ascii "lbu";    .zero 5;  .byte 4, 4, 0, 0
+    .ascii "lhu";    .zero 5;  .byte 4, 5, 0, 0
+    .ascii "sb";     .zero 6;  .byte 5, 0, 0, 0
+    .ascii "sh";     .zero 6;  .byte 5, 1, 0, 0
+    .ascii "sw";     .zero 6;  .byte 5, 2, 0, 0
+    .ascii "beq";    .zero 5;  .byte 6, 0, 0, 0
+    .ascii "bne";    .zero 5;  .byte 6, 1, 0, 0
+    .ascii "blt";    .zero 5;  .byte 6, 4, 0, 0
+    .ascii "bge";    .zero 5;  .byte 6, 5, 0, 0
+    .ascii "bltu";   .zero 4;  .byte 6, 6, 0, 0
+    .ascii "bgeu";   .zero 4;  .byte 6, 7, 0, 0
+    .ascii "lui";    .zero 5;  .byte 7, 0, 0, 0
+    .ascii "auipc";  .zero 3;  .byte 8, 0, 0, 0
+    .ascii "jal";    .zero 5;  .byte 9, 0, 0, 0
+    .ascii "jalr";   .zero 4;  .byte 10, 0, 0, 0
+    .ascii "li";     .zero 6;  .byte 11, 0, 0, 0
+    .ascii "mv";     .zero 6;  .byte 12, 0, 0, 0
+    .ascii "j";      .zero 7;  .byte 13, 0, 0, 0
+    .ascii "ret";    .zero 5;  .byte 14, 0, 0, 0
+    .ascii "beqz";   .zero 4;  .byte 15, 0, 0, 0
+    .ascii "bnez";   .zero 4;  .byte 16, 0, 0, 0
+    .ascii ".equ";   .zero 4;  .byte 17, 0, 0, 0
+    .ascii ".set";   .zero 4;  .byte 18, 0, 0, 0
+    .ascii ".byte";  .zero 3;  .byte 19, 0, 0, 0
+    .ascii ".half";  .zero 3;  .byte 20, 0, 0, 0
+    .ascii ".word";  .zero 3;  .byte 21, 0, 0, 0
+    .ascii ".ascii"; .zero 2;  .byte 22, 0, 0, 0
+    .ascii ".asciz"; .zero 2;  .byte 23, 0, 0, 0
+    .ascii ".zero";  .zero 3;  .byte 24, 0, 0, 0
+    .ascii ".align"; .zero 2;  .byte 25, 0, 0, 0
+    .ascii ".balign";.zero 1;  .byte 26, 0, 0, 0
+    .ascii ".fill";  .zero 3;  .byte 27, 0, 0, 0
+    .ascii "lla";    .zero 5;  .byte 28, 0, 0, 0
+    .ascii "call";   .zero 4;  .byte 29, 0, 0, 0
+    .ascii "tail";   .zero 4;  .byte 30, 0, 0, 0
+    .ascii "nop";    .zero 5;  .byte 31, 0, 0, 0
+    .ascii "neg";    .zero 5;  .byte 32, 0, 0, 0
+    .ascii "not";    .zero 5;  .byte 33, 0, 0, 0
+    .ascii "seqz";   .zero 4;  .byte 34, 0, 0, 0
+    .ascii "snez";   .zero 4;  .byte 35, 0, 0, 0
+    .ascii "sltz";   .zero 4;  .byte 36, 0, 0, 0
+    .ascii "sgtz";   .zero 4;  .byte 37, 0, 0, 0
+    .ascii "bgt";    .zero 5;  .byte 38, 0, 0, 0
+    .ascii "ble";    .zero 5;  .byte 39, 0, 0, 0
+    .ascii "bgtu";   .zero 4;  .byte 40, 0, 0, 0
+    .ascii "bleu";   .zero 4;  .byte 41, 0, 0, 0
+    .ascii "prologue";         .byte 42, 0, 0, 0
+    .ascii "epilogue";         .byte 43, 0, 0, 0
+    .ascii "return"; .zero 2;  .byte 44, 0, 0, 0
+    .ascii ".macro"; .zero 2;  .byte 45, 0, 0, 0
+    .ascii "bltz";   .zero 4;  .byte 46, 0, 0, 0
+    .ascii "bgez";   .zero 4;  .byte 47, 0, 0, 0
+    .zero 12                                 # terminator (name starts with 0)
+after_mnem_tab:
+
+    jal     t1, after_reg_tab           # t1 = &reg_table
+reg_table:
+    # Each entry: 4-byte padded name + 4-byte reg number (LE) = 8 bytes
+    .ascii "zero";            .byte 0, 0, 0, 0
+    .ascii "ra";   .zero 2;   .byte 1, 0, 0, 0
+    .ascii "sp";   .zero 2;   .byte 2, 0, 0, 0
+    .ascii "gp";   .zero 2;   .byte 3, 0, 0, 0
+    .ascii "tp";   .zero 2;   .byte 4, 0, 0, 0
+    .ascii "t0";   .zero 2;   .byte 5, 0, 0, 0
+    .ascii "t1";   .zero 2;   .byte 6, 0, 0, 0
+    .ascii "t2";   .zero 2;   .byte 7, 0, 0, 0
+    .ascii "s0";   .zero 2;   .byte 8, 0, 0, 0
+    .ascii "fp";   .zero 2;   .byte 8, 0, 0, 0
+    .ascii "s1";   .zero 2;   .byte 9, 0, 0, 0
+    .ascii "a0";   .zero 2;   .byte 10, 0, 0, 0
+    .ascii "a1";   .zero 2;   .byte 11, 0, 0, 0
+    .ascii "a2";   .zero 2;   .byte 12, 0, 0, 0
+    .ascii "a3";   .zero 2;   .byte 13, 0, 0, 0
+    .ascii "a4";   .zero 2;   .byte 14, 0, 0, 0
+    .ascii "a5";   .zero 2;   .byte 15, 0, 0, 0
+    .ascii "a6";   .zero 2;   .byte 16, 0, 0, 0
+    .ascii "a7";   .zero 2;   .byte 17, 0, 0, 0
+    .ascii "s2";   .zero 2;   .byte 18, 0, 0, 0
+    .ascii "s3";   .zero 2;   .byte 19, 0, 0, 0
+    .ascii "s4";   .zero 2;   .byte 20, 0, 0, 0
+    .ascii "s5";   .zero 2;   .byte 21, 0, 0, 0
+    .ascii "s6";   .zero 2;   .byte 22, 0, 0, 0
+    .ascii "s7";   .zero 2;   .byte 23, 0, 0, 0
+    .ascii "s8";   .zero 2;   .byte 24, 0, 0, 0
+    .ascii "s9";   .zero 2;   .byte 25, 0, 0, 0
+    .ascii "s10";  .zero 1;   .byte 26, 0, 0, 0
+    .ascii "s11";  .zero 1;   .byte 27, 0, 0, 0
+    .ascii "t3";   .zero 2;   .byte 28, 0, 0, 0
+    .ascii "t4";   .zero 2;   .byte 29, 0, 0, 0
+    .ascii "t5";   .zero 2;   .byte 30, 0, 0, 0
+    .ascii "t6";   .zero 2;   .byte 31, 0, 0, 0
+    .zero 8                                 # terminator
+after_reg_tab:
+
+# ============================================================================
+# Init
+# ============================================================================
+
+    mv      s9, t0                      # mnem_table base
+    mv      s11, t1                     # reg_table base
+    li      s6, 10
+    lui     s5, 0x10000                 # UART base
+    auipc   a0, 0                       # a0 = PC base for data regions
+    lui     t2, 8
+    add     s1, a0, t2                  # output buf  = PC + 0x8000
+    mv      s2, s1
+    lui     t2, 0x10
+    add     s3, a0, t2                  # symtab      = PC + 0x10000
+    mv      s4, s3
+    lui     t2, 0x20
+    add     s7, a0, t2                  # fixup tab   = PC + 0x20000
+    mv      s8, s7
+    lui     t2, 0x30
+    add     s10, a0, t2                 # token buf   = PC + 0x30000
+    sb      x0, 32(s10)                 # sticky EOT flag at token_buf+32
+    # Zero counters, frame depth, macro globals, eol/pushback/pending flags
+    addi    t2, s10, 64
+    addi    t3, s10, 484
+ll_cnt_z:
+    sw      x0, 0(t2)
+    addi    t2, t2, 4
+    bne     t2, t3, ll_cnt_z
+    lui     t2, 0x40
+    add     sp, a0, t2                  # stack top   = PC + 0x40000
+    j       main_loop
+
+# ============================================================================
+# Main loop
+# ============================================================================
+
+main_loop:
+    jal     ra, read_token
+    # s0 = token length. Sticky EOT flag at 32(s10) (set by read_token).
+    beqz    s0, ml_post
+
+    # Check if last char is ':' → label definition
+    add     t0, s10, s0
+    lbu     t1, -1(t0)
+    li      t2, 0x3A
+    beq     t1, t2, ml_label
+    j       ml_mnem
+
+ml_label:
+    # Numeric local label? (len==2, first char 0-9)
+    li      t2, 2
+    bne     s0, t2, ml_named_label
+    lbu     t0, 0(s10)
+    li      t1, 48
+    blt     t0, t1, ml_named_label
+    li      t1, 58
+    bge     t0, t1, ml_named_label
+    addi    a0, t0, -48                 # digit
+    jal     ra, define_local_label
+    j       ml_post
+ml_named_label:
+    jal     ra, define_label
+    j       ml_post
+
+ml_mnem:
+    jal     ra, find_mnem
+    li      t0, -1
+    beq     a0, t0, ml_try_macro
+    jal     ra, dispatch
+    j       ml_post
+ml_try_macro:
+    mv      a0, s10
+    mv      a1, s0
+    jal     ra, find_macro
+    li      t0, -1
+    beq     a0, t0, halt_err
+    jal     ra, invoke_macro
+
+ml_post:
+    lbu     t0, 32(s10)
+    bnez    t0, finish_all
+    j       main_loop
+
+# ============================================================================
+# Finish: fixup pass + dump + poweroff
+# ============================================================================
+
+finish_all:
+    jal     ra, fixup_pass
+    jal     ra, dump_output
+    # fall through to powoff
+powoff:
+    lui     s5, 0x100
+    lui     t0, 5
+    addi    t0, t0, 0x555
+    sw      t0, 0(s5)
+powoff_hang:
+    j       powoff_hang
+
+halt_err:
+    # Emit "E\n" to UART so errors are visible (not silently exited).
+    # s5 still holds UART base (0x10000000) until we overwrite it below.
+    li      t0, 69
+    jal     ra, wrch
+    li      t0, 10
+    jal     ra, wrch
+    lui     s5, 0x100
+    lui     t0, 5
+    addi    t0, t0, 0x555
+    sw      t0, 0(s5)
+halt_err_hang:
+    j       halt_err_hang
+
+# ============================================================================
+# UART primitives
+# ============================================================================
+
+rdch:
+    # No saves. Reads one char into t1. If input_flag (456(s10)) is set,
+    # reads from expansion buffer at input_ptr (460) up to input_end (464),
+    # resetting flag on exhaustion.
+    lw      t5, 456(s10)
+    beqz    t5, rdch_uart
+    lw      t5, 460(s10)
+    lw      t6, 464(s10)
+    beq     t5, t6, rdch_exh
+    lbu     t1, 0(t5)
+    addi    t5, t5, 1
+    sw      t5, 460(s10)
+    ret
+rdch_exh:
+    sw      x0, 456(s10)
+rdch_uart:
+    lbu     t5, 32(s10)                 # sticky EOT flag
+    bnez    t5, halt_err                # re-read after EOT → error, don't hang
+    lbu     t5, 5(s5)
+    andi    t5, t5, 1
+    beqz    t5, rdch_uart
+    lbu     t1, 0(s5)
+    ret
+
+wrch:
+    # Input: t0 = byte. No saves.
+    lbu     t5, 5(s5)
+    andi    t5, t5, 0x20
+    beqz    t5, wrch
+    sb      t0, 0(s5)
+    ret
+
+# ============================================================================
+# read_token: reads the next whitespace/comma-delimited token.
+# On entry: nothing.
+# On exit: s0 = token length (0..31), a0 = 1 if EOT seen else 0.
+# Token bytes in buffer at s10, zero-padded to 32 bytes.
+# Halts if token length would exceed 31.
+# ============================================================================
+
+read_token:
+    # Pushback: if active, clear flag and return with existing s10/s0.
+    lw      t0, 476(s10)
+    beqz    t0, rt_entry
+    sw      x0, 476(s10)
+    ret
+rt_entry:
+    # Transfer pending_nl → eol_flag (newline seen at end of prev token).
+    lw      t0, 480(s10)
+    sw      t0, 472(s10)
+    sw      x0, 480(s10)
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    li      s0, 0
+    # Zero token buffer
+    mv      t0, s10
+    addi    t2, s10, 32
+rt_zero:
+    sb      x0, 0(t0)
+    addi    t0, t0, 1
+    bne     t0, t2, rt_zero
+rt_skip:
+    jal     ra, rdch
+    li      t0, 4
+    beq     t1, t0, rt_eot
+    li      t0, 0x23                    # '#'
+    bne     t1, t0, rt_skip_not_hash
+rt_com:
+    jal     ra, rdch
+    li      t0, 4
+    beq     t1, t0, rt_eot
+    beq     t1, s6, rt_com_eol
+    j       rt_com
+rt_com_eol:
+    li      t0, 1
+    sw      t0, 472(s10)
+    j       rt_skip
+rt_skip_not_hash:
+    bne     t1, s6, rt_skip_not_nl
+    li      t0, 1
+    sw      t0, 472(s10)
+    j       rt_skip
+rt_skip_not_nl:
+    li      t0, 0x2C                    # ','
+    beq     t1, t0, rt_skip
+    li      t0, 33
+    blt     t1, t0, rt_skip             # whitespace/control
+    li      t0, 0x22                    # '"' → quoted-string token
+    beq     t1, t0, rt_str
+rt_collect:
+    add     t0, s10, s0
+    sb      t1, 0(t0)
+    addi    s0, s0, 1
+    li      t0, 32
+    bge     s0, t0, halt_err
+    jal     ra, rdch
+    li      t0, 4
+    beq     t1, t0, rt_eot
+    li      t0, 0x23
+    beq     t1, t0, rt_com_post
+    li      t0, 0x2C
+    beq     t1, t0, rt_done
+    li      t0, 33
+    blt     t1, t0, rt_coll_wsterm
+    j       rt_collect
+rt_coll_wsterm:
+    beq     t1, s6, rt_coll_nl
+    j       rt_done
+rt_coll_nl:
+    li      t0, 1
+    sw      t0, 480(s10)                # pending_nl (for NEXT read's eol_flag)
+    j       rt_done
+rt_com_post:
+    jal     ra, rdch
+    li      t0, 4
+    beq     t1, t0, rt_eot
+    beq     t1, s6, rt_comp_nl
+    j       rt_com_post
+rt_comp_nl:
+    li      t0, 1
+    sw      t0, 480(s10)                # pending_nl
+    j       rt_done
+# Quoted-string token: append opening '"', then read chars until matching '"'.
+# A backslash escapes the next char (passes through both raw — escape
+# interpretation happens later in .ascii/.asciz). EOT inside string = error.
+rt_str:
+    add     t0, s10, s0
+    sb      t1, 0(t0)
+    addi    s0, s0, 1
+    li      t0, 32
+    bge     s0, t0, halt_err
+rt_str_lp:
+    jal     ra, rdch
+    li      t0, 4
+    beq     t1, t0, halt_err            # EOT mid-string
+    li      t0, 0x5C                    # '\'
+    beq     t1, t0, rt_str_bs
+    add     t0, s10, s0
+    sb      t1, 0(t0)
+    addi    s0, s0, 1
+    li      t0, 32
+    bge     s0, t0, halt_err
+    li      t0, 0x22                    # closing '"'
+    beq     t1, t0, rt_done
+    j       rt_str_lp
+rt_str_bs:
+    # append '\' then next char unconditionally
+    add     t0, s10, s0
+    sb      t1, 0(t0)
+    addi    s0, s0, 1
+    li      t0, 32
+    bge     s0, t0, halt_err
+    jal     ra, rdch
+    li      t0, 4
+    beq     t1, t0, halt_err
+    add     t0, s10, s0
+    sb      t1, 0(t0)
+    addi    s0, s0, 1
+    li      t0, 32
+    bge     s0, t0, halt_err
+    j       rt_str_lp
+rt_eot:
+    li      t0, 1
+    sb      t0, 32(s10)                 # set sticky EOT flag
+rt_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# find_mnem: token in buf at s10 (zero-padded).
+# Returns: a0 = class, a1 = f3, a2 = f7, or a0 = -1 if not found.
+# ============================================================================
+
+find_mnem:
+    mv      t0, s9
+fm_next:
+    lbu     t1, 0(t0)
+    beqz    t1, fm_notfound
+    mv      t2, s10
+    mv      t3, t0
+    li      t4, 8
+fm_cmp:
+    lbu     t5, 0(t2)
+    lbu     t6, 0(t3)
+    bne     t5, t6, fm_skip
+    addi    t2, t2, 1
+    addi    t3, t3, 1
+    addi    t4, t4, -1
+    bnez    t4, fm_cmp
+    lbu     a0, 8(t0)
+    lbu     a1, 9(t0)
+    lbu     a2, 10(t0)
+    ret
+fm_skip:
+    addi    t0, t0, 12
+    j       fm_next
+fm_notfound:
+    li      a0, -1
+    ret
+
+# ============================================================================
+# parse_reg: a0 = ptr, a1 = len → a0 = reg num (0..31) or -1
+# ============================================================================
+
+parse_reg:
+    mv      t0, a0
+    mv      t1, a1
+    beqz    t1, pr_bad
+    lbu     t2, 0(t0)
+    li      t3, 120                     # 'x'
+    bne     t2, t3, pr_abi
+    # xN form: length 2 or 3
+    li      t3, 2
+    beq     t1, t3, pr_x1
+    li      t3, 3
+    beq     t1, t3, pr_x2
+    j       pr_bad
+pr_x1:
+    lbu     t2, 1(t0)
+    addi    t2, t2, -48
+    bltz    t2, pr_bad
+    li      t3, 10
+    bge     t2, t3, pr_bad
+    mv      a0, t2
+    ret
+pr_x2:
+    lbu     t2, 1(t0)
+    addi    t2, t2, -48
+    bltz    t2, pr_bad
+    li      t3, 10
+    bge     t2, t3, pr_bad
+    lbu     t4, 2(t0)
+    addi    t4, t4, -48
+    bltz    t4, pr_bad
+    bge     t4, t3, pr_bad
+    slli    t5, t2, 3
+    slli    t6, t2, 1
+    add     t5, t5, t6
+    add     a0, t5, t4
+    li      t3, 32
+    bge     a0, t3, pr_bad
+    ret
+pr_abi:
+    # ABI names are 2-4 chars. Longer input can't match.
+    li      t2, 5
+    bge     t1, t2, pr_bad
+    beqz    t1, pr_bad
+    mv      t2, s11
+pr_a_next:
+    lbu     t3, 0(t2)
+    beqz    t3, pr_bad
+    mv      t4, t0
+    mv      t5, t2
+    mv      t6, t1                      # remaining len
+pr_a_cmp:
+    lbu     a0, 0(t4)
+    lbu     a2, 0(t5)
+    bne     a0, a2, pr_a_skip
+    addi    t4, t4, 1
+    addi    t5, t5, 1
+    addi    t6, t6, -1
+    bnez    t6, pr_a_cmp
+    # Matched first `t1` bytes. Now ensure entry bytes at positions t1..3 are null.
+    li      t6, 4
+    sub     t6, t6, t1
+    beqz    t6, pr_a_found
+pr_a_padchk:
+    lbu     a0, 0(t5)
+    bnez    a0, pr_a_skip
+    addi    t5, t5, 1
+    addi    t6, t6, -1
+    bnez    t6, pr_a_padchk
+pr_a_found:
+    lbu     a0, 4(t2)
+    ret
+pr_a_skip:
+    addi    t2, t2, 8
+    j       pr_a_next
+pr_bad:
+    li      a0, -1
+    ret
+
+# ============================================================================
+# parse_imm: a0 = ptr, a1 = len → a0 = value, halts on error
+# ============================================================================
+
+parse_imm:
+    mv      t0, a0
+    mv      t1, a1
+    li      t2, 1                       # sign
+    beqz    t1, pi_bad
+    lbu     t3, 0(t0)
+    li      t4, 45                      # '-'
+    bne     t3, t4, pi_maybe_plus
+    li      t2, -1
+    addi    t0, t0, 1
+    addi    t1, t1, -1
+    j       pi_after_sign
+pi_maybe_plus:
+    li      t4, 43                      # '+'
+    bne     t3, t4, pi_after_sign
+    addi    t0, t0, 1
+    addi    t1, t1, -1
+pi_after_sign:
+    beqz    t1, pi_bad
+    li      t4, 2
+    blt     t1, t4, pi_decimal
+    lbu     t3, 0(t0)
+    li      t4, 48                      # '0'
+    bne     t3, t4, pi_decimal
+    lbu     t3, 1(t0)
+    li      t4, 120                     # 'x'
+    beq     t3, t4, pi_hex_begin
+    li      t4, 88                      # 'X'
+    bne     t3, t4, pi_decimal
+pi_hex_begin:
+    addi    t0, t0, 2
+    addi    t1, t1, -2
+    beqz    t1, pi_bad
+    li      a0, 0
+pi_hex_lp:
+    beqz    t1, pi_done
+    lbu     t3, 0(t0)
+    addi    t4, t3, -48                 # try 0-9
+    li      t5, 10
+    blt     t4, t5, pi_h_ok
+    addi    t4, t3, -55                 # try A-F
+    li      t5, 10
+    blt     t4, t5, pi_bad
+    li      t5, 16
+    blt     t4, t5, pi_h_ok
+    addi    t4, t3, -87                 # try a-f
+    li      t5, 10
+    blt     t4, t5, pi_bad
+    li      t5, 16
+    blt     t4, t5, pi_h_ok
+    j       pi_bad
+pi_h_ok:
+    slli    a0, a0, 4
+    or      a0, a0, t4
+    addi    t0, t0, 1
+    addi    t1, t1, -1
+    j       pi_hex_lp
+pi_decimal:
+    li      a0, 0
+    beqz    t1, pi_bad
+pi_dec_lp:
+    beqz    t1, pi_done
+    lbu     t3, 0(t0)
+    addi    t3, t3, -48
+    bltz    t3, pi_bad
+    li      t4, 10
+    bge     t3, t4, pi_bad
+    slli    t4, a0, 3
+    slli    t5, a0, 1
+    add     t4, t4, t5
+    add     a0, t4, t3
+    addi    t0, t0, 1
+    addi    t1, t1, -1
+    j       pi_dec_lp
+pi_done:
+    li      t3, 1
+    beq     t2, t3, pi_ret
+    sub     a0, x0, a0
+pi_ret:
+    ret
+pi_bad:
+    j       halt_err
+
+# ============================================================================
+# parse_mem: a0 = ptr, a1 = len → a0 = imm, a1 = reg. Halts on error.
+# Expects token of form imm(rs).
+# ============================================================================
+
+parse_mem:
+    addi    sp, sp, -20
+    sw      ra, 0(sp)
+    sw      a0, 4(sp)
+    sw      a1, 8(sp)
+    mv      t0, a0
+    mv      t1, a1
+    li      t2, 0
+    li      t3, 40                      # '('
+pm_scan:
+    bge     t2, t1, pm_bad
+    add     t4, t0, t2
+    lbu     t5, 0(t4)
+    beq     t5, t3, pm_found
+    addi    t2, t2, 1
+    j       pm_scan
+pm_found:
+    sw      t2, 12(sp)
+    mv      a0, t0
+    add     a1, t0, t2                  # end ptr = start + paren offset
+    jal     ra, eval_expr               # a0=value, a2=new_ptr, a1=end preserved
+    bne     a2, a1, pm_bad
+    sw      a0, 16(sp)
+    lw      t0, 4(sp)
+    lw      t1, 8(sp)
+    lw      t2, 12(sp)
+    addi    t3, t1, -1
+    add     t4, t0, t3
+    lbu     t5, 0(t4)
+    li      t6, 41                      # ')'
+    bne     t5, t6, pm_bad
+    add     a0, t0, t2
+    addi    a0, a0, 1
+    sub     a1, t1, t2
+    addi    a1, a1, -2
+    jal     ra, parse_reg
+    li      t3, -1
+    beq     a0, t3, pm_bad
+    mv      a1, a0
+    lw      a0, 16(sp)
+    lw      ra, 0(sp)
+    addi    sp, sp, 20
+    ret
+pm_bad:
+    j       halt_err
+
+# ============================================================================
+# read_multi_expr: reads tokens until eol, concatenates to multi_expr_buf
+# at 14624(s10) (128 byte capacity), then calls eval_expr on the concat.
+# Out: a0 = value. Halts on overflow or bad eval.
+# Uses pushback to return the lookahead token that follows the expression.
+# ============================================================================
+
+read_multi_expr:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    li      t0, 14624
+    add     t0, s10, t0                 # buf base
+    sw      t0, 4(sp)
+    li      t1, 0                       # len written
+rme_lp:
+    addi    sp, sp, -12
+    sw      t0, 0(sp)
+    sw      t1, 4(sp)
+    jal     ra, read_token
+    lw      t0, 0(sp)
+    lw      t1, 4(sp)
+    addi    sp, sp, 12
+    bnez    s0, rme_chk_eol
+    beqz    t1, rme_bad                 # empty on first iter
+    j       rme_eval                    # EOT finishes expr
+rme_chk_eol:
+    lw      t2, 472(s10)                # eol_flag
+    beqz    t2, rme_accept
+    beqz    t1, rme_bad                 # first token can't be past EOL
+    li      t2, 1
+    sw      t2, 476(s10)                # push_back
+    j       rme_eval
+rme_accept:
+    # Append s0 bytes from s10 to buf+t1
+    add     t2, t0, t1
+    mv      t3, s10
+    mv      t4, s0
+rme_cp:
+    beqz    t4, rme_cpd
+    lbu     t5, 0(t3)
+    sb      t5, 0(t2)
+    addi    t2, t2, 1
+    addi    t3, t3, 1
+    addi    t4, t4, -1
+    addi    t1, t1, 1
+    j       rme_cp
+rme_cpd:
+    li      t2, 128
+    bge     t1, t2, rme_bad
+    j       rme_lp
+rme_eval:
+    mv      a0, t0
+    add     a1, t0, t1
+    jal     ra, eval_expr
+    bne     a2, a1, rme_bad
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+rme_bad:
+    j       halt_err
+
+# ============================================================================
+# Operand readers: call read_token then parse
+# ============================================================================
+
+read_reg_op:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_token
+    mv      a0, s10
+    mv      a1, s0
+    jal     ra, parse_reg
+    li      t0, -1
+    beq     a0, t0, halt_err
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+read_imm_op:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_token
+    lbu     t0, 0(s10)
+    li      t1, 0x25                    # '%'
+    beq     t0, t1, rio_hilo
+    mv      a0, s10
+    add     a1, s10, s0
+    jal     ra, eval_expr
+    bne     a2, a1, rio_bad
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+rio_bad:
+    j       halt_err
+# ----- %hi(expr) / %lo(expr) handling -----
+# Format: "%hi(..)" or "%lo(..)". Computes transformed 20/12-bit value from
+# inner expr. If inner is a single bare undefined symbol, records U_hi20 or
+# I_lo12 fixup and returns 0 as placeholder.
+rio_hilo:
+    li      t0, 5
+    blt     s0, t0, rio_bad
+    add     t0, s10, s0
+    addi    t0, t0, -1
+    lbu     t1, 0(t0)
+    li      t2, 0x29                    # ')'
+    bne     t1, t2, rio_bad
+    lbu     t1, 3(s10)
+    li      t2, 0x28                    # '('
+    bne     t1, t2, rio_bad
+    lbu     t1, 1(s10)
+    lbu     t2, 2(s10)
+    li      t3, 104                     # 'h'
+    bne     t1, t3, rio_chk_lo
+    li      t3, 105                     # 'i'
+    bne     t2, t3, rio_bad
+    li      a4, 0                       # kind = hi
+    j       rio_hilo_body
+rio_chk_lo:
+    li      t3, 108                     # 'l'
+    bne     t1, t3, rio_bad
+    li      t3, 111                     # 'o'
+    bne     t2, t3, rio_bad
+    li      a4, 1                       # kind = lo
+rio_hilo_body:
+    sw      a4, 4(sp)                   # save kind across calls
+    addi    a0, s10, 4                  # inner start
+    add     a1, s10, s0
+    addi    a1, a1, -1                  # inner end (excl ')')
+    beq     a0, a1, rio_bad             # empty inner
+    jal     ra, is_single_ident         # a2 = 1 if single ident, else 0
+    bnez    a2, rio_try_sym
+    # Complex expr: eval_expr must fully resolve
+    jal     ra, eval_expr
+    bne     a2, a1, rio_bad
+    j       rio_xform
+rio_try_sym:
+    # Single ident: look up in symtab
+    sub     a2, a1, a0                  # length
+    mv      a1, a2
+    jal     ra, find_sym                # a0=val, a1=kind, a2=found
+    beqz    a2, rio_fixup
+rio_xform:
+    # a0 = value; apply transform based on kind at 4(sp).
+    lw      a4, 4(sp)
+    beqz    a4, rio_xf_hi
+    # lo: mask low 12 bits (signed interpretation done by I-type encoder)
+    slli    a0, a0, 20
+    srli    a0, a0, 20
+    j       rio_hilo_ret
+rio_xf_hi:
+    # hi: ((value + 0x800) >> 12), low 20 bits
+    lui     t0, 1
+    srli    t0, t0, 1                   # t0 = 0x800
+    add     a0, a0, t0
+    srli    a0, a0, 12
+rio_hilo_ret:
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+rio_fixup:
+    # Record fixup: slot_type = kind+2 (2=U_hi20, 3=I_lo12)
+    addi    a0, s10, 4                  # name_ptr
+    addi    a1, s0, -5                  # name_len
+    sub     a2, s2, s1                  # patch_offset
+    lw      a3, 4(sp)
+    addi    a3, a3, 2
+    jal     ra, record_fixup_arg
+    li      a0, 0
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+read_mem_op:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_token
+    mv      a0, s10
+    mv      a1, s0
+    jal     ra, parse_mem
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# read_br_target: read next token. If first char is letter/underscore, treat
+# as label (record fixup at CURRENT output offset, return 0). Else parse as
+# immediate. Returns offset in a0.
+#   In:  a0 = slot_type (0=B, 1=J)
+#   Out: a0 = numeric offset (or 0 if label — fixup recorded)
+read_br_target:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    sw      a0, 4(sp)                   # save slot_type
+    jal     ra, read_token
+    # Check for local-label ref: len==2, digit, then 'f' or 'b'
+    li      t2, 2
+    bne     s0, t2, rbt_not_local
+    lbu     t0, 0(s10)
+    li      t1, 48
+    blt     t0, t1, rbt_not_local
+    li      t1, 58
+    bge     t0, t1, rbt_not_local
+    lbu     t1, 1(s10)
+    li      t2, 102                     # 'f'
+    beq     t1, t2, rbt_local
+    li      t2, 98                      # 'b'
+    beq     t1, t2, rbt_local
+    j       rbt_not_local
+rbt_local:
+    # t0 = digit ASCII, t1 = 'f' or 'b'
+    addi    t3, t0, -48                 # digit
+    slli    t4, t3, 2
+    add     t4, s10, t4
+    lw      t5, 64(t4)                  # counter[digit]
+    li      t2, 102                     # 'f'?
+    bne     t1, t2, rbt_local_b
+    addi    t5, t5, 1                   # forward: seq = counter+1
+    j       rbt_local_build
+rbt_local_b:
+    beqz    t5, rbt_bad                 # 'b' with no prior def
+rbt_local_build:
+    addi    sp, sp, -16                 # scratch name buf (16B)
+    mv      a0, t3
+    mv      a1, t5
+    mv      a2, sp
+    jal     ra, build_local_name
+    mv      a0, sp
+    li      a1, 9
+    sub     a2, s2, s1
+    lw      a3, 20(sp)                  # slot_type (saved pre-16-push at 4(sp), now 20)
+    jal     ra, record_fixup_arg
+    addi    sp, sp, 16
+    li      a0, 0
+    j       rbt_done
+rbt_bad:
+    j       halt_err
+rbt_not_local:
+    lbu     t0, 0(s10)
+    # Letter or underscore → label
+    li      t1, 65                      # 'A'
+    blt     t0, t1, rbt_imm
+    li      t1, 91                      # 'Z'+1
+    blt     t0, t1, rbt_label
+    li      t1, 95                      # '_'
+    beq     t0, t1, rbt_label
+    li      t1, 97                      # 'a'
+    blt     t0, t1, rbt_imm
+    li      t1, 123                     # 'z'+1
+    blt     t0, t1, rbt_label
+rbt_imm:
+    mv      a0, s10
+    mv      a1, s0
+    jal     ra, parse_imm
+    j       rbt_done
+rbt_label:
+    # Length check (label name must fit in 16 bytes)
+    li      t0, 17
+    bge     s0, t0, halt_err
+    sub     a0, s2, s1                  # patch_offset
+    lw      a1, 4(sp)                   # slot_type
+    jal     ra, record_fixup
+    li      a0, 0
+rbt_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+# ============================================================================
+# define_label: token "name:" in buf (length s0). Strip colon, check length,
+# copy 16 bytes to symtab, append current output offset.
+# ============================================================================
+
+define_label:
+    li      t0, 18                      # name len = s0-1, must be <= 16 → s0 <= 17
+    bge     s0, t0, halt_err
+    addi    t0, s0, -1                  # position of ':'
+    add     t1, s10, t0
+    sb      x0, 0(t1)                   # zero out the colon
+    # Duplicate-label check via find_sym.
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    mv      a0, s10
+    addi    a1, s0, -1
+    jal     ra, find_sym
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    bnez    a2, halt_err                # duplicate
+    mv      t2, s10
+    mv      t3, s4
+    li      t4, 16
+dl_cp:
+    lbu     t5, 0(t2)
+    sb      t5, 0(t3)
+    addi    t2, t2, 1
+    addi    t3, t3, 1
+    addi    t4, t4, -1
+    bnez    t4, dl_cp
+    sub     t5, s2, s1
+    sw      t5, 16(s4)                  # value = output offset
+    sw      x0, 20(s4)                  # kind = 0 (label)
+    addi    s4, s4, 24
+    ret
+
+# ============================================================================
+# record_fixup: a0 = patch_offset, a1 = slot_type. Reads the symbol name from
+# the global token buffer (s10/s0) — legacy wrapper over record_fixup_arg.
+#
+# record_fixup_arg: a0=name_ptr, a1=name_len, a2=patch_offset, a3=slot_type.
+#   Copies 16-byte padded name into next fixup entry, appends patch_offset
+#   and slot_type.
+# ============================================================================
+
+record_fixup:
+    mv      a2, a0
+    mv      a3, a1
+    mv      a0, s10
+    mv      a1, s0
+    # fall through
+record_fixup_arg:
+    li      t0, 17
+    bge     a1, t0, halt_err
+    li      t0, 1
+    blt     a1, t0, halt_err
+    mv      t1, a0                      # src
+    mv      t2, s8                      # dest
+    mv      t3, a1                      # bytes to copy
+    li      t4, 16                      # name field size
+rfa_cp:
+    beqz    t3, rfa_pad
+    lbu     t5, 0(t1)
+    sb      t5, 0(t2)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    addi    t4, t4, -1
+    j       rfa_cp
+rfa_pad:
+    beqz    t4, rfa_fields
+    sb      x0, 0(t2)
+    addi    t2, t2, 1
+    addi    t4, t4, -1
+    j       rfa_pad
+rfa_fields:
+    sw      a2, 16(s8)
+    sw      a3, 20(s8)
+    addi    s8, s8, 24
+    ret
+
+# ============================================================================
+# emit_word: a0 = 32-bit word. Writes 4 bytes LE to output, advances s2.
+# ============================================================================
+
+emit_word:
+    sb      a0, 0(s2)
+    srli    a0, a0, 8
+    sb      a0, 1(s2)
+    srli    a0, a0, 8
+    sb      a0, 2(s2)
+    srli    a0, a0, 8
+    sb      a0, 3(s2)
+    addi    s2, s2, 4
+    ret
+
+# ============================================================================
+# emit_u_inst: a0=opcode(7), a1=rd(5), a2=imm20(low 20 bits used).
+# Emits encoded U-type word via emit_word (tail call).
+# emit_i_inst: a0=opcode, a1=rd, a2=rs1, a3=f3, a4=imm12(low 12 used).
+# Both helpers use t0, t1 only; safe from caller a-regs.
+# ============================================================================
+
+emit_u_inst:
+    slli    t0, a2, 12                  # imm20 in bits 31:12
+    andi    t1, a1, 0x1F
+    slli    t1, t1, 7
+    or      t0, t0, t1
+    andi    t1, a0, 0x7F
+    or      a0, t0, t1
+    j       emit_word
+
+emit_i_inst:
+    slli    t0, a4, 20                  # imm12 in bits 31:20
+    andi    t1, a2, 0x1F
+    slli    t1, t1, 15                  # rs1 in 19:15
+    or      t0, t0, t1
+    andi    t1, a3, 0x7
+    slli    t1, t1, 12                  # f3 in 14:12
+    or      t0, t0, t1
+    andi    t1, a1, 0x1F
+    slli    t1, t1, 7                   # rd in 11:7
+    or      t0, t0, t1
+    andi    t1, a0, 0x7F
+    or      a0, t0, t1
+    j       emit_word
+
+# emit_r_inst: a0=opcode, a1=rd, a2=rs1, a3=rs2, a4=f3, a5=f7. Emits R-type.
+emit_r_inst:
+    andi    t1, a5, 0x7F
+    slli    t0, t1, 25                  # f7 in 31:25
+    andi    t1, a3, 0x1F
+    slli    t1, t1, 20                  # rs2 in 24:20
+    or      t0, t0, t1
+    andi    t1, a2, 0x1F
+    slli    t1, t1, 15                  # rs1 in 19:15
+    or      t0, t0, t1
+    andi    t1, a4, 0x7
+    slli    t1, t1, 12                  # f3 in 14:12
+    or      t0, t0, t1
+    andi    t1, a1, 0x1F
+    slli    t1, t1, 7                   # rd in 11:7
+    or      t0, t0, t1
+    andi    t1, a0, 0x7F
+    or      a0, t0, t1
+    j       emit_word
+
+# emit_s_inst: a0=opcode, a1=rs1 (base), a2=rs2 (value), a3=f3, a4=imm12.
+emit_s_inst:
+    srli    t1, a4, 5
+    andi    t1, t1, 0x7F
+    slli    t0, t1, 25                  # imm[11:5] at 31:25
+    andi    t1, a2, 0x1F
+    slli    t1, t1, 20                  # rs2 at 24:20
+    or      t0, t0, t1
+    andi    t1, a1, 0x1F
+    slli    t1, t1, 15                  # rs1 at 19:15
+    or      t0, t0, t1
+    andi    t1, a3, 0x7
+    slli    t1, t1, 12                  # f3 at 14:12
+    or      t0, t0, t1
+    andi    t1, a4, 0x1F
+    slli    t1, t1, 7                   # imm[4:0] at 11:7
+    or      t0, t0, t1
+    andi    t1, a0, 0x7F
+    or      a0, t0, t1
+    j       emit_word
+
+# emit_b_inst: a0=opcode(0x63), a1=rs1, a2=rs2, a3=f3, a4=imm (signed, even).
+emit_b_inst:
+    srli    t0, a4, 12
+    andi    t0, t0, 1
+    slli    t0, t0, 31                  # imm[12] at 31
+    srli    t1, a4, 5
+    andi    t1, t1, 0x3F
+    slli    t1, t1, 25                  # imm[10:5] at 30:25
+    or      t0, t0, t1
+    andi    t1, a2, 0x1F
+    slli    t1, t1, 20                  # rs2 at 24:20
+    or      t0, t0, t1
+    andi    t1, a1, 0x1F
+    slli    t1, t1, 15                  # rs1 at 19:15
+    or      t0, t0, t1
+    andi    t1, a3, 0x7
+    slli    t1, t1, 12                  # f3 at 14:12
+    or      t0, t0, t1
+    srli    t1, a4, 1
+    andi    t1, t1, 0xF
+    slli    t1, t1, 8                   # imm[4:1] at 11:8
+    or      t0, t0, t1
+    srli    t1, a4, 11
+    andi    t1, t1, 1
+    slli    t1, t1, 7                   # imm[11] at 7
+    or      t0, t0, t1
+    andi    t1, a0, 0x7F
+    or      a0, t0, t1
+    j       emit_word
+
+# ============================================================================
+# record_pcrel_pair: reads next token (symbol name), records 2 fixups for an
+# upcoming auipc+addi/jalr pair at the current output offset.
+#   Fixup 1: slot_type=7 (U_hi20_pcrel) at offset s2-s1 (for auipc)
+#   Fixup 2: slot_type=8 (I_lo12_pcrel_prev) at offset s2-s1+4 (for addi/jalr)
+# Symbol name length checked (1..16) via record_fixup_arg.
+# ============================================================================
+
+record_pcrel_pair:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_token
+    mv      a0, s10
+    mv      a1, s0
+    sub     a2, s2, s1
+    li      a3, 7
+    jal     ra, record_fixup_arg
+    mv      a0, s10
+    mv      a1, s0
+    sub     a2, s2, s1
+    addi    a2, a2, 4
+    li      a3, 8
+    jal     ra, record_fixup_arg
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# dispatch: a0 = class, a1 = f3, a2 = f7. Tail-calls appropriate handler.
+# ============================================================================
+
+dispatch:
+    li      t0, 1
+    beq     a0, t0, do_r
+    li      t0, 2
+    beq     a0, t0, do_i_arith
+    li      t0, 3
+    beq     a0, t0, do_i_shift
+    li      t0, 4
+    beq     a0, t0, do_i_load
+    li      t0, 5
+    beq     a0, t0, do_s
+    li      t0, 6
+    beq     a0, t0, do_b
+    li      t0, 7
+    beq     a0, t0, do_u_lui
+    li      t0, 8
+    beq     a0, t0, do_u_auipc
+    li      t0, 9
+    beq     a0, t0, do_j_jal
+    li      t0, 10
+    beq     a0, t0, do_i_jalr
+    li      t0, 11
+    beq     a0, t0, do_ps_li
+    li      t0, 12
+    beq     a0, t0, do_ps_mv
+    li      t0, 13
+    bne     a0, t0, d_c14t
+    j       do_ps_j
+d_c14t:
+    li      t0, 14
+    bne     a0, t0, d_c15t
+    j       do_ps_ret
+d_c15t:
+    li      t0, 15
+    bne     a0, t0, d_c16t
+    j       do_ps_beqz
+d_c16t:
+    li      t0, 16
+    bne     a0, t0, d_c17t
+    j       do_ps_bnez
+d_c17t:
+    li      t0, 17
+    bne     a0, t0, d_c18t
+    j       do_ps_equ
+d_c18t:
+    li      t0, 18
+    bne     a0, t0, d_c19
+    j       do_ps_set
+d_c19:
+    # classes 19-30: all far targets, use bne+j trampoline (as GAS relaxation).
+    li      t0, 19
+    bne     a0, t0, d_c20
+    j       do_ps_byte
+d_c20:
+    li      t0, 20
+    bne     a0, t0, d_c21
+    j       do_ps_half
+d_c21:
+    li      t0, 21
+    bne     a0, t0, d_c22
+    j       do_ps_word
+d_c22:
+    li      t0, 22
+    bne     a0, t0, d_c23
+    j       do_ps_ascii
+d_c23:
+    li      t0, 23
+    bne     a0, t0, d_c24
+    j       do_ps_asciz
+d_c24:
+    li      t0, 24
+    bne     a0, t0, d_c25
+    j       do_ps_zero
+d_c25:
+    li      t0, 25
+    bne     a0, t0, d_c26
+    j       do_ps_align
+d_c26:
+    li      t0, 26
+    bne     a0, t0, d_c27
+    j       do_ps_balign
+d_c27:
+    li      t0, 27
+    bne     a0, t0, d_c28
+    j       do_ps_fill
+d_c28:
+    li      t0, 28
+    bne     a0, t0, d_c29
+    j       do_ps_lla
+d_c29:
+    li      t0, 29
+    bne     a0, t0, d_c30
+    j       do_ps_call
+d_c30:
+    li      t0, 30
+    bne     a0, t0, d_c31
+    j       do_ps_tail
+d_c31:
+    li      t0, 31
+    bne     a0, t0, d_c32
+    j       do_ps_nop
+d_c32:
+    li      t0, 32
+    bne     a0, t0, d_c33
+    j       do_ps_neg
+d_c33:
+    li      t0, 33
+    bne     a0, t0, d_c34
+    j       do_ps_not
+d_c34:
+    li      t0, 34
+    bne     a0, t0, d_c35
+    j       do_ps_seqz
+d_c35:
+    li      t0, 35
+    bne     a0, t0, d_c36
+    j       do_ps_snez
+d_c36:
+    li      t0, 36
+    bne     a0, t0, d_c37
+    j       do_ps_sltz
+d_c37:
+    li      t0, 37
+    bne     a0, t0, d_c38
+    j       do_ps_sgtz
+d_c38:
+    li      t0, 38
+    bne     a0, t0, d_c39
+    j       do_ps_bgt
+d_c39:
+    li      t0, 39
+    bne     a0, t0, d_c40
+    j       do_ps_ble
+d_c40:
+    li      t0, 40
+    bne     a0, t0, d_c41
+    j       do_ps_bgtu
+d_c41:
+    li      t0, 41
+    bne     a0, t0, d_c42
+    j       do_ps_bleu
+d_c42:
+    li      t0, 42
+    bne     a0, t0, d_c43
+    j       do_ps_prologue
+d_c43:
+    li      t0, 43
+    bne     a0, t0, d_c44
+    j       do_ps_epilogue
+d_c44:
+    li      t0, 44
+    bne     a0, t0, d_c45
+    j       do_ps_return
+d_c45:
+    li      t0, 45
+    bne     a0, t0, d_c46
+    j       do_ps_macro
+d_c46:
+    li      t0, 46
+    bne     a0, t0, d_c47
+    j       do_ps_bltz
+d_c47:
+    li      t0, 47
+    bne     a0, t0, d_cend
+    j       do_ps_bgez
+d_cend:
+    j       halt_err
+
+# ============================================================================
+# Encoder handlers.
+# Each handler enters with a1=f3, a2=f7 (if relevant), ra = dispatch's caller.
+# Each handler saves ra, reads operands, composes word, restores ra, then
+# tail-calls emit_word which returns to dispatch's caller.
+# ============================================================================
+
+# do_r: rd, rs1, rs2 → (f7<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|0x33
+do_r:
+    addi    sp, sp, -20
+    sw      ra, 0(sp)
+    sw      a1, 4(sp)                   # f3
+    sw      a2, 8(sp)                   # f7
+    jal     ra, read_reg_op
+    sw      a0, 12(sp)                  # rd
+    jal     ra, read_reg_op
+    sw      a0, 16(sp)                  # rs1
+    jal     ra, read_reg_op
+    mv      t0, a0                      # rs2
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    lw      a2, 8(sp)
+    lw      a3, 12(sp)
+    lw      a4, 16(sp)
+    addi    sp, sp, 20
+    andi    a2, a2, 0x7F
+    slli    t1, a2, 25
+    andi    t0, t0, 0x1F
+    slli    t2, t0, 20
+    or      t1, t1, t2
+    andi    a4, a4, 0x1F
+    slli    t2, a4, 15
+    or      t1, t1, t2
+    andi    a1, a1, 7
+    slli    t2, a1, 12
+    or      t1, t1, t2
+    andi    a3, a3, 0x1F
+    slli    t2, a3, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x33
+    mv      a0, t1
+    j       emit_word
+
+# do_i_arith: rd, rs1, imm → opcode 0x13
+do_i_arith:
+    addi    sp, sp, -16
+    sw      ra, 0(sp)
+    sw      a1, 4(sp)                   # f3
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)                   # rd
+    jal     ra, read_reg_op
+    sw      a0, 12(sp)                  # rs1
+    jal     ra, read_imm_op
+    mv      t0, a0                      # imm
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    lw      a2, 8(sp)                   # rd
+    lw      a3, 12(sp)                  # rs1
+    addi    sp, sp, 16
+    slli    t1, t0, 20                  # imm[11:0] → bits 31:20
+    andi    a3, a3, 0x1F
+    slli    t2, a3, 15
+    or      t1, t1, t2
+    andi    a1, a1, 7
+    slli    t2, a1, 12
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x13
+    mv      a0, t1
+    j       emit_word
+
+# do_i_shift: rd, rs1, shamt → opcode 0x13, imm = (f7<<5)|(shamt&0x1F)
+do_i_shift:
+    addi    sp, sp, -20
+    sw      ra, 0(sp)
+    sw      a1, 4(sp)                   # f3
+    sw      a2, 8(sp)                   # f7
+    jal     ra, read_reg_op
+    sw      a0, 12(sp)                  # rd
+    jal     ra, read_reg_op
+    sw      a0, 16(sp)                  # rs1
+    jal     ra, read_imm_op
+    mv      t0, a0                      # shamt
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    lw      a2, 8(sp)
+    lw      a3, 12(sp)
+    lw      a4, 16(sp)
+    addi    sp, sp, 20
+    andi    t0, t0, 0x1F
+    andi    a2, a2, 0x7F
+    slli    t1, a2, 5
+    or      t0, t0, t1                  # imm = (f7<<5) | shamt
+    slli    t1, t0, 20
+    andi    a4, a4, 0x1F
+    slli    t2, a4, 15
+    or      t1, t1, t2
+    andi    a1, a1, 7
+    slli    t2, a1, 12
+    or      t1, t1, t2
+    andi    a3, a3, 0x1F
+    slli    t2, a3, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x13
+    mv      a0, t1
+    j       emit_word
+
+# do_i_load: rd, imm(rs) → opcode 0x03
+do_i_load:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    sw      a1, 4(sp)                   # f3
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)                   # rd
+    jal     ra, read_mem_op
+    # a0 = imm, a1 = rs1
+    mv      t0, a0                      # imm
+    mv      t3, a1                      # rs1
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    lw      a2, 8(sp)                   # rd
+    addi    sp, sp, 12
+    slli    t1, t0, 20
+    andi    t3, t3, 0x1F
+    slli    t2, t3, 15
+    or      t1, t1, t2
+    andi    a1, a1, 7
+    slli    t2, a1, 12
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x03
+    mv      a0, t1
+    j       emit_word
+
+# do_s: rs2, imm(rs1) → opcode 0x23
+do_s:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    sw      a1, 4(sp)                   # f3
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)                   # rs2
+    jal     ra, read_mem_op
+    mv      t0, a0                      # imm
+    mv      t3, a1                      # rs1
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    lw      a2, 8(sp)                   # rs2
+    addi    sp, sp, 12
+    # imm[11:5] → bits 31:25 ; imm[4:0] → bits 11:7
+    srli    t1, t0, 5
+    andi    t1, t1, 0x7F
+    slli    t1, t1, 25
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 20
+    or      t1, t1, t2
+    andi    t3, t3, 0x1F
+    slli    t2, t3, 15
+    or      t1, t1, t2
+    andi    a1, a1, 7
+    slli    t2, a1, 12
+    or      t1, t1, t2
+    andi    t2, t0, 0x1F
+    slli    t2, t2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x23
+    mv      a0, t1
+    j       emit_word
+
+# do_b: rs1, rs2, target → opcode 0x63; B-type imm encoding.
+# target may be label (records fixup, imm=0) or numeric offset.
+do_b:
+    addi    sp, sp, -16
+    sw      ra, 0(sp)
+    sw      a1, 4(sp)                   # f3
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)                   # rs1
+    jal     ra, read_reg_op
+    sw      a0, 12(sp)                  # rs2
+    li      a0, 0                       # slot_type B
+    jal     ra, read_br_target
+    mv      t0, a0                      # off
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    lw      a2, 8(sp)
+    lw      a3, 12(sp)
+    addi    sp, sp, 16
+    # Compose B-type
+    li      t1, 0
+    srli    t2, t0, 12
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 5
+    andi    t2, t2, 0x3F
+    slli    t2, t2, 25
+    or      t1, t1, t2
+    andi    a3, a3, 0x1F
+    slli    t2, a3, 20
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 15
+    or      t1, t1, t2
+    andi    a1, a1, 7
+    slli    t2, a1, 12
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    andi    t2, t2, 0xF
+    slli    t2, t2, 8
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x63
+    mv      a0, t1
+    j       emit_word
+
+# do_u_lui: rd, imm → (imm<<12)|(rd<<7)|0x37
+do_u_lui:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rd
+    jal     ra, read_imm_op
+    mv      t0, a0                      # imm
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)                   # rd
+    addi    sp, sp, 8
+    slli    t1, t0, 12
+    andi    a1, a1, 0x1F
+    slli    t2, a1, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x37
+    mv      a0, t1
+    j       emit_word
+
+# do_u_auipc: rd, imm → (imm<<12)|(rd<<7)|0x17
+do_u_auipc:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_imm_op
+    mv      t0, a0
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    addi    sp, sp, 8
+    slli    t1, t0, 12
+    andi    a1, a1, 0x1F
+    slli    t2, a1, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x17
+    mv      a0, t1
+    j       emit_word
+
+# do_j_jal: rd, target → J-type, opcode 0x6F
+do_j_jal:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rd
+    li      a0, 1                       # slot_type J
+    jal     ra, read_br_target
+    mv      t0, a0                      # off
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    addi    sp, sp, 8
+    # J-type encode
+    li      t1, 0
+    srli    t2, t0, 20
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    li      t3, 0x3FF
+    and     t2, t2, t3
+    slli    t2, t2, 21
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 20
+    or      t1, t1, t2
+    srli    t2, t0, 12
+    andi    t2, t2, 0xFF
+    slli    t2, t2, 12
+    or      t1, t1, t2
+    andi    a1, a1, 0x1F
+    slli    t2, a1, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x6F
+    mv      a0, t1
+    j       emit_word
+
+# do_i_jalr: rd, imm(rs) → I-type, opcode 0x67, f3=0
+do_i_jalr:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rd
+    jal     ra, read_mem_op
+    mv      t0, a0                      # imm
+    mv      t3, a1                      # rs
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    addi    sp, sp, 8
+    slli    t1, t0, 20
+    andi    t3, t3, 0x1F
+    slli    t2, t3, 15
+    or      t1, t1, t2
+    andi    a1, a1, 0x1F
+    slli    t2, a1, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x67
+    mv      a0, t1
+    j       emit_word
+
+# do_ps_li: rd, imm → addi rd, x0, imm (I-type 0x13, f3=0, rs1=0)
+do_ps_li:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rd
+    jal     ra, read_imm_op
+    sw      a0, 8(sp)                   # imm
+    # Fits in 12-bit signed?
+    slli    t0, a0, 20
+    srai    t0, t0, 20
+    beq     t0, a0, li_small
+    # Large: emit lui rd, hi20(imm)
+    lui     t0, 1
+    srli    t0, t0, 1                   # 0x800
+    add     t0, a0, t0
+    srli    t0, t0, 12                  # hi20 in low 20 bits
+    li      a0, 0x37
+    lw      a1, 4(sp)
+    mv      a2, t0
+    jal     ra, emit_u_inst
+    # Skip addi if lo12 == 0 (GAS-compatible optimization)
+    lw      a0, 8(sp)
+    slli    t0, a0, 20
+    srli    t0, t0, 20
+    beqz    t0, li_done
+    # Emit addi rd, rd, lo12(imm)
+    li      a0, 0x13
+    lw      a1, 4(sp)
+    lw      a2, 4(sp)
+    li      a3, 0
+    lw      a4, 8(sp)
+    jal     ra, emit_i_inst
+li_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    ret
+li_small:
+    li      a0, 0x13
+    lw      a1, 4(sp)
+    li      a2, 0
+    li      a3, 0
+    lw      a4, 8(sp)
+    jal     ra, emit_i_inst
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    ret
+
+# do_ps_mv: rd, rs → addi rd, rs, 0
+do_ps_mv:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    lw      ra, 0(sp)
+    lw      a1, 4(sp)
+    addi    sp, sp, 8
+    # imm=0, rs1=t3, rd=a1, f3=0, opcode=0x13
+    andi    t3, t3, 0x1F
+    slli    t1, t3, 15
+    andi    a1, a1, 0x1F
+    slli    t2, a1, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x13
+    mv      a0, t1
+    j       emit_word
+
+# do_ps_j: target → jal x0, target
+do_ps_j:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    li      a0, 1                       # slot_type J
+    jal     ra, read_br_target
+    mv      t0, a0                      # off
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    li      t1, 0
+    srli    t2, t0, 20
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    li      t3, 0x3FF
+    and     t2, t2, t3
+    slli    t2, t2, 21
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 20
+    or      t1, t1, t2
+    srli    t2, t0, 12
+    andi    t2, t2, 0xFF
+    slli    t2, t2, 12
+    or      t1, t1, t2
+    ori     t1, t1, 0x6F
+    mv      a0, t1
+    j       emit_word
+
+# do_ps_ret: → jalr x0, 0(ra) = 0x00008067
+do_ps_ret:
+    lui     t0, 8
+    addi    t0, t0, 0x067
+    mv      a0, t0
+    j       emit_word
+
+# do_ps_beqz: rs, target → beq rs, x0, target (f3=0)
+do_ps_beqz:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rs
+    li      a0, 0                       # slot_type B
+    jal     ra, read_br_target
+    mv      t0, a0                      # off
+    lw      ra, 0(sp)
+    lw      a2, 4(sp)                   # rs
+    addi    sp, sp, 8
+    # B-type with rs1=a2, rs2=0, f3=0
+    li      t1, 0
+    srli    t2, t0, 12
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 5
+    andi    t2, t2, 0x3F
+    slli    t2, t2, 25
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 15
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    andi    t2, t2, 0xF
+    slli    t2, t2, 8
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x63
+    mv      a0, t1
+    j       emit_word
+
+# do_ps_bnez: rs, target → bne rs, x0, target (f3=1)
+do_ps_bnez:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    li      a0, 0                       # slot_type B
+    jal     ra, read_br_target
+    mv      t0, a0
+    lw      ra, 0(sp)
+    lw      a2, 4(sp)
+    addi    sp, sp, 8
+    li      t1, 0
+    srli    t2, t0, 12
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 5
+    andi    t2, t2, 0x3F
+    slli    t2, t2, 25
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 15
+    or      t1, t1, t2
+    lui     t2, 1                       # 0x1000 = f3=1 at bit 12
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    andi    t2, t2, 0xF
+    slli    t2, t2, 8
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x63
+    mv      a0, t1
+    j       emit_word
+
+
+# do_ps_bltz: rs, target → blt rs, x0, target (f3=4)
+do_ps_bltz:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    li      a0, 0
+    jal     ra, read_br_target
+    mv      t0, a0
+    lw      ra, 0(sp)
+    lw      a2, 4(sp)
+    addi    sp, sp, 8
+    li      t1, 0
+    srli    t2, t0, 12
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 5
+    andi    t2, t2, 0x3F
+    slli    t2, t2, 25
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 15
+    or      t1, t1, t2
+    li      t2, 0x4000
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    andi    t2, t2, 0xF
+    slli    t2, t2, 8
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x63
+    mv      a0, t1
+    j       emit_word
+
+# do_ps_bgez: rs, target → bge rs, x0, target (f3=5)
+do_ps_bgez:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    li      a0, 0
+    jal     ra, read_br_target
+    mv      t0, a0
+    lw      ra, 0(sp)
+    lw      a2, 4(sp)
+    addi    sp, sp, 8
+    li      t1, 0
+    srli    t2, t0, 12
+    andi    t2, t2, 1
+    slli    t2, t2, 31
+    or      t1, t1, t2
+    srli    t2, t0, 5
+    andi    t2, t2, 0x3F
+    slli    t2, t2, 25
+    or      t1, t1, t2
+    andi    a2, a2, 0x1F
+    slli    t2, a2, 15
+    or      t1, t1, t2
+    li      t2, 0x5000
+    or      t1, t1, t2
+    srli    t2, t0, 1
+    andi    t2, t2, 0xF
+    slli    t2, t2, 8
+    or      t1, t1, t2
+    srli    t2, t0, 11
+    andi    t2, t2, 1
+    slli    t2, t2, 7
+    or      t1, t1, t2
+    ori     t1, t1, 0x63
+    mv      a0, t1
+    j       emit_word
+
+# ============================================================================
+# fixup_pass: scan fixup table, resolve each against symtab, patch according
+# to slot_type (at fixup entry offset 20).
+# ============================================================================
+
+fixup_pass:
+    mv      t0, s7
+fp_lp:
+    beq     t0, s8, fp_ret
+    mv      a6, s3
+fp_sym:
+    beq     a6, s4, fp_noresolve
+    mv      t1, t0
+    mv      t2, a6
+    li      t3, 16
+fp_cmp:
+    lbu     t4, 0(t1)
+    lbu     t5, 0(t2)
+    bne     t4, t5, fp_skip
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    bnez    t3, fp_cmp
+    # matched — resolve
+    lw      t5, 16(a6)                  # symbol value (absolute)
+    lw      t6, 16(t0)                  # patch offset
+    lw      a7, 20(t0)                  # slot_type
+    add     t2, s1, t6                  # patch addr in output buffer
+    beqz    a7, fp_enc_b
+    li      t3, 1
+    beq     a7, t3, fp_enc_j
+    li      t3, 2
+    beq     a7, t3, fp_enc_u_hi20
+    li      t3, 3
+    beq     a7, t3, fp_enc_i_lo12
+    li      t3, 4
+    beq     a7, t3, fp_enc_raw_w
+    li      t3, 5
+    beq     a7, t3, fp_enc_raw_h
+    li      t3, 6
+    beq     a7, t3, fp_enc_raw_b
+    li      t3, 7
+    beq     a7, t3, fp_enc_u_hi20_pcrel
+    li      t3, 8
+    beq     a7, t3, fp_enc_i_lo12_pcrel_prev
+    j       halt_err
+fp_skip:
+    addi    a6, a6, 24
+    j       fp_sym
+fp_noresolve:
+    j       halt_err
+fp_enc_b:
+    sub     t5, t5, t6                  # PC-relative imm
+    # Range check: B-type imm must fit in signed 13 bits (-4096..+4094).
+    li      a7, 4096
+    blt     t5, a7, fpb_hi_ok
+    j       halt_err
+fpb_hi_ok:
+    sub     a7, x0, a7
+    bge     t5, a7, fpb_lo_ok
+    j       halt_err
+fpb_lo_ok:
+    lw      t3, 0(t2)
+    lui     t4, 0x01FFF
+    addi    t4, t4, 0x07F
+    and     t3, t3, t4
+    srli    t4, t5, 12
+    andi    t4, t4, 1
+    slli    t4, t4, 31
+    or      t3, t3, t4
+    srli    t4, t5, 5
+    andi    t4, t4, 0x3F
+    slli    t4, t4, 25
+    or      t3, t3, t4
+    srli    t4, t5, 1
+    andi    t4, t4, 0xF
+    slli    t4, t4, 8
+    or      t3, t3, t4
+    srli    t4, t5, 11
+    andi    t4, t4, 1
+    slli    t4, t4, 7
+    or      t3, t3, t4
+    sw      t3, 0(t2)
+    j       fp_next
+fp_enc_j:
+    sub     t5, t5, t6                  # PC-relative imm
+    # Range check: J-type imm must fit in signed 21 bits (-1048576..1048575).
+    lui     a7, 0x100
+    blt     t5, a7, fpj_lo_ok
+    j       halt_err
+fpj_lo_ok:
+    sub     a7, x0, a7
+    bge     t5, a7, fpj_ok
+    j       halt_err
+fpj_ok:
+    lw      t3, 0(t2)
+    lui     t4, 1
+    addi    t4, t4, -1
+    and     t3, t3, t4
+    srli    t4, t5, 20
+    andi    t4, t4, 1
+    slli    t4, t4, 31
+    or      t3, t3, t4
+    srli    t4, t5, 1
+    li      a7, 0x3FF
+    and     t4, t4, a7
+    slli    t4, t4, 21
+    or      t3, t3, t4
+    srli    t4, t5, 11
+    andi    t4, t4, 1
+    slli    t4, t4, 20
+    or      t3, t3, t4
+    srli    t4, t5, 12
+    andi    t4, t4, 0xFF
+    slli    t4, t4, 12
+    or      t3, t3, t4
+    sw      t3, 0(t2)
+    j       fp_next
+fp_enc_u_hi20:
+    # %hi = ((value + 0x800) >> 12), placed in bits 31:12 of word at patch.
+    lw      t3, 0(t2)
+    # Preserve low 12 bits of t3 (opcode+rd); clear bits 31:12.
+    slli    t3, t3, 20
+    srli    t3, t3, 20
+    # Compute (value + 0x800) >> 12; keep low 20 bits; shift to bits 31:12.
+    lui     t4, 1                       # t4 = 0x1000
+    srli    t4, t4, 1                   # t4 = 0x800
+    add     t5, t5, t4
+    srli    t5, t5, 12                  # low 20 bits carry hi20
+    slli    t5, t5, 12                  # place at bits 31:12 (also masks to 20 bits)
+    or      t3, t3, t5
+    sw      t3, 0(t2)
+    j       fp_next
+fp_enc_i_lo12:
+    # %lo = value & 0xFFF (12-bit signed), placed in bits 31:20.
+    lw      t3, 0(t2)
+    # Clear bits 31:20: slli 12, srli 12.
+    slli    t3, t3, 12
+    srli    t3, t3, 12
+    slli    t5, t5, 20                  # low 12 bits → bits 31:20
+    or      t3, t3, t5
+    sw      t3, 0(t2)
+    j       fp_next
+fp_enc_raw_w:
+    sb      t5, 0(t2)
+    srli    t5, t5, 8
+    sb      t5, 1(t2)
+    srli    t5, t5, 8
+    sb      t5, 2(t2)
+    srli    t5, t5, 8
+    sb      t5, 3(t2)
+    j       fp_next
+fp_enc_raw_h:
+    sb      t5, 0(t2)
+    srli    t5, t5, 8
+    sb      t5, 1(t2)
+    j       fp_next
+fp_enc_raw_b:
+    sb      t5, 0(t2)
+    j       fp_next
+fp_enc_u_hi20_pcrel:
+    # delta = symbol - patch_offset; hi20 = (delta+0x800)>>12
+    sub     t5, t5, t6
+    lw      t3, 0(t2)
+    slli    t3, t3, 20
+    srli    t3, t3, 20                  # clear bits 31:12
+    lui     t4, 1
+    srli    t4, t4, 1                   # t4 = 0x800
+    add     t5, t5, t4
+    srli    t5, t5, 12
+    slli    t5, t5, 12                  # hi20 at bits 31:12
+    or      t3, t3, t5
+    sw      t3, 0(t2)
+    j       fp_next
+fp_enc_i_lo12_pcrel_prev:
+    # delta = symbol - (patch_offset - 4); lo12 = delta & 0xFFF
+    addi    t6, t6, -4                  # auipc PC = this PC - 4
+    sub     t5, t5, t6
+    lw      t3, 0(t2)
+    slli    t3, t3, 12
+    srli    t3, t3, 12                  # clear bits 31:20
+    slli    t5, t5, 20                  # lo12 at bits 31:20
+    or      t3, t3, t5
+    sw      t3, 0(t2)
+    j       fp_next
+fp_next:
+    addi    t0, t0, 24
+    j       fp_lp
+fp_ret:
+    ret
+
+# ============================================================================
+# dump_output: write s1..s2 to UART
+# ============================================================================
+
+dump_output:
+    mv      a0, s1
+do_lp:
+    beq     a0, s2, do_ret
+    lbu     t3, 0(a0)
+    addi    a0, a0, 1
+do_wait:
+    lbu     t1, 5(s5)
+    andi    t1, t1, 0x20
+    beqz    t1, do_wait
+    sb      t3, 0(s5)
+    j       do_lp
+do_ret:
+    ret
+
+# ============================================================================
+# find_sym: look up a symbol by name. Used by expression evaluator and by
+# .equ/.set duplicate checks.
+#   a0 = name_ptr, a1 = name_len (1..16)
+# Returns:
+#   a0 = value, a1 = kind (0=label,1=const), a2 = found (1) or not-found (0)
+# Name is zero-padded to 16 bytes in the comparison.
+# ============================================================================
+
+find_sym:
+    li      t0, 17
+    bge     a1, t0, fs_bad              # name_len > 16
+    li      t0, 1
+    blt     a1, t0, fs_bad              # name_len == 0
+    mv      t0, s3                      # entry ptr
+fs_nx:
+    beq     t0, s4, fs_notfound
+    # Compare first a1 bytes against [a0, a0+a1), then 16-a1 bytes against 0
+    mv      t1, a0                      # src cursor
+    mv      t2, t0                      # entry cursor
+    mv      t3, a1                      # remaining of name
+    li      t4, 16                      # total name field
+fs_cmp_n:
+    beqz    t3, fs_cmp_z
+    lbu     t5, 0(t1)
+    lbu     t6, 0(t2)
+    bne     t5, t6, fs_skip
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    addi    t4, t4, -1
+    j       fs_cmp_n
+fs_cmp_z:
+    beqz    t4, fs_match
+    lbu     t5, 0(t2)
+    bnez    t5, fs_skip
+    addi    t2, t2, 1
+    addi    t4, t4, -1
+    j       fs_cmp_z
+fs_match:
+    lw      t1, 16(t0)
+    lw      t2, 20(t0)
+    mv      a0, t1
+    mv      a1, t2
+    li      a2, 1
+    ret
+fs_skip:
+    addi    t0, t0, 24
+    j       fs_nx
+fs_notfound:
+    li      a2, 0
+    ret
+fs_bad:
+    j       halt_err
+
+# ============================================================================
+# parse_num: parse a numeric literal (decimal or 0x hex) from a byte range.
+#   a0 = ptr, a1 = end → a0 = value, a2 = new_ptr (a1 preserved)
+# Halts if no digits consumed. No sign handling here (see eval_unary).
+# ============================================================================
+
+parse_num:
+    # Check for 0x / 0X prefix
+    addi    t0, a0, 2
+    blt     a1, t0, pn_dec              # end < ptr+2 → can't have prefix
+    lbu     t1, 0(a0)
+    li      t2, 48                      # '0'
+    bne     t1, t2, pn_dec
+    lbu     t1, 1(a0)
+    li      t2, 120                     # 'x'
+    beq     t1, t2, pn_hex
+    li      t2, 88                      # 'X'
+    beq     t1, t2, pn_hex
+    j       pn_dec
+pn_hex:
+    addi    t0, a0, 2                   # cursor
+    li      a0, 0
+    li      t5, 0                       # any-digit flag
+pn_hex_lp:
+    beq     t0, a1, pn_hex_end
+    lbu     t1, 0(t0)
+    li      t2, 48
+    blt     t1, t2, pn_hex_end
+    li      t2, 58
+    blt     t1, t2, pn_h09
+    li      t2, 65
+    blt     t1, t2, pn_hex_end
+    li      t2, 71
+    blt     t1, t2, pn_haf
+    li      t2, 97
+    blt     t1, t2, pn_hex_end
+    li      t2, 103
+    blt     t1, t2, pn_hlf
+    j       pn_hex_end
+pn_h09:
+    addi    t3, t1, -48
+    j       pn_hacc
+pn_haf:
+    addi    t3, t1, -55
+    j       pn_hacc
+pn_hlf:
+    addi    t3, t1, -87
+pn_hacc:
+    slli    a0, a0, 4
+    or      a0, a0, t3
+    li      t5, 1
+    addi    t0, t0, 1
+    j       pn_hex_lp
+pn_hex_end:
+    beqz    t5, pn_bad
+    mv      a2, t0
+    ret
+pn_dec:
+    mv      t0, a0                      # cursor
+    li      a0, 0
+    li      t5, 0
+pn_dec_lp:
+    beq     t0, a1, pn_dec_end
+    lbu     t1, 0(t0)
+    li      t2, 48
+    blt     t1, t2, pn_dec_end
+    li      t2, 58
+    bge     t1, t2, pn_dec_end
+    addi    t3, t1, -48
+    slli    t2, a0, 3
+    slli    t4, a0, 1
+    add     t2, t2, t4
+    add     a0, t2, t3
+    li      t5, 1
+    addi    t0, t0, 1
+    j       pn_dec_lp
+pn_dec_end:
+    beqz    t5, pn_bad
+    mv      a2, t0
+    ret
+pn_bad:
+    j       halt_err
+
+# ============================================================================
+# mul_u32: a0 = a, a1 = b → a0 = (a*b) low 32 bits.
+# Soft multiply (RV32I has no MUL).
+# ============================================================================
+
+mul_u32:
+    li      t0, 0
+mul_lp:
+    beqz    a1, mul_done
+    andi    t1, a1, 1
+    beqz    t1, mul_sk
+    add     t0, t0, a0
+mul_sk:
+    slli    a0, a0, 1
+    srli    a1, a1, 1
+    j       mul_lp
+mul_done:
+    mv      a0, t0
+    ret
+
+# ============================================================================
+# Expression evaluator. Contract (ALL levels):
+#   in:  a0 = ptr, a1 = end
+#   out: a0 = value, a2 = new_ptr  (a1 = end, preserved)
+# Grammar (lowest → highest precedence):
+#   expr   := or
+#   or     := xor ('|' xor)*
+#   xor    := and ('^' and)*
+#   and    := add ('&' add)*
+#   add    := mul (('+'|'-') mul)*
+#   mul    := unary ('*' unary)*
+#   unary  := ('-'|'~')? primary
+#   primary:= number | symbol | '(' expr ')'
+# Halts on syntax error or undefined symbol.
+# ============================================================================
+
+eval_expr:
+    j       eval_or
+
+eval_or:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, eval_xor
+eor_lp:
+    beq     a2, a1, eor_done
+    lbu     t0, 0(a2)
+    li      t1, 0x7C                    # '|'
+    bne     t0, t1, eor_done
+    sw      a0, 4(sp)
+    addi    a0, a2, 1
+    jal     ra, eval_xor
+    lw      t0, 4(sp)
+    or      a0, t0, a0
+    j       eor_lp
+eor_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+eval_xor:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, eval_and
+exr_lp:
+    beq     a2, a1, exr_done
+    lbu     t0, 0(a2)
+    li      t1, 0x5E                    # '^'
+    bne     t0, t1, exr_done
+    sw      a0, 4(sp)
+    addi    a0, a2, 1
+    jal     ra, eval_and
+    lw      t0, 4(sp)
+    xor     a0, t0, a0
+    j       exr_lp
+exr_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+eval_and:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, eval_add
+ean_lp:
+    beq     a2, a1, ean_done
+    lbu     t0, 0(a2)
+    li      t1, 0x26                    # '&'
+    bne     t0, t1, ean_done
+    sw      a0, 4(sp)
+    addi    a0, a2, 1
+    jal     ra, eval_add
+    lw      t0, 4(sp)
+    and     a0, t0, a0
+    j       ean_lp
+ean_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+eval_add:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, eval_mul
+ead_lp:
+    beq     a2, a1, ead_done
+    lbu     t0, 0(a2)
+    li      t1, 0x2B                    # '+'
+    beq     t0, t1, ead_add
+    li      t1, 0x2D                    # '-'
+    bne     t0, t1, ead_done
+    sw      a0, 4(sp)
+    li      t0, 0
+    sw      t0, 8(sp)
+    j       ead_go
+ead_add:
+    sw      a0, 4(sp)
+    li      t0, 1
+    sw      t0, 8(sp)
+ead_go:
+    addi    a0, a2, 1
+    jal     ra, eval_mul
+    lw      t0, 4(sp)
+    lw      t1, 8(sp)
+    beqz    t1, ead_sub
+    add     a0, t0, a0
+    j       ead_lp
+ead_sub:
+    sub     a0, t0, a0
+    j       ead_lp
+ead_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    ret
+
+eval_mul:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, eval_unary
+emu_lp:
+    beq     a2, a1, emu_done
+    lbu     t0, 0(a2)
+    li      t1, 0x2A                    # '*'
+    bne     t0, t1, emu_done
+    sw      a0, 4(sp)
+    addi    a0, a2, 1
+    jal     ra, eval_unary
+    # save a1(end) and a2(new_ptr) across mul_u32 (which clobbers a0/a1)
+    addi    sp, sp, -8
+    sw      a1, 0(sp)
+    sw      a2, 4(sp)
+    lw      t0, 12(sp)                  # LHS (was at 4(sp) before adjust)
+    mv      a1, a0
+    mv      a0, t0
+    jal     ra, mul_u32
+    lw      a1, 0(sp)
+    lw      a2, 4(sp)
+    addi    sp, sp, 8
+    j       emu_lp
+emu_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+eval_unary:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    beq     a0, a1, eu_bad
+    lbu     t0, 0(a0)
+    li      t1, 0x2D                    # '-'
+    beq     t0, t1, eu_neg
+    li      t1, 0x7E                    # '~'
+    beq     t0, t1, eu_bnot
+    jal     ra, eval_primary
+    j       eu_ret
+eu_neg:
+    addi    a0, a0, 1
+    jal     ra, eval_unary
+    sub     a0, x0, a0
+    j       eu_ret
+eu_bnot:
+    addi    a0, a0, 1
+    jal     ra, eval_unary
+    xori    a0, a0, -1
+    j       eu_ret
+eu_bad:
+    j       halt_err
+eu_ret:
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+eval_primary:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    beq     a0, a1, ep_bad
+    lbu     t0, 0(a0)
+    li      t1, 0x28                    # '('
+    beq     t0, t1, ep_paren
+    li      t1, 48                      # '0'
+    blt     t0, t1, ep_chk_ident
+    li      t1, 58                      # '9'+1
+    blt     t0, t1, ep_num
+ep_chk_ident:
+    li      t1, 65                      # 'A'
+    blt     t0, t1, ep_chk_us
+    li      t1, 91                      # 'Z'+1
+    blt     t0, t1, ep_sym
+    li      t1, 97                      # 'a'
+    blt     t0, t1, ep_chk_us
+    li      t1, 123                     # 'z'+1
+    blt     t0, t1, ep_sym
+    j       ep_bad
+ep_chk_us:
+    li      t1, 95                      # '_'
+    beq     t0, t1, ep_sym
+    j       ep_bad
+ep_num:
+    jal     ra, parse_num
+    j       ep_ret
+ep_sym:
+    jal     ra, find_sym_ident
+    j       ep_ret
+ep_paren:
+    addi    a0, a0, 1
+    jal     ra, eval_or
+    beq     a2, a1, ep_bad
+    lbu     t0, 0(a2)
+    li      t1, 0x29                    # ')'
+    bne     t0, t1, ep_bad
+    addi    a2, a2, 1
+ep_ret:
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+ep_bad:
+    j       halt_err
+
+# ============================================================================
+# find_sym_ident: scan an identifier [A-Za-z_][A-Za-z0-9_]* starting at a0,
+# look it up via find_sym, return its value.
+#   a0 = ptr, a1 = end → a0 = value, a2 = new_ptr (a1 preserved)
+# Halts if identifier empty or not found.
+# ============================================================================
+
+find_sym_ident:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    mv      t0, a0                      # cursor
+fsi_scan:
+    beq     t0, a1, fsi_end
+    lbu     t1, 0(t0)
+    # _
+    li      t2, 95
+    beq     t1, t2, fsi_go
+    # 0-9
+    li      t2, 48
+    blt     t1, t2, fsi_end
+    li      t2, 58
+    blt     t1, t2, fsi_go
+    # A-Z
+    li      t2, 65
+    blt     t1, t2, fsi_end
+    li      t2, 91
+    blt     t1, t2, fsi_go
+    # a-z
+    li      t2, 97
+    blt     t1, t2, fsi_end
+    li      t2, 123
+    blt     t1, t2, fsi_go
+    j       fsi_end
+fsi_go:
+    addi    t0, t0, 1
+    j       fsi_scan
+fsi_end:
+    sub     t2, t0, a0                  # name_len
+    beqz    t2, fsi_bad
+    sw      t0, 4(sp)                   # new_ptr
+    sw      a1, 8(sp)                   # end
+    mv      a1, t2
+    jal     ra, find_sym
+    beqz    a2, fsi_bad
+    lw      a1, 8(sp)
+    lw      a2, 4(sp)
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    ret
+fsi_bad:
+    j       halt_err
+
+# ============================================================================
+# do_ps_equ: .equ NAME, EXPR — define new constant.
+#   Reads NAME token, saves to stack, checks not-already-defined,
+#   reads EXPR token, evaluates, appends symtab entry (kind=1).
+#   Halts if NAME already exists.
+# ============================================================================
+
+do_ps_equ:
+    addi    sp, sp, -24                 # 16 name buf + 4 name_len + 4 ra
+    sw      ra, 20(sp)
+    jal     ra, read_token              # s10/s0 = NAME
+    li      t0, 17
+    bge     s0, t0, dpe_bad
+    li      t0, 1
+    blt     s0, t0, dpe_bad
+    sw      s0, 16(sp)
+    # Copy name (s0 bytes) to 0(sp), zero-pad to 16
+    mv      t1, s10
+    mv      t2, sp
+    mv      t3, s0
+    li      t4, 16
+dpe_cp:
+    beqz    t3, dpe_pad
+    lbu     t5, 0(t1)
+    sb      t5, 0(t2)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    addi    t4, t4, -1
+    j       dpe_cp
+dpe_pad:
+    beqz    t4, dpe_have
+    sb      x0, 0(t2)
+    addi    t2, t2, 1
+    addi    t4, t4, -1
+    j       dpe_pad
+dpe_have:
+    # Check duplicate
+    mv      a0, sp
+    lw      a1, 16(sp)
+    jal     ra, find_sym
+    bnez    a2, dpe_bad                 # already defined → error
+    # Read EXPR (multi-token), evaluate
+    jal     ra, read_multi_expr
+    # Append symtab entry: name (0..15 of sp), value, kind=1
+    mv      t1, sp
+    mv      t2, s4
+    li      t3, 16
+dpe_st:
+    lbu     t4, 0(t1)
+    sb      t4, 0(t2)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    bnez    t3, dpe_st
+    sw      a0, 16(s4)
+    li      t0, 1
+    sw      t0, 20(s4)
+    addi    s4, s4, 24
+    lw      ra, 20(sp)
+    addi    sp, sp, 24
+    ret
+dpe_bad:
+    j       halt_err
+
+# ============================================================================
+# do_ps_set: .set NAME, EXPR — mutable assignment.
+#   Same as .equ but if NAME exists with kind=1, updates value in place.
+#   If NAME exists with kind=0 (code label), halts.
+#   If NAME absent, appends new entry (kind=1).
+# ============================================================================
+
+do_ps_set:
+    addi    sp, sp, -24
+    sw      ra, 20(sp)
+    jal     ra, read_token
+    li      t0, 17
+    bge     s0, t0, dps_bad
+    li      t0, 1
+    blt     s0, t0, dps_bad
+    sw      s0, 16(sp)
+    mv      t1, s10
+    mv      t2, sp
+    mv      t3, s0
+    li      t4, 16
+dps_cp:
+    beqz    t3, dps_pad
+    lbu     t5, 0(t1)
+    sb      t5, 0(t2)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    addi    t4, t4, -1
+    j       dps_cp
+dps_pad:
+    beqz    t4, dps_have
+    sb      x0, 0(t2)
+    addi    t2, t2, 1
+    addi    t4, t4, -1
+    j       dps_pad
+dps_have:
+    jal     ra, read_multi_expr
+    # Find existing entry by scanning symtab
+    mv      t0, s3
+dps_scan:
+    beq     t0, s4, dps_new
+    mv      t1, sp
+    mv      t2, t0
+    li      t3, 16
+dps_cmp:
+    lbu     t4, 0(t1)
+    lbu     t5, 0(t2)
+    bne     t4, t5, dps_nxt
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    bnez    t3, dps_cmp
+    # Matched: check kind
+    lw      t4, 20(t0)
+    beqz    t4, dps_bad                 # kind=0 (label) → refuse
+    sw      a0, 16(t0)                  # update value
+    j       dps_ret
+dps_nxt:
+    addi    t0, t0, 24
+    j       dps_scan
+dps_new:
+    mv      t1, sp
+    mv      t2, s4
+    li      t3, 16
+dps_ncp:
+    lbu     t4, 0(t1)
+    sb      t4, 0(t2)
+    addi    t1, t1, 1
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    bnez    t3, dps_ncp
+    sw      a0, 16(s4)
+    li      t4, 1
+    sw      t4, 20(s4)
+    addi    s4, s4, 24
+dps_ret:
+    lw      ra, 20(sp)
+    addi    sp, sp, 24
+    ret
+dps_bad:
+    j       halt_err
+
+# ============================================================================
+# do_ps_byte: .byte EXPR — emit low 8 bits of expression as 1 byte.
+# ============================================================================
+
+do_ps_byte:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op
+    sb      a0, 0(s2)
+    addi    s2, s2, 1
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_half: .half EXPR — emit low 16 bits as 2 bytes (little-endian).
+# ============================================================================
+
+do_ps_half:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op
+    sb      a0, 0(s2)
+    srli    a0, a0, 8
+    sb      a0, 1(s2)
+    addi    s2, s2, 2
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_word: .word EXPR — emit 32 bits as 4 bytes (little-endian).
+# ============================================================================
+
+do_ps_word:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    j       emit_word
+
+# ============================================================================
+# do_ps_zero: .zero COUNT — emit COUNT zero bytes.
+# ============================================================================
+
+do_ps_zero:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op
+    mv      t0, a0
+dpz_lp:
+    beqz    t0, dpz_done
+    sb      x0, 0(s2)
+    addi    s2, s2, 1
+    addi    t0, t0, -1
+    j       dpz_lp
+dpz_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_align: .align N — pad with zeros to 2^N byte boundary.
+# ============================================================================
+
+do_ps_align:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op
+    li      t0, 1
+    sll     t0, t0, a0                  # t0 = 2^N = align
+    addi    t1, t0, -1                  # mask = align-1
+    sub     t2, s2, s1                  # current offset
+    and     t3, t2, t1                  # offset mod align
+    beqz    t3, dpal_done
+    sub     t3, t0, t3                  # pad count
+dpal_lp:
+    sb      x0, 0(s2)
+    addi    s2, s2, 1
+    addi    t3, t3, -1
+    bnez    t3, dpal_lp
+dpal_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_balign: .balign N — pad with zeros to N-byte boundary.
+# Requires N to be a power of 2.
+# ============================================================================
+
+do_ps_balign:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op             # a0 = align
+    addi    t1, a0, -1                  # mask = align-1
+    sub     t2, s2, s1                  # current offset
+    and     t3, t2, t1                  # offset mod align
+    beqz    t3, dpba_done
+    sub     t3, a0, t3                  # pad count
+dpba_lp:
+    sb      x0, 0(s2)
+    addi    s2, s2, 1
+    addi    t3, t3, -1
+    bnez    t3, dpba_lp
+dpba_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_fill: .fill COUNT, SIZE, VALUE — emit COUNT chunks of SIZE bytes each,
+# where each chunk is the low SIZE bytes of VALUE (little-endian).
+# ============================================================================
+
+do_ps_fill:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, read_imm_op
+    sw      a0, 4(sp)                   # count
+    jal     ra, read_imm_op
+    sw      a0, 8(sp)                   # size
+    jal     ra, read_imm_op
+    mv      t2, a0                      # value
+    lw      t0, 4(sp)                   # count
+    lw      t1, 8(sp)                   # size
+dpf_cnt_lp:
+    beqz    t0, dpf_done
+    mv      t3, t1                      # bytes this chunk
+    mv      t4, t2                      # rolling value
+dpf_byte_lp:
+    beqz    t3, dpf_nx
+    sb      t4, 0(s2)
+    addi    s2, s2, 1
+    srli    t4, t4, 8
+    addi    t3, t3, -1
+    j       dpf_byte_lp
+dpf_nx:
+    addi    t0, t0, -1
+    j       dpf_cnt_lp
+dpf_done:
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    ret
+
+# ============================================================================
+# do_ps_ascii: .ascii "STRING" — emit raw bytes, process backslash escapes.
+# Supported escapes: \n \t \r \0 \\ \"
+# ============================================================================
+
+do_ps_ascii:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_token              # token includes surrounding quotes
+    jal     ra, emit_string_body
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_asciz: like .ascii, but append a NUL byte.
+# ============================================================================
+
+do_ps_asciz:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, read_token
+    jal     ra, emit_string_body
+    sb      x0, 0(s2)
+    addi    s2, s2, 1
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# emit_string_body: token at s10 is a quoted string "...". Walk body chars
+# between quotes, translate escapes, emit to output buffer.
+# Uses s0 as token length (set by read_token). Halts on malformed input.
+# ============================================================================
+
+emit_string_body:
+    # Validate: s0 >= 2, first and last chars are '"'
+    li      t0, 2
+    blt     s0, t0, esb_bad
+    lbu     t0, 0(s10)
+    li      t1, 0x22
+    bne     t0, t1, esb_bad
+    add     t2, s10, s0
+    addi    t2, t2, -1                  # ptr to last char
+    lbu     t0, 0(t2)
+    bne     t0, t1, esb_bad
+    # Walk body: [s10+1, s10+s0-1)
+    addi    t0, s10, 1                  # cursor
+    # t2 = end (exclusive)
+esb_lp:
+    beq     t0, t2, esb_done
+    lbu     t3, 0(t0)
+    li      t4, 0x5C                    # '\'
+    beq     t3, t4, esb_esc
+    sb      t3, 0(s2)
+    addi    s2, s2, 1
+    addi    t0, t0, 1
+    j       esb_lp
+esb_esc:
+    addi    t0, t0, 1
+    beq     t0, t2, esb_bad             # dangling backslash
+    lbu     t3, 0(t0)
+    li      t4, 110                     # 'n'
+    beq     t3, t4, esb_n
+    li      t4, 116                     # 't'
+    beq     t3, t4, esb_t
+    li      t4, 114                     # 'r'
+    beq     t3, t4, esb_r
+    li      t4, 48                      # '0'
+    beq     t3, t4, esb_0
+    li      t4, 0x5C                    # '\\'
+    beq     t3, t4, esb_emit
+    li      t4, 0x22                    # '"'
+    beq     t3, t4, esb_emit
+    j       esb_bad
+esb_n:
+    li      t3, 10
+    j       esb_emit
+esb_t:
+    li      t3, 9
+    j       esb_emit
+esb_r:
+    li      t3, 13
+    j       esb_emit
+esb_0:
+    li      t3, 0
+esb_emit:
+    sb      t3, 0(s2)
+    addi    s2, s2, 1
+    addi    t0, t0, 1
+    j       esb_lp
+esb_done:
+    ret
+esb_bad:
+    j       halt_err
+
+# ============================================================================
+# is_single_ident: a0 = start, a1 = end → a2 = 1 if [a0, a1) is a single
+# valid identifier ([A-Za-z_][A-Za-z0-9_]*), else 0. Non-clobber: a0-a1.
+# ============================================================================
+
+is_single_ident:
+    beq     a0, a1, isi_no
+    lbu     t0, 0(a0)
+    li      t1, 95                      # '_'
+    beq     t0, t1, isi_rest
+    li      t1, 65
+    blt     t0, t1, isi_no
+    li      t1, 91
+    blt     t0, t1, isi_rest
+    li      t1, 97
+    blt     t0, t1, isi_no
+    li      t1, 123
+    blt     t0, t1, isi_rest
+    j       isi_no
+isi_rest:
+    addi    t2, a0, 1
+isi_lp:
+    beq     t2, a1, isi_yes
+    lbu     t0, 0(t2)
+    li      t1, 95
+    beq     t0, t1, isi_cont
+    li      t1, 48
+    blt     t0, t1, isi_no
+    li      t1, 58
+    blt     t0, t1, isi_cont
+    li      t1, 65
+    blt     t0, t1, isi_no
+    li      t1, 91
+    blt     t0, t1, isi_cont
+    li      t1, 97
+    blt     t0, t1, isi_no
+    li      t1, 123
+    blt     t0, t1, isi_cont
+    j       isi_no
+isi_cont:
+    addi    t2, t2, 1
+    j       isi_lp
+isi_yes:
+    li      a2, 1
+    ret
+isi_no:
+    li      a2, 0
+    ret
+
+# ============================================================================
+# do_ps_lla: lla rd, sym → auipc rd, %pcrel_hi(sym); addi rd, rd, %pcrel_lo(sym)
+# Records 2 pcrel fixups that resolve relative to the auipc's PC.
+# ============================================================================
+
+do_ps_lla:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rd
+    jal     ra, record_pcrel_pair
+    li      a0, 0x17                    # AUIPC
+    lw      a1, 4(sp)
+    li      a2, 0
+    jal     ra, emit_u_inst
+    li      a0, 0x13                    # ADDI
+    lw      a1, 4(sp)
+    lw      a2, 4(sp)
+    li      a3, 0
+    li      a4, 0
+    jal     ra, emit_i_inst
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+
+# ============================================================================
+# do_ps_call: call sym → auipc ra, %pcrel_hi(sym); jalr ra, ra, %pcrel_lo(sym)
+# ============================================================================
+
+do_ps_call:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, record_pcrel_pair
+    li      a0, 0x17                    # AUIPC
+    li      a1, 1                       # rd = ra
+    li      a2, 0
+    jal     ra, emit_u_inst
+    li      a0, 0x67                    # JALR
+    li      a1, 1                       # rd = ra
+    li      a2, 1                       # rs1 = ra
+    li      a3, 0
+    li      a4, 0
+    jal     ra, emit_i_inst
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# do_ps_tail: tail sym → auipc t1, %pcrel_hi(sym); jalr x0, t1, %pcrel_lo(sym)
+# ============================================================================
+
+do_ps_tail:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, record_pcrel_pair
+    li      a0, 0x17                    # AUIPC
+    li      a1, 6                       # rd = t1
+    li      a2, 0
+    jal     ra, emit_u_inst
+    li      a0, 0x67                    # JALR
+    li      a1, 0                       # rd = x0
+    li      a2, 6                       # rs1 = t1
+    li      a3, 0
+    li      a4, 0
+    jal     ra, emit_i_inst
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# Simple 1-instruction pseudos. Each reads its operands, sets up the emit
+# helper call, and tail-calls emit_i_inst / emit_r_inst / emit_b_inst.
+# ============================================================================
+
+# nop → addi x0, x0, 0
+do_ps_nop:
+    li      a0, 0x13
+    li      a1, 0
+    li      a2, 0
+    li      a3, 0
+    li      a4, 0
+    j       emit_i_inst
+
+# neg rd, rs → sub rd, x0, rs
+do_ps_neg:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    li      a0, 0x33
+    lw      a1, 4(sp)
+    li      a2, 0
+    mv      a3, t3
+    li      a4, 0
+    li      a5, 0x20
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    j       emit_r_inst
+
+# not rd, rs → xori rd, rs, -1
+do_ps_not:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    li      a0, 0x13
+    lw      a1, 4(sp)
+    mv      a2, t3
+    li      a3, 4
+    li      a4, -1
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    j       emit_i_inst
+
+# seqz rd, rs → sltiu rd, rs, 1
+do_ps_seqz:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    li      a0, 0x13
+    lw      a1, 4(sp)
+    mv      a2, t3
+    li      a3, 3
+    li      a4, 1
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    j       emit_i_inst
+
+# snez rd, rs → sltu rd, x0, rs
+do_ps_snez:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    li      a0, 0x33
+    lw      a1, 4(sp)
+    li      a2, 0
+    mv      a3, t3
+    li      a4, 3
+    li      a5, 0
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    j       emit_r_inst
+
+# sltz rd, rs → slt rd, rs, x0
+do_ps_sltz:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    li      a0, 0x33
+    lw      a1, 4(sp)
+    mv      a2, t3
+    li      a3, 0
+    li      a4, 2
+    li      a5, 0
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    j       emit_r_inst
+
+# sgtz rd, rs → slt rd, x0, rs
+do_ps_sgtz:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    mv      t3, a0
+    li      a0, 0x33
+    lw      a1, 4(sp)
+    li      a2, 0
+    mv      a3, t3
+    li      a4, 2
+    li      a5, 0
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    j       emit_r_inst
+
+# bgt rs, rt, L → blt rt, rs, L
+do_ps_bgt:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)                   # rs
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)                   # rt
+    li      a0, 0
+    jal     ra, read_br_target
+    mv      t3, a0
+    lw      a1, 8(sp)                   # rs1 = rt
+    lw      a2, 4(sp)                   # rs2 = rs
+    li      a0, 0x63
+    li      a3, 4
+    mv      a4, t3
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    j       emit_b_inst
+
+# ble rs, rt, L → bge rt, rs, L
+do_ps_ble:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)
+    li      a0, 0
+    jal     ra, read_br_target
+    mv      t3, a0
+    lw      a1, 8(sp)
+    lw      a2, 4(sp)
+    li      a0, 0x63
+    li      a3, 5
+    mv      a4, t3
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    j       emit_b_inst
+
+# bgtu rs, rt, L → bltu rt, rs, L
+do_ps_bgtu:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)
+    li      a0, 0
+    jal     ra, read_br_target
+    mv      t3, a0
+    lw      a1, 8(sp)
+    lw      a2, 4(sp)
+    li      a0, 0x63
+    li      a3, 6
+    mv      a4, t3
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    j       emit_b_inst
+
+# bleu rs, rt, L → bgeu rt, rs, L
+do_ps_bleu:
+    addi    sp, sp, -12
+    sw      ra, 0(sp)
+    jal     ra, read_reg_op
+    sw      a0, 4(sp)
+    jal     ra, read_reg_op
+    sw      a0, 8(sp)
+    li      a0, 0
+    jal     ra, read_br_target
+    mv      t3, a0
+    lw      a1, 8(sp)
+    lw      a2, 4(sp)
+    li      a0, 0x63
+    li      a3, 7
+    mv      a4, t3
+    lw      ra, 0(sp)
+    addi    sp, sp, 12
+    j       emit_b_inst
+
+# ============================================================================
+# build_local_name: a0=digit (0-9), a1=seq, a2=buf → writes 9 bytes
+# ("__lN_HHHH") at buf. Returns a0 = 9 (length written).
+# HHHH is 4-char uppercase hex of seq (supports up to 65535 occurrences).
+# ============================================================================
+
+build_local_name:
+    li      t0, 95                      # '_'
+    sb      t0, 0(a2)
+    sb      t0, 1(a2)
+    li      t0, 108                     # 'l'
+    sb      t0, 2(a2)
+    addi    t0, a0, 48                  # '0'+digit
+    sb      t0, 3(a2)
+    li      t0, 95
+    sb      t0, 4(a2)
+    li      t2, 16
+    addi    t3, a2, 5
+bln_lp:
+    addi    t2, t2, -4
+    bltz    t2, bln_done
+    srl     t0, a1, t2
+    andi    t0, t0, 0xF
+    li      t4, 10
+    blt     t0, t4, bln_dec
+    addi    t0, t0, 55
+    j       bln_w
+bln_dec:
+    addi    t0, t0, 48
+bln_w:
+    sb      t0, 0(t3)
+    addi    t3, t3, 1
+    j       bln_lp
+bln_done:
+    li      a0, 9
+    ret
+
+# ============================================================================
+# define_local_label: a0 = digit (0-9). Bumps counter, writes new symtab
+# entry "__lN_HHHH" with value = current output offset, kind=0.
+# ============================================================================
+
+define_local_label:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    slli    t0, a0, 2
+    add     t0, s10, t0
+    lw      t1, 64(t0)
+    addi    t1, t1, 1
+    sw      t1, 64(t0)
+    mv      t2, s4
+    li      t3, 16
+dll_z:
+    sb      x0, 0(t2)
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    bnez    t3, dll_z
+    mv      a1, t1
+    mv      a2, s4
+    jal     ra, build_local_name
+    sub     t5, s2, s1
+    sw      t5, 16(s4)
+    sw      x0, 20(s4)
+    addi    s4, s4, 24
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# Prologue/Epilogue/Return with LIFO frame tracking.
+# Frame stack: depth at 120(s10), entries at 128(s10) (40B each, max 8).
+#   entry[0..3]   = frame_size (16-byte-aligned)
+#   entry[4..7]   = nregs (extra regs beyond ra)
+#   entry[8..39]  = reg numbers, up to 8
+#
+# prologue r0 r1 ... x0
+#   - Reads regs until x0 sentinel.
+#   - Saves ra at 0(sp), reg_i at (i+1)*4(sp).
+#   - Pushes descriptor to LIFO.
+#
+# epilogue
+#   - Pops descriptor, emits matching loads then `addi sp, sp, frame_size`.
+#
+# return = epilogue + `ret` (jalr x0, ra, 0).
+# ============================================================================
+
+do_ps_prologue:
+    # Stack: 0..31=regs[0..7], 32=nregs, 36=frame_size, 40=i, 44=ra
+    addi    sp, sp, -48
+    sw      ra, 44(sp)
+    sw      x0, 32(sp)
+dpp_read:
+    jal     ra, read_reg_op
+    beqz    a0, dpp_build
+    lw      t0, 32(sp)
+    li      t1, 8
+    bge     t0, t1, dpp_bad
+    slli    t1, t0, 2
+    add     t1, sp, t1
+    sw      a0, 0(t1)
+    addi    t0, t0, 1
+    sw      t0, 32(sp)
+    j       dpp_read
+dpp_build:
+    lw      t0, 32(sp)
+    addi    t1, t0, 1
+    slli    t1, t1, 2
+    addi    t1, t1, 15
+    andi    t1, t1, -16
+    sw      t1, 36(sp)
+    lw      t2, 120(s10)
+    li      t3, 8
+    bge     t2, t3, dpp_bad
+    slli    t3, t2, 3
+    slli    t4, t2, 5
+    add     t3, t3, t4                  # depth*40
+    add     t3, t3, s10
+    addi    t3, t3, 128
+    sw      t1, 0(t3)
+    sw      t0, 4(t3)
+    mv      t4, sp
+    addi    t5, t3, 8
+    mv      t6, t0
+dpp_cp:
+    beqz    t6, dpp_cpd
+    lw      a0, 0(t4)
+    sw      a0, 0(t5)
+    addi    t4, t4, 4
+    addi    t5, t5, 4
+    addi    t6, t6, -1
+    j       dpp_cp
+dpp_cpd:
+    addi    t2, t2, 1
+    sw      t2, 120(s10)
+    # Emit addi sp, sp, -frame_size
+    lw      t1, 36(sp)
+    sub     t1, x0, t1
+    li      a0, 0x13
+    li      a1, 2
+    li      a2, 2
+    li      a3, 0
+    mv      a4, t1
+    jal     ra, emit_i_inst
+    # Emit sw ra, 0(sp)
+    li      a0, 0x23
+    li      a1, 2
+    li      a2, 1
+    li      a3, 2
+    li      a4, 0
+    jal     ra, emit_s_inst
+    # Emit sw regs[i], (i+1)*4(sp) loop
+    sw      x0, 40(sp)
+dpp_emit:
+    lw      t0, 40(sp)
+    lw      t1, 32(sp)
+    beq     t0, t1, dpp_ret
+    slli    t2, t0, 2
+    add     t2, sp, t2
+    lw      a2, 0(t2)
+    addi    t3, t0, 1
+    slli    t3, t3, 2
+    li      a0, 0x23
+    li      a1, 2
+    li      a3, 2
+    mv      a4, t3
+    jal     ra, emit_s_inst
+    lw      t0, 40(sp)
+    addi    t0, t0, 1
+    sw      t0, 40(sp)
+    j       dpp_emit
+dpp_ret:
+    lw      ra, 44(sp)
+    addi    sp, sp, 48
+    ret
+dpp_bad:
+    j       halt_err
+
+do_ps_epilogue:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    lw      t0, 120(s10)
+    beqz    t0, dpep_bad
+    addi    t0, t0, -1
+    sw      t0, 120(s10)
+    slli    t1, t0, 3
+    slli    t2, t0, 5
+    add     t1, t1, t2
+    add     t1, t1, s10
+    addi    t1, t1, 128                 # entry ptr
+    lw      t2, 0(t1)                   # frame_size
+    lw      t3, 4(t1)                   # nregs
+    addi    sp, sp, -16
+    sw      t2, 0(sp)
+    sw      t1, 4(sp)
+    sw      t3, 8(sp)
+    sw      x0, 12(sp)                  # i = 0
+dpe_lp:
+    lw      t0, 12(sp)
+    lw      t1, 8(sp)
+    beq     t0, t1, dpe_end
+    lw      t2, 4(sp)
+    slli    t3, t0, 2
+    add     t3, t2, t3
+    lw      a1, 8(t3)                   # regs[i] (rd)
+    addi    t4, t0, 1
+    slli    t4, t4, 2
+    li      a0, 0x03                    # LOAD opcode
+    li      a2, 2                       # rs1 = sp
+    li      a3, 2                       # f3 = LW
+    mv      a4, t4
+    jal     ra, emit_i_inst
+    lw      t0, 12(sp)
+    addi    t0, t0, 1
+    sw      t0, 12(sp)
+    j       dpe_lp
+dpe_end:
+    # Emit lw ra, 0(sp)
+    li      a0, 0x03
+    li      a1, 1
+    li      a2, 2
+    li      a3, 2
+    li      a4, 0
+    jal     ra, emit_i_inst
+    # Emit addi sp, sp, frame_size
+    lw      t0, 0(sp)
+    li      a0, 0x13
+    li      a1, 2
+    li      a2, 2
+    li      a3, 0
+    mv      a4, t0
+    jal     ra, emit_i_inst
+    addi    sp, sp, 16
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+dpep_bad:
+    j       halt_err
+
+do_ps_return:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    jal     ra, do_ps_epilogue
+    # Emit ret (jalr x0, ra, 0)
+    lui     t0, 8
+    addi    t0, t0, 0x067
+    mv      a0, t0
+    jal     ra, emit_word
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+
+# ============================================================================
+# Macro engine (positional args \1..\9, \@ counter, no nested invocation).
+#   Macro table at 512(s10): 32 × 48B entries
+#     [0..15]  name (zero-padded)
+#     [16..19] arg_count
+#     [20..23] body_start (offset in body buf)
+#     [24..27] body_length
+#   Body buffer at 2048(s10) (8 KB): whitespace-separated tokens.
+#   Expansion buffer at 10240(s10) (4 KB).
+#   Args buffer at 14336(s10) (9 × 32B slots).
+# ============================================================================
+
+# do_ps_macro: handles `.macro NAME COUNT ... body ... .endm`.
+do_ps_macro:
+    addi    sp, sp, -4
+    sw      ra, 0(sp)
+    lw      t0, 448(s10)
+    li      t1, 32
+    bge     t0, t1, dpm_bad
+    # Read NAME token
+    jal     ra, read_token
+    li      t0, 17
+    bge     s0, t0, dpm_bad
+    # entry_ptr = macro_table + count*48
+    lw      t0, 448(s10)
+    slli    t1, t0, 4
+    slli    t2, t0, 5
+    add     t1, t1, t2
+    add     t1, t1, s10
+    addi    t1, t1, 512
+    # Zero name field
+    mv      t2, t1
+    li      t3, 16
+dpm_z:
+    sb      x0, 0(t2)
+    addi    t2, t2, 1
+    addi    t3, t3, -1
+    bnez    t3, dpm_z
+    # Copy name from s10 to entry
+    mv      t2, s10
+    mv      t3, t1
+    mv      t4, s0
+dpm_cp:
+    beqz    t4, dpm_count
+    lbu     t5, 0(t2)
+    sb      t5, 0(t3)
+    addi    t2, t2, 1
+    addi    t3, t3, 1
+    addi    t4, t4, -1
+    j       dpm_cp
+dpm_count:
+    # Read COUNT token, evaluate
+    jal     ra, read_token
+    mv      a0, s10
+    add     a1, s10, s0
+    jal     ra, eval_expr
+    # a0 = arg_count (must be 0..9)
+    li      t2, 10
+    bge     a0, t2, dpm_bad
+    # Reload entry_ptr
+    lw      t0, 448(s10)
+    slli    t1, t0, 4
+    slli    t2, t0, 5
+    add     t1, t1, t2
+    add     t1, t1, s10
+    addi    t1, t1, 512
+    sw      a0, 16(t1)
+    lw      t2, 452(s10)
+    sw      t2, 28(t1)                  # arg_names_start
+    mv      t3, t2                      # body write cursor
+    # Read arg_count arg name tokens, append to body buf space-separated.
+    li      t4, 0
+dpm_argn:
+    beq     t4, a0, dpm_argn_done
+    addi    sp, sp, -12
+    sw      a0, 0(sp)
+    sw      t1, 4(sp)
+    sw      t4, 8(sp)
+    addi    sp, sp, -4
+    sw      t3, 0(sp)
+    jal     ra, read_token
+    lw      t3, 0(sp)
+    addi    sp, sp, 4
+    lw      a0, 0(sp)
+    lw      t1, 4(sp)
+    lw      t4, 8(sp)
+    addi    sp, sp, 12
+    li      t5, 17
+    bge     s0, t5, dpm_bad
+    li      t5, 8192
+    bge     t3, t5, dpm_bad
+    li      t5, 2048
+    add     t5, s10, t5
+    add     t5, t5, t3                  # write ptr
+    mv      t6, s10
+    mv      a2, s0
+dpm_argn_cp:
+    beqz    a2, dpm_argn_sep
+    lbu     a3, 0(t6)
+    sb      a3, 0(t5)
+    addi    t5, t5, 1
+    addi    t6, t6, 1
+    addi    t3, t3, 1
+    addi    a2, a2, -1
+    j       dpm_argn_cp
+dpm_argn_sep:
+    li      a3, 32
+    sb      a3, 0(t5)
+    addi    t3, t3, 1
+    addi    t4, t4, 1
+    j       dpm_argn
+dpm_argn_done:
+    sw      t3, 20(t1)                  # body_start (after arg names)
+    sw      t3, 452(s10)                # update global body_wr
+dpm_body:
+    addi    sp, sp, -8
+    sw      t1, 0(sp)
+    sw      t3, 4(sp)
+    jal     ra, read_token
+    lw      t1, 0(sp)
+    lw      t3, 4(sp)
+    addi    sp, sp, 8
+    # Check if token is ".endm" (5 chars)
+    li      t2, 5
+    bne     s0, t2, dpm_append
+    lbu     t2, 0(s10)
+    li      t4, 46                      # '.'
+    bne     t2, t4, dpm_append
+    lbu     t2, 1(s10)
+    li      t4, 101
+    bne     t2, t4, dpm_append
+    lbu     t2, 2(s10)
+    li      t4, 110
+    bne     t2, t4, dpm_append
+    lbu     t2, 3(s10)
+    li      t4, 100
+    bne     t2, t4, dpm_append
+    lbu     t2, 4(s10)
+    li      t4, 109
+    bne     t2, t4, dpm_append
+    # Matched .endm → finalize
+    lw      t2, 20(t1)
+    sub     t4, t3, t2
+    sw      t4, 24(t1)
+    sw      t3, 452(s10)
+    lw      t2, 448(s10)
+    addi    t2, t2, 1
+    sw      t2, 448(s10)
+    lw      ra, 0(sp)
+    addi    sp, sp, 4
+    ret
+dpm_append:
+    li      t5, 8192
+    bge     t3, t5, dpm_bad
+    li      t4, 2048
+    add     t4, s10, t4
+    add     t4, t4, t3                  # body write ptr
+    # Emit leading separator if body has content.
+    lw      a4, 20(t1)                  # body_start
+    beq     t3, a4, dpm_copy
+    lw      a5, 472(s10)                # eol_flag
+    beqz    a5, dpm_sep_sp
+    li      a2, 10                      # '\n'
+    j       dpm_sep_w
+dpm_sep_sp:
+    li      a2, 32                      # ' '
+dpm_sep_w:
+    sb      a2, 0(t4)
+    addi    t4, t4, 1
+    addi    t3, t3, 1
+dpm_copy:
+    mv      t5, s10                     # src
+    mv      t6, s0                      # len
+dpm_ac:
+    beqz    t6, dpm_body
+    lbu     a2, 0(t5)
+    sb      a2, 0(t4)
+    addi    t5, t5, 1
+    addi    t4, t4, 1
+    addi    t6, t6, -1
+    addi    t3, t3, 1
+    j       dpm_ac
+dpm_bad:
+    j       halt_err
+
+# find_macro: a0=name_ptr, a1=name_len → a0 = entry_ptr or -1.
+find_macro:
+    lw      t0, 448(s10)
+    beqz    t0, fm2_nf
+    addi    t1, s10, 512
+    li      t2, 0
+fm2_lp:
+    beq     t2, t0, fm2_nf
+    mv      t3, a0
+    mv      t4, t1
+    mv      t5, a1
+    li      t6, 16
+fm2_cn:
+    beqz    t5, fm2_cz
+    lbu     a2, 0(t3)
+    lbu     a3, 0(t4)
+    bne     a2, a3, fm2_sk
+    addi    t3, t3, 1
+    addi    t4, t4, 1
+    addi    t5, t5, -1
+    addi    t6, t6, -1
+    j       fm2_cn
+fm2_cz:
+    beqz    t6, fm2_match
+    lbu     a2, 0(t4)
+    bnez    a2, fm2_sk
+    addi    t4, t4, 1
+    addi    t6, t6, -1
+    j       fm2_cz
+fm2_match:
+    mv      a0, t1
+    ret
+fm2_sk:
+    addi    t1, t1, 48
+    addi    t2, t2, 1
+    j       fm2_lp
+fm2_nf:
+    li      a0, -1
+    ret
+
+# invoke_macro: a0 = entry_ptr. Reads args, expands body, switches input.
+invoke_macro:
+    addi    sp, sp, -8
+    sw      ra, 0(sp)
+    sw      a0, 4(sp)
+    lw      t0, 16(a0)                  # arg_count
+    li      t1, 0
+iml_rd:
+    beq     t1, t0, iml_exp_start
+    addi    sp, sp, -8
+    sw      t0, 0(sp)
+    sw      t1, 4(sp)
+    jal     ra, read_token
+    lw      t0, 0(sp)
+    lw      t1, 4(sp)
+    addi    sp, sp, 8
+    slli    t2, t1, 5
+    li      t6, 14336
+    add     t2, t2, t6
+    add     t2, t2, s10                 # args_buf[i]
+    mv      t3, s10
+    mv      t4, s0
+    li      t5, 32
+iml_cp:
+    beqz    t4, iml_pad
+    lbu     t6, 0(t3)
+    sb      t6, 0(t2)
+    addi    t3, t3, 1
+    addi    t2, t2, 1
+    addi    t4, t4, -1
+    addi    t5, t5, -1
+    j       iml_cp
+iml_pad:
+    beqz    t5, iml_nx
+    sb      x0, 0(t2)
+    addi    t2, t2, 1
+    addi    t5, t5, -1
+    j       iml_pad
+iml_nx:
+    addi    t1, t1, 1
+    j       iml_rd
+iml_exp_start:
+    lw      t0, 4(sp)                   # entry_ptr
+    lw      t1, 20(t0)                  # body_start
+    lw      t2, 24(t0)                  # body_len
+    li      t3, 2048
+    add     t3, s10, t3
+    add     t1, t1, t3                  # read ptr
+    add     t2, t2, t1                  # read end
+    li      t4, 10240
+    add     t4, s10, t4                 # exp_buf base
+    mv      t5, t4                      # write ptr
+iml_exp:
+    beq     t1, t2, iml_done
+    lbu     t6, 0(t1)
+    li      a2, 92                      # '\'
+    beq     t6, a2, iml_esc
+    sb      t6, 0(t5)
+    addi    t5, t5, 1
+    addi    t1, t1, 1
+    j       iml_exp
+iml_esc:
+    addi    t1, t1, 1
+    beq     t1, t2, iml_bad
+    lbu     t6, 0(t1)
+    li      a2, 64                      # '@'
+    beq     t6, a2, iml_at
+    # Digit?
+    li      a2, 49                      # '1'
+    blt     t6, a2, iml_try_named
+    li      a2, 58                      # '9'+1
+    bge     t6, a2, iml_try_named
+    addi    t6, t6, -49                 # index 0..8
+    # Advance t1 past the digit
+    addi    t1, t1, 1
+    j       iml_use_idx
+iml_try_named:
+    # Identifier start (letter or underscore)?
+    li      a2, 95
+    beq     t6, a2, iml_scan_id
+    li      a2, 65
+    blt     t6, a2, iml_pass1
+    li      a2, 91
+    blt     t6, a2, iml_scan_id
+    li      a2, 97
+    blt     t6, a2, iml_pass1
+    li      a2, 123
+    blt     t6, a2, iml_scan_id
+iml_pass1:
+    # Not an identifier start: emit '\' + this char raw
+    li      a2, 92
+    sb      a2, 0(t5)
+    addi    t5, t5, 1
+    sb      t6, 0(t5)
+    addi    t5, t5, 1
+    addi    t1, t1, 1
+    j       iml_exp
+iml_scan_id:
+    # Scan id starting at t1, save start in sp-local then find end.
+    addi    sp, sp, -16
+    sw      t1, 0(sp)                   # id_start
+    mv      t6, t1                      # cursor
+iml_sc_lp:
+    beq     t6, t2, iml_sc_done
+    lbu     a2, 0(t6)
+    li      a3, 95
+    beq     a2, a3, iml_sc_cont
+    li      a3, 48
+    blt     a2, a3, iml_sc_done
+    li      a3, 58
+    blt     a2, a3, iml_sc_cont
+    li      a3, 65
+    blt     a2, a3, iml_sc_done
+    li      a3, 91
+    blt     a2, a3, iml_sc_cont
+    li      a3, 97
+    blt     a2, a3, iml_sc_done
+    li      a3, 123
+    blt     a2, a3, iml_sc_cont
+    j       iml_sc_done
+iml_sc_cont:
+    addi    t6, t6, 1
+    j       iml_sc_lp
+iml_sc_done:
+    sw      t6, 4(sp)                   # id_end
+    # id length = t6 - t1 (saved id_start)
+    lw      a2, 0(sp)
+    sub     a3, t6, a2                  # id_len
+    sw      a3, 8(sp)
+    # Walk arg names list
+    lw      a4, 4(sp)                   # need entry_ptr; a4 unused yet
+    # entry_ptr is at 4(sp+16)=20(sp) after push
+    lw      a4, 20(sp)                  # entry_ptr (saved pre-push)
+    lw      a5, 28(a4)                  # arg_names_start
+    lw      a6, 20(a4)                  # body_start = arg names end
+    li      a7, 2048
+    add     a7, s10, a7
+    add     a5, a5, a7                  # arg names cursor
+    add     a6, a6, a7                  # arg names end
+    li      t6, 0                       # index
+iml_find:
+    beq     a5, a6, iml_not_found
+    # name starts at a5, find space
+    mv      a7, a5
+iml_ff:
+    lbu     t0, 0(a7)
+    li      t3, 32
+    beq     t0, t3, iml_fe
+    addi    a7, a7, 1
+    j       iml_ff
+iml_fe:
+    sub     t0, a7, a5                  # this name's len
+    lw      t3, 8(sp)                   # id_len
+    bne     t0, t3, iml_fnext
+    # Compare bytes: id vs this name
+    lw      a4, 0(sp)                   # id start
+    mv      a3, a5                      # name start
+    mv      t3, t0                      # count
+iml_fc:
+    beqz    t3, iml_match
+    lbu     a2, 0(a4)
+    lbu     t0, 0(a3)
+    bne     a2, t0, iml_fnext
+    addi    a4, a4, 1
+    addi    a3, a3, 1
+    addi    t3, t3, -1
+    j       iml_fc
+iml_fnext:
+    # skip to after space, next arg
+    mv      t0, a5
+iml_fskip:
+    lbu     a2, 0(t0)
+    addi    t0, t0, 1
+    li      a3, 32
+    bne     a2, a3, iml_fskip
+    mv      a5, t0
+    addi    t6, t6, 1
+    j       iml_find
+iml_match:
+    # t6 = index; restore t1 = id_end, cleanup stack
+    lw      t1, 4(sp)
+    addi    sp, sp, 16
+    j       iml_use_idx
+iml_not_found:
+    # Passthrough: emit '\' + all id bytes, advance t1
+    lw      a4, 0(sp)                   # id_start
+    lw      a5, 4(sp)                   # id_end
+    addi    sp, sp, 16
+    li      a2, 92
+    sb      a2, 0(t5)
+    addi    t5, t5, 1
+iml_nf_cp:
+    beq     a4, a5, iml_nf_done
+    lbu     a2, 0(a4)
+    sb      a2, 0(t5)
+    addi    t5, t5, 1
+    addi    a4, a4, 1
+    j       iml_nf_cp
+iml_nf_done:
+    mv      t1, a5
+    j       iml_exp
+iml_use_idx:
+    lw      a2, 4(sp)
+    lw      a3, 16(a2)
+    bge     t6, a3, iml_bad
+    slli    a2, t6, 5
+    li      a3, 14336
+    add     a2, a2, a3
+    add     a2, a2, s10                 # args_buf[i]
+    li      a3, 32
+iml_argc:
+    beqz    a3, iml_argd
+    lbu     a4, 0(a2)
+    beqz    a4, iml_argd
+    sb      a4, 0(t5)
+    addi    t5, t5, 1
+    addi    a2, a2, 1
+    addi    a3, a3, -1
+    j       iml_argc
+iml_argd:
+    # t1 has already been advanced past the \N or \name by the esc handler.
+    # Do not add a trailing space — the arg substitutes transparently.
+    j       iml_exp
+iml_at:
+    lw      a2, 468(s10)
+    li      a3, 16
+iml_at_lp:
+    addi    a3, a3, -4
+    bltz    a3, iml_at_done
+    srl     a4, a2, a3
+    andi    a4, a4, 0xF
+    li      a5, 10
+    blt     a4, a5, iml_at_dec
+    addi    a4, a4, 55
+    j       iml_at_w
+iml_at_dec:
+    addi    a4, a4, 48
+iml_at_w:
+    sb      a4, 0(t5)
+    addi    t5, t5, 1
+    j       iml_at_lp
+iml_at_done:
+    addi    t1, t1, 1
+    j       iml_exp
+iml_done:
+    # Append trailing newline so the last body token terminates cleanly.
+    li      a2, 10
+    sb      a2, 0(t5)
+    addi    t5, t5, 1
+    li      t4, 10240
+    add     t4, s10, t4
+    sw      t4, 460(s10)
+    sw      t5, 464(s10)
+    li      t6, 1
+    sw      t6, 456(s10)
+    lw      a2, 468(s10)
+    addi    a2, a2, 1
+    sw      a2, 468(s10)
+    lw      ra, 0(sp)
+    addi    sp, sp, 8
+    ret
+iml_bad:
+    j       halt_err
