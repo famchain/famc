@@ -75,6 +75,7 @@
 # Buffer end pointers (stored at s10 offsets for bounds checking):
 #   488(s10) = output_end    492(s10) = symtab_end
 #   496(s10) = fixup_end     500(s10) = expbuf_end
+#   504(s10) = line_count (current input line number, for error reporting)
 #
 # Calling convention inside this program:
 #   - args in a0..a7, returns in a0 (and a1 for two-value returns)
@@ -259,6 +260,7 @@ ll_cnt_z:
     li      t2, 14336
     add     t2, s10, t2
     sw      t2, 500(s10)                # expbuf_end  = s10 + 14336
+    sw      x0, 504(s10)                # line_count = 0 (incremented at each newline)
     lui     t2, 0x120
     add     sp, a0, t2                  # stack top   = PC + 0x120000
     j       main_loop
@@ -333,7 +335,8 @@ powoff_hang:
     j       powoff_hang
 
 halt_err:
-    # Emit "ENN\n" to UART where NN = error code in a0 (1-29).
+    # Emit "ENN@LINE\n" to UART.
+    # a0 = error code (1-29), line number from 504(s10).
     # Error codes:
     #   E01 unrecognized mnemonic/macro   E02 read after EOT
     #   E03 token too long                E05 bad immediate
@@ -366,6 +369,57 @@ he_tens:
     jal     ra, wrch
     addi    t0, a2, 48                  # '0' + units
     jal     ra, wrch
+    li      t0, 64                      # '@'
+    jal     ra, wrch
+    # Print line number as decimal (up to 6 digits with leading-zero suppression)
+    lw      a1, 504(s10)                # line_count
+    li      a2, 1                       # leading-zero suppression flag
+    # 100000
+    lui     a3, 0x19                    # a3 = 0x19000 (not quite)
+    # Actually: 100000 = 0x186A0. lui gives upper 20 bits.
+    # Use repeated subtraction approach instead:
+    # Divisors: push on stack, iterate
+    addi    sp, sp, -24
+    li      t2, 100000
+    sw      t2, 0(sp)
+    li      t2, 10000
+    sw      t2, 4(sp)
+    li      t2, 1000
+    sw      t2, 8(sp)
+    li      t2, 100
+    sw      t2, 12(sp)
+    li      t2, 10
+    sw      t2, 16(sp)
+    li      t2, 1
+    sw      t2, 20(sp)
+    mv      t3, sp                      # divisor pointer
+    addi    t4, sp, 24                  # end
+he_dec:
+    beq     t3, t4, he_dec_done
+    lw      t2, 0(t3)                   # current divisor
+    li      a3, 0                       # digit
+he_dec_sub:
+    blt     a1, t2, he_dec_emit
+    sub     a1, a1, t2
+    addi    a3, a3, 1
+    j       he_dec_sub
+he_dec_emit:
+    # Skip leading zeros (but always print last digit)
+    addi    t5, t3, 4
+    beq     t5, t4, he_dec_pr           # last digit: always print
+    beqz    a3, he_dec_skip
+    li      a2, 0                       # saw nonzero: stop suppressing
+    j       he_dec_pr
+he_dec_skip:
+    bnez    a2, he_dec_nx               # still suppressing: skip
+he_dec_pr:
+    addi    t0, a3, 48                  # '0' + digit
+    jal     ra, wrch
+he_dec_nx:
+    addi    t3, t3, 4
+    j       he_dec
+he_dec_done:
+    addi    sp, sp, 24
     li      t0, 10                      # '\n'
     jal     ra, wrch
     lui     s5, 0x100
@@ -457,11 +511,17 @@ rt_com:
 rt_com_eol:
     li      t0, 1
     sw      t0, 472(s10)
+    lw      t0, 504(s10)
+    addi    t0, t0, 1
+    sw      t0, 504(s10)                # line_count++
     j       rt_skip
 rt_skip_not_hash:
     bne     t1, s6, rt_skip_not_nl
     li      t0, 1
     sw      t0, 472(s10)
+    lw      t0, 504(s10)
+    addi    t0, t0, 1
+    sw      t0, 504(s10)                # line_count++
     j       rt_skip
 rt_skip_not_nl:
     li      t0, 0x2C                    # ','
@@ -494,6 +554,9 @@ rt_coll_wsterm:
 rt_coll_nl:
     li      t0, 1
     sw      t0, 480(s10)                # pending_nl (for NEXT read's eol_flag)
+    lw      t0, 504(s10)
+    addi    t0, t0, 1
+    sw      t0, 504(s10)                # line_count++
     j       rt_done
 rt_com_post:
     jal     ra, rdch
@@ -504,6 +567,9 @@ rt_com_post:
 rt_comp_nl:
     li      t0, 1
     sw      t0, 480(s10)                # pending_nl
+    lw      t0, 504(s10)
+    addi    t0, t0, 1
+    sw      t0, 504(s10)                # line_count++
     j       rt_done
 # Quoted-string token: append opening '"', then read chars until matching '"'.
 # A backslash escapes the next char (passes through both raw — escape
