@@ -146,9 +146,943 @@ pd_done:
 	addi	sp, sp, 40
 	return
 
-# currently stub, will implement full compilation process
-compile:
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Node kinds (lexer tokens + AST nodes)
+.equ	NK_ERROR,	0
+.equ	NK_TERM,	1
+.equ	NK_SEMI,	2
+.equ	NK_COMMA,	3
+.equ	NK_COLON,	4
+.equ	NK_QMARK,	5
+.equ	NK_LPAREN,	6
+.equ	NK_RPAREN,	7
+.equ	NK_LBRACE,	8
+.equ	NK_RBRACE,	9
+.equ	NK_LBRACKET,	10
+.equ	NK_RBRACKET,	11
+.equ	NK_DOT,		12
+.equ	NK_ARROW,	13
+.equ	NK_BANG,	14
+.equ	NK_TILDE,	15
+.equ	NK_AMP,		16
+.equ	NK_STAR,	17
+.equ	NK_PLUS,	18
+.equ	NK_HYPHEN,	19
+.equ	NK_DBL_PLUS,	20
+.equ	NK_DBL_HYPHEN,	21
+.equ	NK_SLASH,	22
+.equ	NK_PERCENT,	23
+.equ	NK_EQUAL,	24
+.equ	NK_ASSIGN_MUT,	25
+.equ	NK_PLUS_EQ,	26
+.equ	NK_MINUS_EQ,	27
+.equ	NK_STAR_EQ,	28
+.equ	NK_SLASH_EQ,	29
+.equ	NK_PERCENT_EQ,	30
+.equ	NK_PIPE,	31
+.equ	NK_CARET,	32
+.equ	NK_LSHIFT,	33
+.equ	NK_RSHIFT,	34
+.equ	NK_LSHIFT_EQ,	35
+.equ	NK_RSHIFT_EQ,	36
+.equ	NK_AMP_EQ,	37
+.equ	NK_PIPE_EQ,	38
+.equ	NK_CARET_EQ,	39
+.equ	NK_DBL_EQUAL,	40
+.equ	NK_NE,		41
+.equ	NK_LT,		42
+.equ	NK_GT,		43
+.equ	NK_LTE,		44
+.equ	NK_GTE,		45
+.equ	NK_AMP_AMP,	46
+.equ	NK_PIPE_PIPE,	47
+.equ	NK_AT,		48
+.equ	NK_FAT_ARROW,	49
+.equ	NK_LOOP,	50
+.equ	NK_BREAK,	51
+.equ	NK_SWITCH,	52
+.equ	NK_RETURN,	53
+.equ	NK_ASM,		54
+.equ	NK_STRUCT,	55
+.equ	NK_SIZEOF,	56
+.equ	NK_IDENT,	57
+.equ	NK_NUMBER,	58
+.equ	NK_STR,		59
+.equ	NK_CHAR,	60
+
+# Trie node struct (1036 bytes)
+.equ	T_KIND,		0
+.equ	T_LEN,		4
+.equ	T_RESERVED,	8
+.equ	T_CHILDREN,	12
+.equ	T_NODE_SZ,	1036
+
+# Lexer state struct (20 bytes + root trie node)
+.equ	L_IN,		0
+.equ	L_END,		4
+.equ	L_OFF,		8
+.equ	L_LINE,		12
+.equ	L_COL_START,	16
+.equ	L_ROOT,		20
+.equ	L_SZ,		1056
+
+# Node struct (44 bytes)
+.equ	N_KIND,		0
+.equ	N_LOC_OFF,	4
+.equ	N_LOC_LEN,	8
+.equ	N_LOC_LINE,	12
+.equ	N_LOC_COL,	16
+.equ	N_PARENT,	20
+.equ	N_FIRST_CHILD,	24
+.equ	N_LAST_CHILD,	28
+.equ	N_NEXT_SIB,	32
+.equ	N_PREV_SIB,	36
+.equ	N_DATA,		40
+.equ	N_SZ,		44
+
+# ============================================================================
+# Memory helpers
+# ============================================================================
+
+# alloc: bump-allocate a0 bytes from heap (gp). Returns a0 = ptr.
+alloc:
+	mv	t0, gp
+	add	gp, gp, a0
+	bgeu	sp, gp, alloc_ok
+	li	a0, 'M'
+	jal	write_byte
+	j	exit
+alloc_ok:
+	mv	a0, t0
 	ret
+
+# memzero: zero a0..a0+a1 (a1 must be multiple of 4)
+memzero:
+	add	t0, a0, a1
+mz_loop:
+	bgeu	a0, t0, mz_done
+	sw	x0, 0(a0)
+	addi	a0, a0, 4
+	j	mz_loop
+mz_done:
+	ret
+
+# ============================================================================
+# Lexer
+# ============================================================================
+
+# lexer_register: register a token in the lexer trie.
+#   a0=lexer, a1=string ptr, a2=len, a3=kind, a4=is_reserved
+lex_register:
+	prologue s0 s1 s2 s3 s4 s5 s6 s7 x0
+	addi	s0, a0, L_ROOT		# s0 = current node (start at root)
+	mv	s1, a1			# s1 = string ptr
+	mv	s2, a2			# s2 = len
+	mv	s3, a3			# s3 = kind
+	mv	s4, a4			# s4 = is_reserved
+	li	s5, 0			# s5 = index
+	addi	s6, s2, -1		# s6 = last index
+
+lr_loop:
+	lbu	s7, 0(s1)		# load char
+	slli	s7, s7, 2		# * 4 (pointer stride)
+	add	s7, s7, s0		# index into children
+	addi	s7, s7, T_CHILDREN	# offset to children array
+	lw	t0, 0(s7)		# child node ptr
+	bnez	t0, lr_exists
+
+	# Allocate new trie node (zeroed)
+	li	a0, T_NODE_SZ
+	jal	alloc
+	mv	t1, a0
+	li	a1, T_NODE_SZ
+	jal	memzero
+	sw	t1, 0(s7)		# store child ptr
+	mv	t0, t1
+lr_exists:
+	mv	s0, t0			# descend to child
+	bne	s5, s6, lr_next
+
+	# Last char: store token metadata
+	sw	s2, T_LEN(s0)
+	sw	s3, T_KIND(s0)
+	sw	s4, T_RESERVED(s0)
+	j	lr_done
+
+lr_next:
+	addi	s5, s5, 1
+	addi	s1, s1, 1
+	j	lr_loop
+
+lr_done:
+	return
+
+# lexer_init: create and initialize lexer.
+#   a0=input start, a1=input end. Returns a0=lexer ptr.
+lexer_init:
+	prologue s0 s1 s2 x0
+	mv	s1, a0			# save input start
+	mv	s2, a1			# save input end
+
+	# Allocate lexer struct
+	li	a0, L_SZ
+	jal	alloc
+	mv	s0, a0			# s0 = lexer ptr
+	li	a1, L_SZ
+	jal	memzero
+
+	# Initialize state
+	sw	s1, L_IN(s0)
+	sw	s2, L_END(s0)
+	sw	x0, L_OFF(s0)
+	li	t0, 1
+	sw	t0, L_LINE(s0)
+	sw	x0, L_COL_START(s0)
+
+	# Register tokens (longest first)
+	# 3-char operators
+	mv	a0, s0
+	lla	a1, tok_lshift_eq
+	li	a2, 3
+	li	a3, NK_LSHIFT_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_rshift_eq
+	li	a2, 3
+	li	a3, NK_RSHIFT_EQ
+	li	a4, 0
+	jal	lex_register
+
+	# 2-char operators
+	mv	a0, s0
+	lla	a1, tok_dbl_plus
+	li	a2, 2
+	li	a3, NK_DBL_PLUS
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_dbl_hyphen
+	li	a2, 2
+	li	a3, NK_DBL_HYPHEN
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_assign_mut
+	li	a2, 2
+	li	a3, NK_ASSIGN_MUT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_plus_eq
+	li	a2, 2
+	li	a3, NK_PLUS_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_minus_eq
+	li	a2, 2
+	li	a3, NK_MINUS_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_star_eq
+	li	a2, 2
+	li	a3, NK_STAR_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_slash_eq
+	li	a2, 2
+	li	a3, NK_SLASH_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_pct_eq
+	li	a2, 2
+	li	a3, NK_PERCENT_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_dbl_equal
+	li	a2, 2
+	li	a3, NK_DBL_EQUAL
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_ne
+	li	a2, 2
+	li	a3, NK_NE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lte
+	li	a2, 2
+	li	a3, NK_LTE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_gte
+	li	a2, 2
+	li	a3, NK_GTE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_amp_amp
+	li	a2, 2
+	li	a3, NK_AMP_AMP
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_pipe_pipe
+	li	a2, 2
+	li	a3, NK_PIPE_PIPE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lshift
+	li	a2, 2
+	li	a3, NK_LSHIFT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_rshift
+	li	a2, 2
+	li	a3, NK_RSHIFT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_arrow
+	li	a2, 2
+	li	a3, NK_ARROW
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_fat_arrow
+	li	a2, 2
+	li	a3, NK_FAT_ARROW
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_amp_eq
+	li	a2, 2
+	li	a3, NK_AMP_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_pipe_eq
+	li	a2, 2
+	li	a3, NK_PIPE_EQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_caret_eq
+	li	a2, 2
+	li	a3, NK_CARET_EQ
+	li	a4, 0
+	jal	lex_register
+
+	# 1-char operators
+	mv	a0, s0
+	lla	a1, tok_semi
+	li	a2, 1
+	li	a3, NK_SEMI
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_comma
+	li	a2, 1
+	li	a3, NK_COMMA
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_colon
+	li	a2, 1
+	li	a3, NK_COLON
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_dot
+	li	a2, 1
+	li	a3, NK_DOT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_plus
+	li	a2, 1
+	li	a3, NK_PLUS
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_hyphen
+	li	a2, 1
+	li	a3, NK_HYPHEN
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_star
+	li	a2, 1
+	li	a3, NK_STAR
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_slash
+	li	a2, 1
+	li	a3, NK_SLASH
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_percent
+	li	a2, 1
+	li	a3, NK_PERCENT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_equal
+	li	a2, 1
+	li	a3, NK_EQUAL
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_bang
+	li	a2, 1
+	li	a3, NK_BANG
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_tilde
+	li	a2, 1
+	li	a3, NK_TILDE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_amp
+	li	a2, 1
+	li	a3, NK_AMP
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_pipe
+	li	a2, 1
+	li	a3, NK_PIPE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_caret
+	li	a2, 1
+	li	a3, NK_CARET
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lt
+	li	a2, 1
+	li	a3, NK_LT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_gt
+	li	a2, 1
+	li	a3, NK_GT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_qmark
+	li	a2, 1
+	li	a3, NK_QMARK
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lparen
+	li	a2, 1
+	li	a3, NK_LPAREN
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_rparen
+	li	a2, 1
+	li	a3, NK_RPAREN
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lbrace
+	li	a2, 1
+	li	a3, NK_LBRACE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_rbrace
+	li	a2, 1
+	li	a3, NK_RBRACE
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lbracket
+	li	a2, 1
+	li	a3, NK_LBRACKET
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_rbracket
+	li	a2, 1
+	li	a3, NK_RBRACKET
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_at
+	li	a2, 1
+	li	a3, NK_AT
+	li	a4, 0
+	jal	lex_register
+
+	# Reserved keywords
+	mv	a0, s0
+	lla	a1, kw_loop
+	li	a2, 4
+	li	a3, NK_LOOP
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_break
+	li	a2, 5
+	li	a3, NK_BREAK
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_switch
+	li	a2, 6
+	li	a3, NK_SWITCH
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_return
+	li	a2, 6
+	li	a3, NK_RETURN
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_asm
+	li	a2, 3
+	li	a3, NK_ASM
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_struct
+	li	a2, 6
+	li	a3, NK_STRUCT
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_sizeof
+	li	a2, 6
+	li	a3, NK_SIZEOF
+	li	a4, 1
+	jal	lex_register
+
+	mv	a0, s0			# return lexer ptr
+	return
+
+# next_token: lex next token into node at a1.
+#   a0=lexer, a1=token node ptr
+next_token:
+	prologue s0 s1 s2 s3 s4 s5 x0
+	mv	s0, a0			# s0 = lexer
+	mv	s1, a1			# s1 = token node
+
+	# Load lexer state
+	lw	t0, L_IN(s0)		# input start
+	lw	t1, L_OFF(s0)		# offset
+	add	s2, t1, t0		# s2 = current ptr
+	lw	s3, L_END(s0)		# s3 = end ptr
+
+	# Skip whitespace and comments
+nt_ws:
+	bgeu	s2, s3, nt_ws_done
+	lbu	t5, 0(s2)
+	li	t4, 32
+	bgtu	t5, t4, nt_ck_comment
+	addi	s2, s2, 1
+	li	t1, '\n'
+	bne	t5, t1, nt_ws
+	# Track newline
+	lw	t1, L_LINE(s0)
+	addi	t1, t1, 1
+	sw	t1, L_LINE(s0)
+	lw	t0, L_IN(s0)
+	sub	t1, s2, t0
+	sw	t1, L_COL_START(s0)
+	j	nt_ws
+
+nt_ck_comment:
+	# Check for // or /*
+	addi	t4, s2, 1
+	bgeu	t4, s3, nt_ws_done
+	li	t6, '/'
+	bne	t5, t6, nt_ws_done
+	lbu	t5, 1(s2)
+	beq	t5, t6, nt_line_cmt
+	li	t6, '*'
+	beq	t5, t6, nt_block_cmt
+	j	nt_ws_done
+
+nt_line_cmt:
+	addi	s2, s2, 2
+nt_lc_loop:
+	bgeu	s2, s3, nt_ws_done
+	lbu	t5, 0(s2)
+	addi	s2, s2, 1
+	li	t4, '\n'
+	bne	t5, t4, nt_lc_loop
+	lw	t1, L_LINE(s0)
+	addi	t1, t1, 1
+	sw	t1, L_LINE(s0)
+	lw	t0, L_IN(s0)
+	sub	t1, s2, t0
+	sw	t1, L_COL_START(s0)
+	j	nt_ws
+
+nt_block_cmt:
+	addi	s2, s2, 2
+	li	s4, 1			# depth
+nt_bc_loop:
+	bgeu	s2, s3, nt_ws_done
+	lbu	t5, 0(s2)
+	addi	s2, s2, 1
+	li	t1, '\n'
+	bne	t5, t1, nt_bc_no_nl
+	lw	t1, L_LINE(s0)
+	addi	t1, t1, 1
+	sw	t1, L_LINE(s0)
+	lw	t0, L_IN(s0)
+	sub	t1, s2, t0
+	sw	t1, L_COL_START(s0)
+nt_bc_no_nl:
+	li	t4, '*'
+	bne	t5, t4, nt_bc_no_cl
+	bgeu	s2, s3, nt_ws_done
+	lbu	t5, 0(s2)
+	li	t4, '/'
+	bne	t5, t4, nt_bc_loop
+	addi	s2, s2, 1
+	addi	s4, s4, -1
+	bnez	s4, nt_bc_loop
+	j	nt_ws
+nt_bc_no_cl:
+	li	t4, '/'
+	bne	t5, t4, nt_bc_loop
+	bgeu	s2, s3, nt_ws_done
+	lbu	t5, 0(s2)
+	li	t4, '*'
+	bne	t5, t4, nt_bc_loop
+	addi	s2, s2, 1
+	addi	s4, s4, 1
+	j	nt_bc_loop
+
+nt_ws_done:
+	# Store updated offset, init token
+	lw	t0, L_IN(s0)
+	sub	s4, s2, t0		# s4 = updated offset
+	sw	s4, L_OFF(s0)
+	sw	x0, N_LOC_LEN(s1)
+	sw	s4, N_LOC_OFF(s1)
+	lw	t1, L_LINE(s0)
+	sw	t1, N_LOC_LINE(s1)
+	lw	t1, L_COL_START(s0)
+	sub	t1, s4, t1
+	sw	t1, N_LOC_COL(s1)
+
+	# Check EOF
+	bgeu	s2, s3, nt_eof
+
+	# Trie walk
+	sw	x0, N_KIND(s1)
+	li	s5, 0			# s5 = reserved flag
+	addi	s4, s0, L_ROOT
+	addi	s4, s4, T_CHILDREN
+
+nt_trie:
+	bgeu	s2, s3, nt_trie_end
+	lbu	t4, 0(s2)
+	addi	s2, s2, 1
+	slli	t4, t4, 2
+	add	t4, t4, s4
+	lw	t4, 0(t4)		# child ptr
+	beqz	t4, nt_trie_end
+	addi	s4, t4, T_CHILDREN
+	lw	t6, T_LEN(t4)
+	beqz	t6, nt_trie
+	# Found a match — record it
+	sw	t6, N_LOC_LEN(s1)
+	lw	t6, T_KIND(t4)
+	sw	t6, N_KIND(s1)
+	lw	s5, T_RESERVED(t4)
+	j	nt_trie
+
+nt_trie_end:
+	lw	t4, N_LOC_LEN(s1)
+	beqz	t4, nt_no_match
+
+	# Trie matched. If not reserved, accept.
+	beqz	s5, nt_update_off
+
+	# Reserved keyword: check if next char continues ident
+	lw	t5, N_LOC_OFF(s1)
+	add	t5, t5, t4
+	lw	t0, L_IN(s0)
+	add	t5, t5, t0
+	bgeu	t5, s3, nt_update_off
+	lbu	t6, 0(t5)
+	li	t1, '_'
+	beq	t6, t1, nt_no_match
+	li	t1, 'a'
+	blt	t6, t1, nt_rsv_upper
+	li	t1, 'z'
+	bge	t1, t6, nt_no_match
+nt_rsv_upper:
+	li	t1, 'A'
+	blt	t6, t1, nt_rsv_digit
+	li	t1, 'Z'
+	bge	t1, t6, nt_no_match
+nt_rsv_digit:
+	li	t1, '0'
+	blt	t6, t1, nt_update_off
+	li	t1, '9'
+	bge	t1, t6, nt_no_match
+	j	nt_update_off
+
+nt_no_match:
+	# Reset to token start, try ident/number/string/char
+	lw	t5, N_LOC_OFF(s1)
+	lw	t0, L_IN(s0)
+	add	s2, t5, t0
+	bgeu	s2, s3, nt_update_off
+	lbu	t6, 0(s2)
+
+	# Check digit
+	li	t1, '0'
+	blt	t6, t1, nt_ck_ident
+	li	t1, '9'
+	bge	t1, t6, nt_scan_num
+
+nt_ck_ident:
+	li	t1, '_'
+	beq	t6, t1, nt_scan_id
+	li	t1, 'a'
+	blt	t6, t1, nt_ck_upper
+	li	t1, 'z'
+	bge	t1, t6, nt_scan_id
+nt_ck_upper:
+	li	t1, 'A'
+	blt	t6, t1, nt_ck_str
+	li	t1, 'Z'
+	bge	t1, t6, nt_scan_id
+	j	nt_ck_str
+
+nt_ck_str:
+	li	t1, '"'
+	beq	t6, t1, nt_scan_str
+	li	t1, '\''
+	beq	t6, t1, nt_scan_char
+	# Unknown char — consume 1
+	li	t4, 1
+	sw	t4, N_LOC_LEN(s1)
+	j	nt_update_off
+
+nt_scan_id:
+	li	t4, NK_IDENT
+	sw	t4, N_KIND(s1)
+	addi	s2, s2, 1
+nt_id_loop:
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	li	t1, '_'
+	beq	t6, t1, nt_id_next
+	li	t1, 'a'
+	blt	t6, t1, nt_id_up
+	li	t1, 'z'
+	bge	t1, t6, nt_id_next
+nt_id_up:
+	li	t1, 'A'
+	blt	t6, t1, nt_id_dig
+	li	t1, 'Z'
+	bge	t1, t6, nt_id_next
+nt_id_dig:
+	li	t1, '0'
+	blt	t6, t1, nt_id_done
+	li	t1, '9'
+	blt	t1, t6, nt_id_done
+nt_id_next:
+	addi	s2, s2, 1
+	j	nt_id_loop
+nt_id_done:
+	lw	t0, L_IN(s0)
+	sub	t4, s2, t0
+	lw	t5, N_LOC_OFF(s1)
+	sub	t4, t4, t5
+	sw	t4, N_LOC_LEN(s1)
+	j	nt_update_off
+
+nt_scan_num:
+	li	t4, NK_NUMBER
+	sw	t4, N_KIND(s1)
+	# Check 0x prefix
+	lbu	t6, 0(s2)
+	li	t1, '0'
+	bne	t6, t1, nt_num_dec
+	addi	t1, s2, 1
+	bgeu	t1, s3, nt_num_dec
+	lbu	t6, 0(t1)
+	li	t4, 'x'
+	bne	t6, t4, nt_num_dec
+	addi	s2, t1, 1
+nt_num_hex:
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	li	t1, '0'
+	blt	t6, t1, nt_id_done
+	li	t1, '9'
+	bge	t1, t6, nt_num_hex_ok
+	li	t1, 'a'
+	blt	t6, t1, nt_num_hex_up
+	li	t1, 'f'
+	bge	t1, t6, nt_num_hex_ok
+	j	nt_id_done
+nt_num_hex_up:
+	li	t1, 'A'
+	blt	t6, t1, nt_id_done
+	li	t1, 'F'
+	blt	t1, t6, nt_id_done
+nt_num_hex_ok:
+	addi	s2, s2, 1
+	j	nt_num_hex
+
+nt_num_dec:
+	addi	s2, s2, 1
+nt_num_loop:
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	li	t1, '0'
+	blt	t6, t1, nt_id_done
+	li	t1, '9'
+	blt	t1, t6, nt_id_done
+	addi	s2, s2, 1
+	j	nt_num_loop
+
+nt_scan_str:
+	li	t4, NK_STR
+	sw	t4, N_KIND(s1)
+	addi	s2, s2, 1
+nt_str_loop:
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	addi	s2, s2, 1
+	li	t1, '\\'
+	beq	t6, t1, nt_str_esc
+	li	t1, '"'
+	beq	t6, t1, nt_id_done
+	li	t1, '\n'
+	bne	t6, t1, nt_str_loop
+	# Newline in string
+	lw	t1, L_LINE(s0)
+	addi	t1, t1, 1
+	sw	t1, L_LINE(s0)
+	lw	t0, L_IN(s0)
+	sub	t1, s2, t0
+	sw	t1, L_COL_START(s0)
+	j	nt_str_loop
+nt_str_esc:
+	bgeu	s2, s3, nt_id_done
+	addi	s2, s2, 1
+	j	nt_str_loop
+
+nt_scan_char:
+	li	t4, NK_CHAR
+	sw	t4, N_KIND(s1)
+	addi	s2, s2, 1
+nt_chr_loop:
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	addi	s2, s2, 1
+	li	t1, '\\'
+	beq	t6, t1, nt_chr_esc
+	li	t1, '\''
+	beq	t6, t1, nt_id_done
+	j	nt_chr_loop
+nt_chr_esc:
+	bgeu	s2, s3, nt_id_done
+	addi	s2, s2, 1
+	j	nt_chr_loop
+
+nt_eof:
+	li	t6, NK_TERM
+	sw	t6, N_KIND(s1)
+	j	nt_done
+
+nt_update_off:
+	lw	t4, N_LOC_LEN(s1)
+	lw	t5, N_LOC_OFF(s1)
+	add	t5, t5, t4
+	sw	t5, L_OFF(s0)
+
+nt_done:
+	return
+
+# ============================================================================
+# Compile: entry point for the compilation pipeline
+# ============================================================================
+
+# compile: a0=input start, a1=input end
+#   Returns a0=output start, a1=output end
+#   For now: lex all tokens and print them as a test
+compile:
+	prologue s0 s1 s2 s3 x0
+	mv	s2, a0			# save input start
+	mv	s3, a1			# save input end
+
+	# Init lexer
+	mv	a0, s2
+	mv	a1, s3
+	jal	lexer_init
+	mv	s0, a0			# s0 = lexer
+
+	# Allocate a token node
+	li	a0, N_SZ
+	jal	alloc
+	mv	s1, a0			# s1 = token
+	li	a1, N_SZ
+	jal	memzero
+
+	# Lex loop: print each token kind
+cmp_loop:
+	mv	a0, s0
+	mv	a1, s1
+	jal	next_token
+	lw	t0, N_KIND(s1)
+	li	t1, NK_TERM
+	beq	t0, t1, cmp_done
+
+	# Print token kind as decimal
+	lw	a0, N_KIND(s1)
+	jal	print_dec
+	li	a0, ':'
+	jal	write_byte
+	# Print token text from input buffer
+	lw	t0, N_LOC_OFF(s1)
+	lw	t1, N_LOC_LEN(s1)
+	add	a0, s2, t0		# start ptr
+	add	a1, a0, t1		# end ptr
+	jal	write_data
+	li	a0, '\n'
+	jal	write_byte
+	j	cmp_loop
+
+cmp_done:
+	# For now return empty output (start == end)
+	mv	a0, s2
+	mv	a1, s2
+	return
 
 main:
 	# Setup gp and stack pointer
@@ -172,5 +1106,127 @@ main:
 	jal	write_data
 
 	j	exit
+
+# ============================================================================
+# Token string constants
+# ============================================================================
+
+# 3-char operators
+tok_lshift_eq:
+	.ascii	"<<="
+tok_rshift_eq:
+	.ascii	">>="
+
+# 2-char operators
+tok_dbl_plus:
+	.ascii	"++"
+tok_dbl_hyphen:
+	.ascii	"--"
+tok_assign_mut:
+	.ascii	":="
+tok_plus_eq:
+	.ascii	"+="
+tok_minus_eq:
+	.ascii	"-="
+tok_star_eq:
+	.ascii	"*="
+tok_slash_eq:
+	.ascii	"/="
+tok_pct_eq:
+	.ascii	"%="
+tok_dbl_equal:
+	.ascii	"=="
+tok_ne:
+	.ascii	"!="
+tok_lte:
+	.ascii	"<="
+tok_gte:
+	.ascii	">="
+tok_amp_amp:
+	.ascii	"&&"
+tok_pipe_pipe:
+	.ascii	"||"
+tok_lshift:
+	.ascii	"<<"
+tok_rshift:
+	.ascii	">>"
+tok_arrow:
+	.ascii	"->"
+tok_fat_arrow:
+	.ascii	"=>"
+tok_amp_eq:
+	.ascii	"&="
+tok_pipe_eq:
+	.ascii	"|="
+tok_caret_eq:
+	.ascii	"^="
+
+# 1-char operators
+tok_semi:
+	.ascii	";"
+tok_comma:
+	.ascii	","
+tok_colon:
+	.ascii	":"
+tok_dot:
+	.ascii	"."
+tok_plus:
+	.ascii	"+"
+tok_hyphen:
+	.ascii	"-"
+tok_star:
+	.ascii	"*"
+tok_slash:
+	.ascii	"/"
+tok_percent:
+	.ascii	"%"
+tok_equal:
+	.ascii	"="
+tok_bang:
+	.ascii	"!"
+tok_tilde:
+	.ascii	"~"
+tok_amp:
+	.ascii	"&"
+tok_pipe:
+	.ascii	"|"
+tok_caret:
+	.ascii	"^"
+tok_lt:
+	.ascii	"<"
+tok_gt:
+	.ascii	">"
+tok_qmark:
+	.ascii	"?"
+tok_lparen:
+	.ascii	"("
+tok_rparen:
+	.ascii	")"
+tok_lbrace:
+	.ascii	"{"
+tok_rbrace:
+	.ascii	"}"
+tok_lbracket:
+	.ascii	"["
+tok_rbracket:
+	.ascii	"]"
+tok_at:
+	.ascii	"@"
+
+# Keywords
+kw_loop:
+	.ascii	"loop"
+kw_break:
+	.ascii	"break"
+kw_switch:
+	.ascii	"switch"
+kw_return:
+	.ascii	"return"
+kw_asm:
+	.ascii	"asm"
+kw_struct:
+	.ascii	"struct"
+kw_sizeof:
+	.ascii	"sizeof"
 
 data:
