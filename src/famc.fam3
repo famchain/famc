@@ -2865,6 +2865,7 @@ sy_found:
 	addi	t0, t0, ST_DATA
 	add	t0, s1, t0
 	lw	a0, SY_SLOT(t0)
+	mv	a1, s5
 	j	sy_done
 sy_next:
 	addi	s5, s5, -1
@@ -3025,9 +3026,26 @@ gs_pad:
 ge_ident:
 	lw	a0, N_LOC_OFF(s3)
 	lw	a1, N_LOC_LEN(s3)
-	jal	sym_find
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, sf_fail
+	mv	s5, a0
+	# Check if outer variable (inside closure and index < boundary)
+	beqz	s11, gi_local
+	bge	a1, s11, gi_local
+	# Outer variable: emit lw t0, slot(s1)
+	mv	a0, s5
+	li	a1, R_S1
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	j	gi_push
+gi_local:
+	mv	a0, s5
 	li	a1, R_T0
 	jal	em_var_load
+gi_push:
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
@@ -3522,7 +3540,16 @@ ga_ident:
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_try
 	li	t0, -1
-	bne	a0, t0, ga_reassign
+	bne	a0, t0, ga_chk_out
+	j	ga_newvar
+ga_chk_out:
+	# Check if outer variable. s7 = 1 if outer, 0 if local.
+	li	s7, 0
+	beqz	s11, ga_reassign
+	bge	a1, s11, ga_reassign
+	li	s7, 1
+	j	ga_reassign
+ga_newvar:
 	# Variable not found — define new (both = and := declare)
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
@@ -3566,9 +3593,20 @@ ga_store:
 	li	t0, NK_ASSIGN_MUT
 	beq	s4, t0, ga_simple
 	# Compound: load old value into t1, compute t0 = old OP rhs
+	beqz	s7, ga_cmp_loc
+	# Outer: lw t1, slot(s1)
+	mv	a0, s5
+	li	a1, R_S1
+	li	a2, 2
+	li	a3, R_T1
+	li	a4, 0x03
+	jal	em_itype
+	j	ga_cmp_op
+ga_cmp_loc:
 	mv	a0, s5
 	li	a1, R_T1
 	jal	em_var_load
+ga_cmp_op:
 	# Dispatch on compound op
 	li	t0, NK_PLUS_EQ
 	beq	s4, t0, ga_c_add
@@ -3652,11 +3690,21 @@ ga_c_div:
 ga_c_mod:
 	j	cg_err
 ga_simple:
-	# store t0 at variable slot
+	# store t0 at variable slot (s7=1 if outer)
+	beqz	s7, ga_s_local
+	# Outer: sw t0, slot(s1)
+	mv	a0, s5
+	li	a1, R_T0
+	li	a2, R_S1
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	j	ga_s_push
+ga_s_local:
 	mv	a0, s5
 	li	a1, R_T0
 	jal	em_var_store
-	# push value back (assignment returns the value)
+ga_s_push:
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
@@ -4043,6 +4091,13 @@ gc_closure:
 	# a0 = slot offset. Load code pointer from variable.
 	li	a1, R_T0
 	jal	em_var_load
+	# Emit: mv s1, s0 (pass outer frame to closure)
+	li	a0, 0
+	li	a1, R_S0
+	li	a2, 0
+	li	a3, R_S1
+	li	a4, 0x13
+	jal	em_itype
 	# Emit: jalr ra, t0, 0 (indirect call)
 	li	a0, 0
 	li	a1, R_T0
@@ -4146,15 +4201,30 @@ ge_postfix:
 	lw	t0, N_KIND(s6)
 	li	t1, NK_IDENT
 	bne	t0, t1, cg_err
-	# Look up variable
+	# Look up variable and check outer
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
-	jal	sym_find
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, sf_fail
 	mv	s7, a0
-	# Load current value
+	li	s3, 0
+	beqz	s11, gpo_ld
+	bge	a1, s11, gpo_ld
+	li	s3, 1
+	# Outer: lw t0, slot(s1)
+	mv	a0, s7
+	li	a1, R_S1
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	j	gpo_loaded
+gpo_ld:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_load
+gpo_loaded:
 	# Push old value (postfix returns pre-increment)
 	li	a0, R_T0
 	jal	em_push
@@ -4171,7 +4241,16 @@ gpo_store:
 	li	a3, R_T0
 	li	a4, 0x13
 	jal	em_itype
-	# Store back
+	# Store back (s3=1 if outer)
+	beqz	s3, gpo_sloc
+	mv	a0, s7
+	li	a1, R_T0
+	li	a2, R_S1
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	j	ge_done
+gpo_sloc:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_store
@@ -4180,29 +4259,35 @@ gpo_store:
 # --- Closure |params| body ---
 ge_closure:
 	# Children: param idents..., body (last child)
-	# Emit: jal t0, past_body (t0 = code addr)
-	# Stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT
-	addi	sp, sp, -12
+	# Stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT [12]=old_s11
+	addi	sp, sp, -16
 	sw	s0, 0(sp)
+	sw	s11, 12(sp)
 	li	a0, 0
 	li	a1, R_T0
 	jal	em_jtype
-	# Emit function prologue in generated code:
-	# addi sp, sp, -8; sw ra, 4(sp); sw s0, 0(sp); mv s0, sp
-	li	a0, -8
+	# Emit prologue: save ra, s0, s1; set s0=sp
+	# addi sp, sp, -12; sw ra, 8(sp); sw s0, 4(sp); sw s1, 0(sp); mv s0, sp
+	li	a0, -12
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
-	li	a0, 4
+	li	a0, 8
 	li	a1, 1
 	li	a2, R_SP
 	li	a3, 2
 	li	a4, 0x23
 	jal	em_stype
-	li	a0, 0
+	li	a0, 4
 	li	a1, R_S0
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	li	a0, 0
+	li	a1, R_S1
 	li	a2, R_SP
 	li	a3, 2
 	li	a4, 0x23
@@ -4213,9 +4298,10 @@ ge_closure:
 	li	a3, R_S0
 	li	a4, 0x13
 	jal	em_itype
-	# Save compiler scope, reset for fresh frame
+	# Save scope. Set s11 = boundary (outer var count). Don't reset ST_CNT.
 	lw	t0, ST_CNT(s1)
 	sw	t0, 4(sp)
+	mv	s11, t0
 	lw	t0, ST_NEXT(s1)
 	sw	t0, 8(sp)
 	sw	x0, ST_NEXT(s1)
@@ -4268,7 +4354,7 @@ gc_body:
 	# Pop result into a0 (return value)
 	li	a0, R_A0
 	jal	em_pop
-	# Emit epilogue: mv sp, s0; lw s0, 0(sp); lw ra, 4(sp); addi sp, sp, 8; ret
+	# Emit epilogue: mv sp,s0; lw s1,0(sp); lw s0,4(sp); lw ra,8(sp); addi sp,12; ret
 	li	a0, 0
 	li	a1, R_S0
 	li	a2, 0
@@ -4278,16 +4364,22 @@ gc_body:
 	li	a0, 0
 	li	a1, R_SP
 	li	a2, 2
-	li	a3, R_S0
+	li	a3, R_S1
 	li	a4, 0x03
 	jal	em_itype
 	li	a0, 4
 	li	a1, R_SP
 	li	a2, 2
-	li	a3, 1
+	li	a3, R_S0
 	li	a4, 0x03
 	jal	em_itype
 	li	a0, 8
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, 1
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, 12
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
@@ -4299,12 +4391,13 @@ gc_body:
 	li	a3, R_ZERO
 	li	a4, 0x67
 	jal	em_itype
-	# Restore compiler scope (stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT)
+	# Restore compiler scope + s11
 	lw	t0, 4(sp)
 	sw	t0, ST_CNT(s1)
 	lw	t0, 8(sp)
 	sw	t0, ST_NEXT(s1)
-	# Backpatch jal t0 to here (need rd=t0, not rd=x0)
+	lw	s11, 12(sp)
+	# Backpatch jal t0 to here
 	lw	s5, 0(sp)
 	sub	a0, s0, s5
 	li	a1, R_T0
@@ -4312,7 +4405,7 @@ gc_body:
 	mv	s0, s5
 	jal	em_jtype
 	mv	s0, t3
-	addi	sp, sp, 12
+	addi	sp, sp, 16
 	# Push t0 (code pointer = closure value)
 	li	a0, R_T0
 	jal	em_push
@@ -4324,15 +4417,29 @@ gp_preinc:
 	lw	t0, N_KIND(s6)
 	li	t1, NK_IDENT
 	bne	t0, t1, cg_err
-	# Look up variable
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
-	jal	sym_find
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, sf_fail
 	mv	s7, a0
-	# Load current value
+	# Check outer (save flag in s3, available since we dispatched)
+	li	s3, 0
+	beqz	s11, gpi_ld
+	bge	a1, s11, gpi_ld
+	li	s3, 1
+	mv	a0, s7
+	li	a1, R_S1
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	j	gpi_loaded
+gpi_ld:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_load
+gpi_loaded:
 	# Increment or decrement
 	li	t0, NK_DBL_PLUS
 	beq	s5, t0, gpi_inc
@@ -4346,10 +4453,20 @@ gpi_emit:
 	li	a3, R_T0
 	li	a4, 0x13
 	jal	em_itype
-	# Store back
+	# Store back (s3=1 if outer)
+	beqz	s3, gpi_st_loc
+	mv	a0, s7
+	li	a1, R_T0
+	li	a2, R_S1
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	j	gpi_push
+gpi_st_loc:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_store
+gpi_push:
 	# Push new value
 	li	a0, R_T0
 	jal	em_push
@@ -5197,6 +5314,9 @@ codegen:
 	# Initialize symbol table
 	jal	sym_init
 	mv	s1, a0
+
+	# No closure scope initially
+	li	s11, 0
 
 	# Initialize asm label table (s9)
 	li	a0, 772
