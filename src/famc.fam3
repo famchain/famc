@@ -49,20 +49,19 @@ rb_poll:
 	return
 
 # read_data: read UART bytes into tp until EOT (0x04).
-# Returns a0 = number of bytes read. Advances tp past stored data.
+# Returns a0 = number of bytes read.
 read_data:
-	prologue	s0 x0
-	mv	s0, tp			# save start
+	prologue	s0 s1 x0
+	li	s0, 4
+	mv	s1, tp
 rd_loop:
 	jal	read_byte
-	li	t0, 4			# EOT
-	beq	a0, t0, rd_done
-	sb	a0, 0(tp)
-	addi	tp, tp, 1
+	beq	a0, s0, rd_done
+	sb	a0, 0(s1)
+	addi	s1, s1, 1
 	j	rd_loop
 rd_done:
-	sub	a0, tp, s0		# byte count
-	sub	tp, tp, s0		# restore tp
+	sub	a0, s1, tp		# byte count
 	return
 
 # print_hex: print 32-bit value in a0 as "0xHHHHHHHH"
@@ -147,6 +146,7 @@ pd_done:
 	addi	sp, sp, 40
 	return
 
+# currently stub, will implement full compilation process
 compile:
 	ret
 
@@ -165,9 +165,10 @@ main:
 	add	s1, s0, a0		# end = start + count
 	mv	a0, s0
 	mv	a1, s1
+
+	# pass a0=start/a1=end of the input buffer, update a0/a1 to start/end output
 	jal	compile
-	mv	a0, s0
-	mv	a1, s1
+	# now print results
 	jal	write_data
 
 	j	exit
