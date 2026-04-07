@@ -289,6 +289,52 @@ pd_done:
 .equ	R_A0,	10
 .equ	R_A1,	11
 
+# Asm mnemonic classes
+.equ	MC_RTYPE,	1
+.equ	MC_IARITH,	2
+.equ	MC_ISHIFT,	3
+.equ	MC_ILOAD,	4
+.equ	MC_STYPE,	5
+.equ	MC_BTYPE,	6
+.equ	MC_LUI,		7
+.equ	MC_AUIPC,	8
+.equ	MC_JAL,		9
+.equ	MC_JALR,	10
+.equ	MC_LI,		11
+.equ	MC_MV,		12
+.equ	MC_RET,		13
+.equ	MC_J,		14
+.equ	MC_NOP,		15
+.equ	MC_NOT,		16
+.equ	MC_NEG,		17
+.equ	MC_SEQZ,	18
+.equ	MC_SNEZ,	19
+.equ	MC_JR,		20
+.equ	MC_CSR,		21
+
+# Asm label entry
+.equ	AL_OFF,	0
+.equ	AL_LEN,	4
+.equ	AL_ADDR,	8
+.equ	AL_SZ,	12
+
+# Asm label table header
+.equ	AT_CNT,	0
+.equ	AT_DATA,	4
+
+# Asm local label entry (within an asm block)
+.equ	LL_OFF,	0
+.equ	LL_LEN,	4
+.equ	LL_ADDR,	8
+.equ	LL_SZ,	12
+
+# Asm fixup entry
+.equ	FX_OFF,	0
+.equ	FX_LEN,	4
+.equ	FX_ADDR,	8
+.equ	FX_TYPE,	12
+.equ	FX_SZ,	16
+
 # Symbol table entry (16 bytes, power of 2 for easy indexing)
 .equ	SY_OFF,	0
 .equ	SY_LEN,	4
@@ -1682,17 +1728,17 @@ px_asm:
 	jal	append_child
 	jal	advance			# consume the ident
 asm_body:
+	# Save body start offset BEFORE expect advances past first body token
+	lw	s5, L_OFF(s0)
 	li	a0, NK_LBRACE
 	jal	expect
 	# Read raw asm text as a single string node until '}'
-	# We record the offset range of everything between { and }
 	jal	alloc_node
 	mv	s6, a0
 	li	t0, NK_STR
 	sw	t0, N_KIND(s6)
-	# Record start offset
-	lw	t0, L_OFF(s0)
-	sw	t0, N_LOC_OFF(s6)
+	# Record start offset (saved before expect)
+	sw	s5, N_LOC_OFF(s6)
 	# Scan forward to closing '}'
 	lw	t0, L_IN(s0)
 	lw	t1, L_OFF(s0)
@@ -2732,6 +2778,8 @@ gen_expr:
 	beq	s4, t0, ge_return
 	li	t0, NK_POSTFIX
 	beq	s4, t0, ge_postfix
+	li	t0, NK_ASM
+	beq	s4, t0, ge_asm
 	j	cg_err
 
 # --- Number literal ---
@@ -3252,9 +3300,100 @@ gc_pop_args:
 	addi	sp, sp, 4
 	j	gc_pop_args
 gc_call:
-	# For now, error - function calls need label resolution
-	# TODO: implement asm label tracking
-	j	cg_err
+	# Look up callee in asm label table (s9)
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	# Search asm label table
+	lw	t3, AT_CNT(s9)
+	li	t4, 0
+gc_find:
+	beq	t4, t3, cg_err
+	slli	t0, t4, 2
+	slli	t1, t4, 3
+	add	t0, t0, t1
+	addi	t0, t0, AT_DATA
+	add	t0, s9, t0
+	lw	t1, AL_LEN(t0)
+	bne	a1, t1, gc_fnext
+	# Compare name bytes
+	lw	t1, AL_OFF(t0)
+	add	t1, s2, t1
+	add	t2, s2, a0
+	mv	t5, a1
+gc_fcmp:
+	beqz	t5, gc_found
+	lbu	t6, 0(t1)
+	lbu	a2, 0(t2)
+	bne	t6, a2, gc_fnext
+	addi	t1, t1, 1
+	addi	t2, t2, 1
+	addi	t5, t5, -1
+	j	gc_fcmp
+gc_fnext:
+	addi	t4, t4, 1
+	j	gc_find
+gc_found:
+	lw	t1, AL_ADDR(t0)
+	# Emit: jal ra, offset
+	sub	a0, t1, s0
+	li	a1, 1
+	jal	em_jtype
+	# Push return value (a0)
+	li	a0, R_A0
+	jal	em_push
+	j	ge_done
+
+# --- Asm block ---
+ge_asm:
+	# Children: optional NK_IDENT (label), NK_STR (body)
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	t0, N_KIND(s5)
+	li	t1, NK_IDENT
+	bne	t0, t1, ga_nobody
+	# Has label — s5 is the label node, body is next sib
+	mv	s6, s5
+	lw	s5, N_NEXT_SIB(s6)
+	j	ga_body
+ga_nobody:
+	li	s6, 0
+ga_body:
+	# Emit j past_asm (placeholder)
+	mv	s7, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Register asm label if present
+	beqz	s6, ga_no_lbl
+	lw	t0, AT_CNT(s9)
+	slli	t1, t0, 2
+	slli	t2, t0, 3
+	add	t1, t1, t2
+	addi	t1, t1, AT_DATA
+	add	t1, s9, t1
+	lw	t2, N_LOC_OFF(s6)
+	sw	t2, AL_OFF(t1)
+	lw	t2, N_LOC_LEN(s6)
+	sw	t2, AL_LEN(t1)
+	sw	s0, AL_ADDR(t1)
+	addi	t0, t0, 1
+	sw	t0, AT_CNT(s9)
+ga_no_lbl:
+	# Assemble body
+	lw	t0, N_LOC_OFF(s5)
+	add	a0, s2, t0
+	lw	a1, N_LOC_LEN(s5)
+	jal	asm_assemble
+	# Backpatch j past_asm
+	sub	a1, s0, s7
+	mv	a0, s7
+	jal	patch_jal
+	# Asm block evaluates to 0
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
 
 # --- Return ---
 ge_return:
@@ -3352,6 +3491,794 @@ cg_err:
 	j	exit
 
 # ============================================================================
+# Asm block assembler
+# ============================================================================
+
+# asm_reg: parse register name from token
+#   a0 = token ptr, a1 = token length
+#   Returns a0 = register number (0-31)
+asm_reg:
+	lbu	t0, 0(a0)
+	li	t1, 'x'
+	beq	t0, t1, ar_x
+	li	t1, 'a'
+	beq	t0, t1, ar_a
+	li	t1, 't'
+	beq	t0, t1, ar_t
+	li	t1, 's'
+	beq	t0, t1, ar_s
+	li	t1, 'z'
+	beq	t0, t1, ar_zero
+	li	t1, 'r'
+	beq	t0, t1, ar_ra
+	li	t1, 'g'
+	beq	t0, t1, ar_gp
+	li	t1, 'f'
+	beq	t0, t1, ar_fp
+	j	asm_err
+ar_x:
+	addi	a0, a0, 1
+	addi	a1, a1, -1
+	j	parse_int
+ar_a:
+	lbu	t0, 1(a0)
+	addi	a0, t0, -38
+	ret
+ar_t:
+	lbu	t0, 1(a0)
+	li	t1, 'p'
+	beq	t0, t1, ar_tp
+	addi	t0, t0, -48
+	li	t1, 3
+	blt	t0, t1, ar_t_lo
+	addi	a0, t0, 25
+	ret
+ar_t_lo:
+	addi	a0, t0, 5
+	ret
+ar_tp:
+	li	a0, 4
+	ret
+ar_s:
+	lbu	t0, 1(a0)
+	li	t1, 'p'
+	beq	t0, t1, ar_sp
+	li	t1, 3
+	blt	a1, t1, ar_s1d
+	# s10 or s11
+	lbu	t1, 2(a0)
+	li	t2, '0'
+	beq	t1, t2, ar_s10
+	li	a0, 27
+	ret
+ar_s10:
+	li	a0, 26
+	ret
+ar_s1d:
+	addi	t0, t0, -48
+	li	t1, 2
+	blt	t0, t1, ar_s_lo
+	addi	a0, t0, 16
+	ret
+ar_s_lo:
+	addi	a0, t0, 8
+	ret
+ar_sp:
+	li	a0, 2
+	ret
+ar_zero:
+	li	a0, 0
+	ret
+ar_ra:
+	li	a0, 1
+	ret
+ar_gp:
+	li	a0, 3
+	ret
+ar_fp:
+	li	a0, 8
+	ret
+
+# asm_skip: skip whitespace and commas, advance s3
+#   s3 = current ptr, s4 = end ptr
+asm_skip:
+	bgeu	s3, s4, as_done
+	lbu	t0, 0(s3)
+	li	t1, 32
+	beq	t0, t1, as_adv
+	li	t1, 9
+	beq	t0, t1, as_adv
+	li	t1, ','
+	beq	t0, t1, as_adv
+	li	t1, 13
+	beq	t0, t1, as_adv
+as_done:
+	ret
+as_adv:
+	addi	s3, s3, 1
+	j	asm_skip
+
+# asm_tok: read next token, return ptr and length
+#   s3 = current ptr (advanced past token), s4 = end
+#   Returns a0 = token ptr, a1 = token length
+asm_tok:
+	mv	a0, s3
+at_loop:
+	bgeu	s3, s4, at_done
+	lbu	t0, 0(s3)
+	# Stop on whitespace, comma, paren, colon, newline, comment
+	li	t1, 32
+	beq	t0, t1, at_done
+	li	t1, 9
+	beq	t0, t1, at_done
+	li	t1, ','
+	beq	t0, t1, at_done
+	li	t1, '('
+	beq	t0, t1, at_done
+	li	t1, ')'
+	beq	t0, t1, at_done
+	li	t1, ':'
+	beq	t0, t1, at_done
+	li	t1, '\n'
+	beq	t0, t1, at_done
+	li	t1, 13
+	beq	t0, t1, at_done
+	addi	s3, s3, 1
+	j	at_loop
+at_done:
+	sub	a1, s3, a0
+	ret
+
+# asm_skip_nl: skip to next line
+#   s3 = current ptr, s4 = end
+asm_skip_nl:
+	bgeu	s3, s4, asn_done
+	lbu	t0, 0(s3)
+	addi	s3, s3, 1
+	li	t1, '\n'
+	bne	t0, t1, asm_skip_nl
+asn_done:
+	ret
+
+# asm_imm: parse immediate value (decimal, hex, or negative)
+#   s3 = current ptr (advanced past number), s4 = end
+#   Returns a0 = value
+asm_imm:
+	# Manual save (avoid prologue to stay within 5-level nesting)
+	addi	sp, sp, -8
+	sw	ra, 4(sp)
+	sw	s5, 0(sp)
+	li	s5, 0
+	bgeu	s3, s4, ai_call
+	lbu	t0, 0(s3)
+	li	t1, '-'
+	bne	t0, t1, ai_call
+	li	s5, 1
+	addi	s3, s3, 1
+ai_call:
+	jal	asm_tok
+	jal	parse_int
+	beqz	s5, ai_done
+	neg	a0, a0
+ai_done:
+	lw	s5, 0(sp)
+	lw	ra, 4(sp)
+	addi	sp, sp, 8
+	ret
+
+# asm_mnem: look up mnemonic in table
+#   a0 = mnemonic ptr, a1 = mnemonic length
+#   Returns a0 = table entry ptr, or 0 if not found
+asm_mnem:
+	# Manual save (avoid prologue to stay within 5-level nesting)
+	addi	sp, sp, -16
+	sw	ra, 12(sp)
+	sw	s5, 0(sp)
+	sw	s6, 4(sp)
+	sw	s7, 8(sp)
+	mv	s5, a0
+	mv	s6, a1
+	lla	s7, asm_mnem_tbl
+am_scan:
+	lbu	t0, 0(s7)
+	beqz	t0, am_fail
+	mv	t0, s5
+	mv	t1, s7
+	mv	t2, s6
+am_cmp:
+	beqz	t2, am_ck_end
+	lbu	t3, 0(t0)
+	lbu	t4, 0(t1)
+	bne	t3, t4, am_next
+	addi	t0, t0, 1
+	addi	t1, t1, 1
+	addi	t2, t2, -1
+	j	am_cmp
+am_ck_end:
+	lbu	t3, 0(t1)
+	bnez	t3, am_next
+	mv	a0, s7
+	j	am_done
+am_next:
+	addi	s7, s7, 12
+	j	am_scan
+am_fail:
+	li	a0, 0
+am_done:
+	lw	s5, 0(sp)
+	lw	s6, 4(sp)
+	lw	s7, 8(sp)
+	lw	ra, 12(sp)
+	addi	sp, sp, 16
+	ret
+
+# asm_assemble: assemble asm body text into machine code
+#   a0 = body text ptr, a1 = body text length
+#   s0 = emit cursor, s2 = input base
+#   Uses s3-s7 internally (saved by prologue)
+asm_assemble:
+	prologue s3 s4 s5 s6 s7 x0
+	mv	s3, a0
+	add	s4, a0, a1
+	# Allocate local label table (max 64 labels)
+	li	a0, 776
+	jal	alloc
+	mv	s5, a0
+	sw	x0, 0(s5)
+	# Allocate fixup table (max 128 fixups)
+	li	a0, 2052
+	jal	alloc
+	mv	s6, a0
+	sw	x0, 0(s6)
+
+aa_line:
+	bgeu	s3, s4, aa_fix
+	jal	asm_skip
+	bgeu	s3, s4, aa_fix
+	# Check for newline
+	lbu	t0, 0(s3)
+	li	t1, '\n'
+	beq	t0, t1, aa_nl
+	# Check for // comment
+	li	t1, '/'
+	bne	t0, t1, aa_instr
+	addi	t1, s3, 1
+	bgeu	t1, s4, aa_instr
+	lbu	t1, 1(s3)
+	li	t2, '/'
+	beq	t1, t2, aa_cmt
+aa_instr:
+	# Read mnemonic/label token
+	jal	asm_tok
+	# a0=ptr, a1=len. Check if followed by ':'
+	mv	t3, a0
+	mv	t4, a1
+	bgeu	s3, s4, aa_mnem
+	lbu	t0, 0(s3)
+	li	t1, ':'
+	bne	t0, t1, aa_mnem
+	# Label definition: record address
+	addi	s3, s3, 1
+	lw	t0, 0(s5)
+	slli	t1, t0, 2
+	slli	t2, t0, 3
+	add	t1, t1, t2
+	addi	t1, t1, 4
+	add	t1, s5, t1
+	sw	t3, LL_OFF(t1)
+	sw	t4, LL_LEN(t1)
+	sw	s0, LL_ADDR(t1)
+	addi	t0, t0, 1
+	sw	t0, 0(s5)
+	j	aa_line
+aa_mnem:
+	# Look up mnemonic
+	mv	a0, t3
+	mv	a1, t4
+	jal	asm_mnem
+	beqz	a0, asm_err
+	# Load class, funct3, funct7
+	lbu	t5, 8(a0)
+	lbu	t6, 9(a0)
+	lbu	t3, 10(a0)
+	# Save on stack: [0]=class [4]=funct3 [8]=funct7 [12..20]=operands
+	addi	sp, sp, -24
+	sw	t5, 0(sp)
+	sw	t6, 4(sp)
+	sw	t3, 8(sp)
+	# Dispatch on class
+	li	t0, MC_RTYPE
+	beq	t5, t0, aa_r
+	li	t0, MC_IARITH
+	beq	t5, t0, aa_ia
+	li	t0, MC_ISHIFT
+	beq	t5, t0, aa_is
+	li	t0, MC_ILOAD
+	beq	t5, t0, aa_il
+	li	t0, MC_STYPE
+	beq	t5, t0, aa_st
+	li	t0, MC_BTYPE
+	beq	t5, t0, aa_br
+	li	t0, MC_LUI
+	beq	t5, t0, aa_lui
+	li	t0, MC_AUIPC
+	beq	t5, t0, aa_lui
+	li	t0, MC_JAL
+	beq	t5, t0, aa_jal
+	li	t0, MC_JALR
+	beq	t5, t0, aa_jalr
+	li	t0, MC_LI
+	beq	t5, t0, aa_li
+	li	t0, MC_MV
+	beq	t5, t0, aa_mv
+	li	t0, MC_RET
+	beq	t5, t0, aa_ret
+	li	t0, MC_J
+	beq	t5, t0, aa_j
+	li	t0, MC_NOP
+	beq	t5, t0, aa_nop
+	li	t0, MC_NOT
+	beq	t5, t0, aa_2reg
+	li	t0, MC_NEG
+	beq	t5, t0, aa_2reg
+	li	t0, MC_SEQZ
+	beq	t5, t0, aa_2reg
+	li	t0, MC_SNEZ
+	beq	t5, t0, aa_2reg
+	li	t0, MC_JR
+	beq	t5, t0, aa_jr
+	addi	sp, sp, 24
+	j	asm_err
+
+# --- R-type: rd, rs1, rs2 ---
+aa_r:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	mv	a1, a0
+	lw	a0, 8(sp)
+	lw	a2, 16(sp)
+	lw	a3, 4(sp)
+	lw	a4, 12(sp)
+	addi	sp, sp, 24
+	jal	em_rtype
+	j	aa_line
+
+# --- I-type arithmetic: rd, rs1, imm ---
+aa_ia:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	jal	asm_skip
+	jal	asm_imm
+	lw	a1, 16(sp)
+	lw	a2, 4(sp)
+	lw	a3, 12(sp)
+	addi	sp, sp, 24
+	li	a4, 0x13
+	jal	em_itype
+	j	aa_line
+
+# --- I-type shift: rd, rs1, shamt ---
+aa_is:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	jal	asm_skip
+	jal	asm_imm
+	lw	t0, 8(sp)
+	slli	t0, t0, 5
+	or	a0, a0, t0
+	lw	a1, 16(sp)
+	lw	a2, 4(sp)
+	lw	a3, 12(sp)
+	addi	sp, sp, 24
+	li	a4, 0x13
+	jal	em_itype
+	j	aa_line
+
+# --- I-type load: rd, imm(rs1) ---
+aa_il:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_imm
+	sw	a0, 16(sp)
+	lbu	t0, 0(s3)
+	li	t1, '('
+	bne	t0, t1, asm_err
+	addi	s3, s3, 1
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	mv	a1, a0
+	lbu	t0, 0(s3)
+	li	t1, ')'
+	bne	t0, t1, asm_err
+	addi	s3, s3, 1
+	lw	a0, 16(sp)
+	lw	a2, 4(sp)
+	lw	a3, 12(sp)
+	addi	sp, sp, 24
+	li	a4, 0x03
+	jal	em_itype
+	j	aa_line
+
+# --- S-type: rs2, imm(rs1) ---
+aa_st:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_imm
+	sw	a0, 16(sp)
+	lbu	t0, 0(s3)
+	li	t1, '('
+	bne	t0, t1, asm_err
+	addi	s3, s3, 1
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	mv	a2, a0
+	lbu	t0, 0(s3)
+	li	t1, ')'
+	bne	t0, t1, asm_err
+	addi	s3, s3, 1
+	lw	a0, 16(sp)
+	lw	a1, 12(sp)
+	lw	a3, 4(sp)
+	addi	sp, sp, 24
+	li	a4, 0x23
+	jal	em_stype
+	j	aa_line
+
+# --- B-type: rs1, rs2, label ---
+aa_br:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	jal	asm_skip
+	jal	asm_tok
+	lw	t0, 0(s6)
+	slli	t1, t0, 4
+	addi	t1, t1, 4
+	add	t1, s6, t1
+	sw	a0, FX_OFF(t1)
+	sw	a1, FX_LEN(t1)
+	sw	s0, FX_ADDR(t1)
+	sw	x0, FX_TYPE(t1)
+	addi	t0, t0, 1
+	sw	t0, 0(s6)
+	lw	a1, 12(sp)
+	lw	a2, 16(sp)
+	lw	a3, 4(sp)
+	addi	sp, sp, 24
+	li	a0, 0
+	jal	em_btype
+	j	aa_line
+
+# --- U-type (lui/auipc): rd, imm ---
+aa_lui:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_imm
+	lw	a1, 12(sp)
+	lw	t0, 0(sp)
+	addi	sp, sp, 24
+	li	t1, MC_AUIPC
+	beq	t0, t1, aa_auipc
+	li	a2, 0x37
+	jal	em_utype
+	j	aa_line
+aa_auipc:
+	li	a2, 0x17
+	jal	em_utype
+	j	aa_line
+
+# --- jal: rd, label ---
+aa_jal:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	lw	t0, 0(s6)
+	slli	t1, t0, 4
+	addi	t1, t1, 4
+	add	t1, s6, t1
+	sw	a0, FX_OFF(t1)
+	sw	a1, FX_LEN(t1)
+	sw	s0, FX_ADDR(t1)
+	li	t2, 1
+	sw	t2, FX_TYPE(t1)
+	addi	t0, t0, 1
+	sw	t0, 0(s6)
+	lw	a1, 12(sp)
+	addi	sp, sp, 24
+	li	a0, 0
+	jal	em_jtype
+	j	aa_line
+
+# --- jalr: rd, rs1, imm ---
+aa_jalr:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	jal	asm_skip
+	jal	asm_imm
+	lw	a1, 16(sp)
+	li	a2, 0
+	lw	a3, 12(sp)
+	addi	sp, sp, 24
+	li	a4, 0x67
+	jal	em_itype
+	j	aa_line
+
+# --- Pseudos ---
+aa_li:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_imm
+	mv	a1, a0
+	lw	a0, 12(sp)
+	addi	sp, sp, 24
+	jal	em_li
+	j	aa_line
+
+aa_mv:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	mv	a1, a0
+	lw	a3, 12(sp)
+	addi	sp, sp, 24
+	li	a0, 0
+	li	a2, 0
+	li	a4, 0x13
+	jal	em_itype
+	j	aa_line
+
+aa_ret:
+	addi	sp, sp, 24
+	li	a0, 0
+	li	a1, 1
+	li	a2, 0
+	li	a3, 0
+	li	a4, 0x67
+	jal	em_itype
+	j	aa_line
+
+aa_j:
+	jal	asm_skip
+	jal	asm_tok
+	lw	t0, 0(s6)
+	slli	t1, t0, 4
+	addi	t1, t1, 4
+	add	t1, s6, t1
+	sw	a0, FX_OFF(t1)
+	sw	a1, FX_LEN(t1)
+	sw	s0, FX_ADDR(t1)
+	li	t2, 1
+	sw	t2, FX_TYPE(t1)
+	addi	t0, t0, 1
+	sw	t0, 0(s6)
+	addi	sp, sp, 24
+	li	a0, 0
+	li	a1, 0
+	jal	em_jtype
+	j	aa_line
+
+aa_jr:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	mv	a1, a0
+	addi	sp, sp, 24
+	li	a0, 0
+	li	a2, 0
+	li	a3, 0
+	li	a4, 0x67
+	jal	em_itype
+	j	aa_line
+
+aa_nop:
+	addi	sp, sp, 24
+	li	a0, 0x13
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	j	aa_line
+
+# --- 2-reg pseudos: not, neg, seqz, snez ---
+aa_2reg:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	# Load all values before freeing stack
+	mv	t4, a0
+	lw	t5, 0(sp)
+	lw	t3, 12(sp)
+	addi	sp, sp, 24
+	# t3=rd, t4=rs, t5=class
+	li	t0, MC_NOT
+	beq	t5, t0, a2r_not
+	li	t0, MC_NEG
+	beq	t5, t0, a2r_neg
+	li	t0, MC_SEQZ
+	beq	t5, t0, a2r_seqz
+	# snez: sltu rd, x0, rs
+	li	a0, 0
+	mv	a1, t4
+	li	a2, 0
+	li	a3, 3
+	mv	a4, t3
+	jal	em_rtype
+	j	aa_line
+a2r_not:
+	# xori rd, rs, -1
+	li	a0, -1
+	mv	a1, t4
+	li	a2, 4
+	mv	a3, t3
+	li	a4, 0x13
+	jal	em_itype
+	j	aa_line
+a2r_neg:
+	# sub rd, x0, rs
+	li	a0, 0x20
+	mv	a1, t4
+	li	a2, 0
+	li	a3, 0
+	mv	a4, t3
+	jal	em_rtype
+	j	aa_line
+a2r_seqz:
+	# sltiu rd, rs, 1
+	li	a0, 1
+	mv	a1, t4
+	li	a2, 3
+	mv	a3, t3
+	li	a4, 0x13
+	jal	em_itype
+	j	aa_line
+
+aa_nl:
+	addi	s3, s3, 1
+	j	aa_line
+
+aa_cmt:
+	jal	asm_skip_nl
+	j	aa_line
+
+# --- Resolve fixups ---
+aa_fix:
+	lw	t5, 0(s6)
+	beqz	t5, aa_fdone
+	li	t6, 0
+af_loop:
+	beq	t6, t5, aa_fdone
+	slli	t0, t6, 4
+	addi	t0, t0, 4
+	add	t0, s6, t0
+	lw	a0, FX_OFF(t0)
+	lw	a1, FX_LEN(t0)
+	lw	t1, FX_ADDR(t0)
+	lw	t2, FX_TYPE(t0)
+	# Look up label in local label table
+	lw	t3, 0(s5)
+	li	t4, 0
+af_lbl:
+	beq	t4, t3, asm_err
+	slli	t0, t4, 2
+	slli	a2, t4, 3
+	add	t0, t0, a2
+	addi	t0, t0, 4
+	add	t0, s5, t0
+	lw	a2, LL_LEN(t0)
+	bne	a1, a2, af_lnext
+	lw	a2, LL_OFF(t0)
+	mv	a3, a0
+	mv	a4, a1
+af_lcmp:
+	beqz	a4, af_lmatch
+	lbu	a5, 0(a2)
+	lbu	a6, 0(a3)
+	bne	a5, a6, af_lnext
+	addi	a2, a2, 1
+	addi	a3, a3, 1
+	addi	a4, a4, -1
+	j	af_lcmp
+af_lmatch:
+	lw	a3, LL_ADDR(t0)
+	sub	a0, a3, t1
+	# Patch based on type: 0=B, 1=J
+	bnez	t2, af_jtype
+	# B-type: re-encode at t1
+	# Need rs1, rs2, funct3 from the existing instruction
+	lw	t3, 0(t1)
+	srli	a1, t3, 15
+	andi	a1, a1, 0x1F
+	srli	a2, t3, 20
+	andi	a2, a2, 0x1F
+	srli	a3, t3, 12
+	andi	a3, a3, 7
+	mv	t3, s0
+	mv	s0, t1
+	jal	em_btype
+	mv	s0, t3
+	j	af_lnext2
+af_jtype:
+	mv	a1, a0
+	mv	a0, t1
+	jal	patch_jal
+af_lnext2:
+	addi	t6, t6, 1
+	# Reload fixup count (might have been clobbered)
+	lw	t5, 0(s6)
+	j	af_loop
+af_lnext:
+	addi	t4, t4, 1
+	j	af_lbl
+
+aa_fdone:
+	return
+
+# --- Asm error ---
+asm_err:
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'a'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
+# ============================================================================
 # Codegen: top-level entry point
 # ============================================================================
 
@@ -3359,7 +4286,7 @@ cg_err:
 #   a0=AST root, a1=output buffer start, a2=input buffer start
 #   Returns a0=output start, a1=output end
 codegen:
-	prologue s0 s1 s2 s3 s4 s5 s6 s7 s8 x0
+	prologue s0 s1 s2 s3 s4 s5 s6 s7 s8 s9 x0
 	mv	s3, a0
 	mv	s0, a1
 	mv	s2, a2
@@ -3368,6 +4295,12 @@ codegen:
 	# Initialize symbol table
 	jal	sym_init
 	mv	s1, a0
+
+	# Initialize asm label table (s9)
+	li	a0, 772
+	jal	alloc
+	mv	s9, a0
+	sw	x0, AT_CNT(s9)
 
 	# Emit NOP (success magic)
 	li	a0, 0x13
@@ -3611,7 +4544,7 @@ cmp_done:
 
 main:
 	# Setup gp and stack pointer
-	lla	gp, data
+	lla	gp, heap
 	addi	gp, gp, 15
 	andi	gp, gp, -16
 	li	sp, 0x4000000
@@ -3756,4 +4689,161 @@ kw_struct:
 kw_sizeof:
 	.ascii	"sizeof"
 
-data:
+# Asm mnemonic table: 8-byte name + class, funct3, funct7, pad = 12 bytes each
+asm_mnem_tbl:
+	# Format: 8-byte name (ascii+zero pad) + .word (class | funct3<<8 | funct7<<16)
+	# R-type: add sub and or xor sll srl sra slt sltu
+	.ascii	"add"
+	.zero	5
+	.word	0x000001
+	.ascii	"sub"
+	.zero	5
+	.word	0x200001
+	.ascii	"and"
+	.zero	5
+	.word	0x000701
+	.ascii	"or"
+	.zero	6
+	.word	0x000601
+	.ascii	"xor"
+	.zero	5
+	.word	0x000401
+	.ascii	"sll"
+	.zero	5
+	.word	0x000101
+	.ascii	"srl"
+	.zero	5
+	.word	0x000501
+	.ascii	"sra"
+	.zero	5
+	.word	0x200501
+	.ascii	"slt"
+	.zero	5
+	.word	0x000201
+	.ascii	"sltu"
+	.zero	4
+	.word	0x000301
+	# I-arith: addi andi ori xori slti sltiu
+	.ascii	"addi"
+	.zero	4
+	.word	0x000002
+	.ascii	"andi"
+	.zero	4
+	.word	0x000702
+	.ascii	"ori"
+	.zero	5
+	.word	0x000602
+	.ascii	"xori"
+	.zero	4
+	.word	0x000402
+	.ascii	"slti"
+	.zero	4
+	.word	0x000202
+	.ascii	"sltiu"
+	.zero	3
+	.word	0x000302
+	# I-shift: slli srli srai
+	.ascii	"slli"
+	.zero	4
+	.word	0x000103
+	.ascii	"srli"
+	.zero	4
+	.word	0x000503
+	.ascii	"srai"
+	.zero	4
+	.word	0x200503
+	# I-load: lw lh lhu lb lbu
+	.ascii	"lw"
+	.zero	6
+	.word	0x000204
+	.ascii	"lh"
+	.zero	6
+	.word	0x000104
+	.ascii	"lhu"
+	.zero	5
+	.word	0x000504
+	.ascii	"lb"
+	.zero	6
+	.word	0x000004
+	.ascii	"lbu"
+	.zero	5
+	.word	0x000404
+	# S-type: sw sh sb
+	.ascii	"sw"
+	.zero	6
+	.word	0x000205
+	.ascii	"sh"
+	.zero	6
+	.word	0x000105
+	.ascii	"sb"
+	.zero	6
+	.word	0x000005
+	# B-type: beq bne blt bge bltu bgeu
+	.ascii	"beq"
+	.zero	5
+	.word	0x000006
+	.ascii	"bne"
+	.zero	5
+	.word	0x000106
+	.ascii	"blt"
+	.zero	5
+	.word	0x000406
+	.ascii	"bge"
+	.zero	5
+	.word	0x000506
+	.ascii	"bltu"
+	.zero	4
+	.word	0x000606
+	.ascii	"bgeu"
+	.zero	4
+	.word	0x000706
+	# U-type: lui auipc
+	.ascii	"lui"
+	.zero	5
+	.word	0x000007
+	.ascii	"auipc"
+	.zero	3
+	.word	0x000008
+	# J-type: jal
+	.ascii	"jal"
+	.zero	5
+	.word	0x000009
+	# jalr
+	.ascii	"jalr"
+	.zero	4
+	.word	0x00000A
+	# Pseudos
+	.ascii	"li"
+	.zero	6
+	.word	0x00000B
+	.ascii	"mv"
+	.zero	6
+	.word	0x00000C
+	.ascii	"ret"
+	.zero	5
+	.word	0x00000D
+	.ascii	"j"
+	.zero	7
+	.word	0x00000E
+	.ascii	"nop"
+	.zero	5
+	.word	0x00000F
+	.ascii	"not"
+	.zero	5
+	.word	0x000010
+	.ascii	"neg"
+	.zero	5
+	.word	0x000011
+	.ascii	"seqz"
+	.zero	4
+	.word	0x000012
+	.ascii	"snez"
+	.zero	4
+	.word	0x000013
+	.ascii	"jr"
+	.zero	6
+	.word	0x000014
+	# End sentinel
+	.byte	0
+
+heap:

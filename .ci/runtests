@@ -227,6 +227,46 @@ test_compiles "infinite loop"           "loop { }"
 test_compiles "loop with body"          "x := 0; loop { x = x + 1 }"
 
 # ============================================================================
+echo "=== Asm blocks ==="
+test_compiles "empty asm"               "asm { nop }; 42"
+test_compiles "asm nop"                 "asm foo { nop }; 42"
+test_compiles "asm ret"                 "asm foo { ret }; 42"
+test_compiles "asm arithmetic"          'asm foo { add t0, t1, t2
+ret }; 42'
+test_compiles "asm load store"          'asm foo { lw t0, 0(a0)
+sw t0, 4(a0)
+ret }; 42'
+test_compiles "asm lui li"             'asm foo { lui t0, 0x10000
+li t1, 42
+ret }; 42'
+test_output  "asm putchar"             'asm putchar {
+lui t0, 0x10000
+sb a0, 0(t0)
+ret
+};
+putchar(65)' "A"
+test_output  "asm call multi"          'asm putchar {
+lui t0, 0x10000
+sb a0, 0(t0)
+ret
+};
+putchar(72);
+putchar(105)' "Hi"
+test_output  "asm with args"           'asm add3 {
+add a0, a0, a1
+add a0, a0, a2
+ret
+};
+uart := 0x10000000;
+@uart = add3(50, 10, 5)' "A"
+test_compiles "asm branch"             'asm foo {
+beq a0, a1, skip
+addi a0, zero, 1
+skip:
+ret
+}; 42'
+
+# ============================================================================
 echo "=== Integration ==="
 test_output  "hello 7"                 'uart := 0x10000000; @uart = 72; @uart = 101; @uart = 108; @uart = 108; @uart = 111; @uart = 32; x := 3 + 4; @uart = x + 48; @uart = 33' "Hello 7!"
 
