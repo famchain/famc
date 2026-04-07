@@ -2456,10 +2456,10 @@ pc_done:
 #   Returns a0 = symbol table pointer
 sym_init:
 	prologue s3 x0
-	li	a0, 1024
+	li	a0, 8192
 	jal	alloc
 	mv	s3, a0
-	li	a1, 1024
+	li	a1, 8192
 	jal	memzero
 	mv	a0, s3
 	return
@@ -3030,13 +3030,16 @@ ge_tern:
 	jal	gen_expr
 	li	a0, R_T0
 	jal	em_pop
-	# beq t0, x0, else_branch (placeholder)
-	mv	s5, s0
-	li	a0, 0
+	# trampoline: bne t0, x0, +8; jal x0, else (placeholder)
+	li	a0, 8
 	li	a1, R_T0
 	li	a2, R_ZERO
-	li	a3, 0
+	li	a3, 1
 	jal	em_btype
+	mv	s5, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
 	# generate then
 	mv	a0, s6
 	jal	gen_expr
@@ -3045,19 +3048,14 @@ ge_tern:
 	li	a0, 0
 	li	a1, R_ZERO
 	jal	em_jtype
-	# backpatch beq to here (else start)
-	sub	a0, s0, s5
-	li	a1, R_T0
-	li	a2, R_ZERO
-	li	a3, 0
-	mv	t3, s0
-	mv	s0, s5
-	jal	em_btype
-	mv	s0, t3
+	# backpatch: jal to else start
+	sub	a1, s0, s5
+	mv	a0, s5
+	jal	patch_jal
 	# generate else
 	mv	a0, s7
 	jal	gen_expr
-	# backpatch j to here
+	# backpatch: j to merge point
 	sub	a1, s0, s6
 	mv	a0, s6
 	jal	patch_jal
