@@ -1,4 +1,4 @@
-.equ	UART, 0x10000			# UART CONSTANT
+.equ	UART, 0x10000
 
 _start:
 	j	main
@@ -12,13 +12,98 @@ exit:
 	wfi
 	j	1b
 
+# write_byte: write byte in a0 to UART. Spins until TX ready.
 write_byte:
+	prologue	t0 t1 x0
 	lui	t0, UART
+wb_poll:
 	lbu	t1, 5(t0)
 	andi	t1, t1, 0x20
-	beqz	t1, write_byte
+	beqz	t1, wb_poll
 	sb	a0, 0(t0)
-	ret
+	return
+
+# print_hex: print 32-bit value in a0 as "0xHHHHHHHH"
+print_hex:
+	prologue	s0 s1 t0 t1 t2 x0
+	mv	s0, a0			# save value
+	li	s1, 28			# shift (28,24,...,0)
+	li	a0, '0'
+	jal	write_byte
+	li	a0, 'x'
+	jal	write_byte
+ph_digit:
+	blt	s1, x0, ph_done
+	srl	a0, s0, s1
+	andi	a0, a0, 0xF
+	li	t0, 10
+	blt	a0, t0, ph_dec
+	addi	a0, a0, 55		# 'A'-10
+	j	ph_out
+ph_dec:
+	addi	a0, a0, '0'
+ph_out:
+	jal	write_byte
+	addi	s1, s1, -4
+	j	ph_digit
+ph_done:
+	return
+
+# print_dec: print 32-bit unsigned value in a0 as decimal
+print_dec:
+	prologue	s0 s1 s2 t0 t1 t2 x0
+	mv	s0, a0			# value
+	li	s1, 1			# leading-zero suppression flag
+# Divisors on stack: 1000000000 ... 1
+	addi	sp, sp, -40
+	li	t0, 1000000000
+	sw	t0, 0(sp)
+	li	t0, 100000000
+	sw	t0, 4(sp)
+	li	t0, 10000000
+	sw	t0, 8(sp)
+	li	t0, 1000000
+	sw	t0, 12(sp)
+	li	t0, 100000
+	sw	t0, 16(sp)
+	li	t0, 10000
+	sw	t0, 20(sp)
+	li	t0, 1000
+	sw	t0, 24(sp)
+	li	t0, 100
+	sw	t0, 28(sp)
+	li	t0, 10
+	sw	t0, 32(sp)
+	li	t0, 1
+	sw	t0, 36(sp)
+	mv	s2, sp			# divisor pointer
+	addi	t2, sp, 40		# end
+pd_loop:
+	beq	s2, t2, pd_done
+	lw	t0, 0(s2)		# current divisor
+	li	t1, 0			# digit
+pd_sub:
+	bltu	s0, t0, pd_emit
+	sub	s0, s0, t0
+	addi	t1, t1, 1
+	j	pd_sub
+pd_emit:
+	addi	t0, s2, 4
+	beq	t0, t2, pd_print	# last digit: always print
+	beqz	t1, pd_skip
+	li	s1, 0			# saw nonzero: stop suppressing
+	j	pd_print
+pd_skip:
+	bnez	s1, pd_next		# still suppressing
+pd_print:
+	addi	a0, t1, '0'
+	jal	write_byte
+pd_next:
+	addi	s2, s2, 4
+	j	pd_loop
+pd_done:
+	addi	sp, sp, 40
+	return
 
 main:
 	lla	gp, data
@@ -27,8 +112,20 @@ main:
 	li	sp, 0x100000
 	add	sp, sp, gp
 
-	li	a0, 'A'
+	li	a0, 0xDEADBEEF
+	jal	print_hex
+	li	a0, '\n'
 	jal	write_byte
+	li	a0, 12345
+	jal	print_dec
+	li	a0, '\n'
+	jal	write_byte
+	li	a0, 0x1234
+	jal	print_hex
+	li	a0, '\n'
+	jal	write_byte
+	li	a0, 9999
+	jal	print_dec
 	li	a0, '\n'
 	jal	write_byte
 	j	exit
