@@ -9,13 +9,22 @@ run() {
 		-nographic \
 		-bios none \
 		-device loader,file="$1",addr=0x80000000 \
-		-serial mon:stdio 2>/dev/null;
+		-serial mon:stdio 2>/dev/null
+}
+check() {
+	# If output starts with 'E', it's an error message from the assembler
+	if head -c1 "$1" | grep -q E; then
+		echo "Error assembling $1: $(cat "$1")" >&2
+		exit 1
+	fi
 }
 run fam0.seed src/fam0.fam0 > bin/fam0
 cmp ./bin/fam0 ./fam0.seed || { echo "binaries don't match!"; exit 1; }
 run ./bin/fam0 src/fam1.fam0 > bin/fam1
 run ./bin/fam1 src/fam2.fam1 > bin/fam2
 run ./bin/fam2 src/fam3.fam2 > bin/fam3
+check bin/fam3
 run ./bin/fam3 src/famc.fam3 > bin/famc
+check bin/famc
 
 echo "Success!";

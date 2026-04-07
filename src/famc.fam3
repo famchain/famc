@@ -1,21 +1,36 @@
-.equ	UART, 0x10000
+.equ	UART, 0x10000			# UART CONSTANT
 
-# Note labels not indented
 _start:
-	lui	t0, UART		# Note 2 tabs (same dist for all comments)
+	j	main
 
-# Loop
-loop:
-	lbu	t1, 5(t0)		# lbu Note tab after lbu
-	andi	t1, t1, 0x20
-	beqz	t1, loop		# Repeat
-	li	t2, 67
-	sb	t2, 0(t0)
+exit:
 	lui	t0, 0x100
 	lui	t1, 5
 	addi	t1, t1, 0x555
 	sw	t1, 0(t0)
-
-hang:					# single space before label
+1:
 	wfi
-	j	hang			# ok
+	j	1b
+
+write_byte:
+	lui	t0, UART
+	lbu	t1, 5(t0)
+	andi	t1, t1, 0x20
+	beqz	t1, write_byte
+	sb	a0, 0(t0)
+	ret
+
+main:
+	lla	gp, data
+	addi	gp, gp, 15
+	andi	gp, gp, -16
+	li	sp, 0x100000
+	add	sp, sp, gp
+
+	li	a0, 'A'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
+data:

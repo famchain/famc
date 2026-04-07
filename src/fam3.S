@@ -748,6 +748,59 @@ parse_imm:
     li      t2, 1                       # sign
     beqz    t1, pi_bad
     lbu     t3, 0(t0)
+    # Check for char literal: 'x' or '\n' etc.
+    li      t4, 39                      # single quote
+    bne     t3, t4, pi_not_char
+    # Must end with quote: len>=3, last byte = quote
+    li      t4, 3
+    blt     t1, t4, pi_bad
+    add     t4, t0, t1
+    addi    t4, t4, -1
+    lbu     t5, 0(t4)
+    li      t4, 39
+    bne     t5, t4, pi_bad
+    # Check for backslash escape: 'x' (len=3) vs '\x' (len=4)
+    li      t4, 3
+    beq     t1, t4, pi_char_plain
+    li      t4, 4
+    bne     t1, t4, pi_bad
+    # Escape: '\x' — check second byte is backslash
+    lbu     t3, 1(t0)
+    li      t4, 0x5C                    # backslash
+    bne     t3, t4, pi_bad
+    lbu     t3, 2(t0)
+    li      t4, 110                     # 'n'
+    beq     t3, t4, pi_esc_n
+    li      t4, 116                     # 't'
+    beq     t3, t4, pi_esc_t
+    li      t4, 114                     # 'r'
+    beq     t3, t4, pi_esc_r
+    li      t4, 48                      # '0'
+    beq     t3, t4, pi_esc_0
+    li      t4, 0x5C                    # '\\'
+    beq     t3, t4, pi_esc_lit
+    li      t4, 39                      # '\''
+    beq     t3, t4, pi_esc_lit
+    j       pi_bad
+pi_esc_n:
+    li      a0, 10
+    ret
+pi_esc_t:
+    li      a0, 9
+    ret
+pi_esc_r:
+    li      a0, 13
+    ret
+pi_esc_0:
+    li      a0, 0
+    ret
+pi_esc_lit:
+    mv      a0, t3
+    ret
+pi_char_plain:
+    lbu     a0, 1(t0)
+    ret
+pi_not_char:
     li      t4, 45                      # '-'
     bne     t3, t4, pi_maybe_plus
     li      t2, -1
@@ -1847,7 +1900,20 @@ do_u_auipc:
 do_j_jal:
     addi    sp, sp, -8
     sw      ra, 0(sp)
-    jal     ra, read_reg_op
+    # Read first operand: could be rd (register) or target (label/imm).
+    # If it parses as a register, read the next token as target.
+    # If not, default rd=ra and use this token as target (pushback).
+    jal     ra, read_token
+    mv      a0, s10
+    mv      a1, s0
+    jal     ra, parse_reg
+    li      t0, -1
+    bne     a0, t0, jal_have_rd
+    # Not a register — default rd=ra, pushback token for read_br_target
+    li      a0, 1                       # ra
+    li      t0, 1
+    sw      t0, 476(s10)                # pushback flag
+jal_have_rd:
     sw      a0, 4(sp)                   # rd
     li      a0, 1                       # slot_type J
     jal     ra, read_br_target
@@ -2652,7 +2718,67 @@ ep_chk_ident:
 ep_chk_us:
     li      t1, 95                      # '_'
     beq     t0, t1, ep_sym
+    li      t1, 39                      # single quote: char literal
+    beq     t0, t1, ep_char
     j       ep_bad
+ep_char:
+    # Char literal: 'x' (3 bytes) or '\x' (4 bytes).
+    # a0 = ptr at opening quote. Check for backslash escape.
+    addi    t2, a0, 1                   # past opening quote
+    beq     t2, a1, ep_bad
+    lbu     t3, 0(t2)                   # char after quote
+    li      t4, 0x5C                    # backslash?
+    beq     t3, t4, ep_char_esc
+    # Plain char: value = t3, expect closing quote at a0+2
+    mv      a0, t3
+    addi    a2, t2, 1
+    beq     a2, a1, ep_bad
+    lbu     t4, 0(a2)
+    li      t5, 39
+    bne     t4, t5, ep_bad
+    addi    a2, a2, 1                   # past closing quote
+    j       ep_ret
+ep_char_esc:
+    # Escape: '\x' — read escape char
+    addi    t2, t2, 1                   # past backslash
+    beq     t2, a1, ep_bad
+    lbu     t3, 0(t2)
+    li      t4, 110
+    beq     t3, t4, epc_n
+    li      t4, 116
+    beq     t3, t4, epc_t
+    li      t4, 114
+    beq     t3, t4, epc_r
+    li      t4, 48
+    beq     t3, t4, epc_0
+    li      t4, 0x5C
+    beq     t3, t4, epc_lit
+    li      t4, 39
+    beq     t3, t4, epc_lit
+    j       ep_bad
+epc_n:
+    li      a0, 10
+    j       epc_close
+epc_t:
+    li      a0, 9
+    j       epc_close
+epc_r:
+    li      a0, 13
+    j       epc_close
+epc_0:
+    li      a0, 0
+    j       epc_close
+epc_lit:
+    mv      a0, t3
+epc_close:
+    # Expect closing quote at t2+1
+    addi    a2, t2, 1
+    beq     a2, a1, ep_bad
+    lbu     t4, 0(a2)
+    li      t5, 39
+    bne     t4, t5, ep_bad
+    addi    a2, a2, 1                   # past closing quote
+    j       ep_ret
 ep_num:
     jal     ra, parse_num
     j       ep_ret
@@ -3579,10 +3705,10 @@ dll_z:
 
 # ============================================================================
 # Prologue/Epilogue/Return with LIFO frame tracking.
-# Frame stack: depth at 120(s10), entries at 128(s10) (40B each, max 8).
+# Frame stack: depth at 120(s10), entries at 128(s10) (56B each, max 5).
 #   entry[0..3]   = frame_size (16-byte-aligned)
 #   entry[4..7]   = nregs (extra regs beyond ra)
-#   entry[8..39]  = reg numbers, up to 8
+#   entry[8..55]  = reg numbers, up to 12
 #
 # prologue r0 r1 ... x0
 #   - Reads regs until x0 sentinel.
@@ -3596,35 +3722,37 @@ dll_z:
 # ============================================================================
 
 do_ps_prologue:
-    # Stack: 0..31=regs[0..7], 32=nregs, 36=frame_size, 40=i, 44=ra
-    addi    sp, sp, -48
-    sw      ra, 44(sp)
-    sw      x0, 32(sp)
+    # Stack: 0..47=regs[0..11], 48=nregs, 52=frame_size, 56=i, 60=ra
+    addi    sp, sp, -64
+    sw      ra, 60(sp)
+    sw      x0, 48(sp)
 dpp_read:
     jal     ra, read_reg_op
     beqz    a0, dpp_build
-    lw      t0, 32(sp)
-    li      t1, 8
+    lw      t0, 48(sp)
+    li      t1, 12
     bge     t0, t1, dpp_bad
     slli    t1, t0, 2
     add     t1, sp, t1
     sw      a0, 0(t1)
     addi    t0, t0, 1
-    sw      t0, 32(sp)
+    sw      t0, 48(sp)
     j       dpp_read
 dpp_build:
-    lw      t0, 32(sp)
+    lw      t0, 48(sp)
     addi    t1, t0, 1
     slli    t1, t1, 2
     addi    t1, t1, 15
     andi    t1, t1, -16
-    sw      t1, 36(sp)
+    sw      t1, 52(sp)
     lw      t2, 120(s10)
-    li      t3, 8
+    li      t3, 5
     bge     t2, t3, dpp_bad
-    slli    t3, t2, 3
-    slli    t4, t2, 5
-    add     t3, t3, t4                  # depth*40
+    slli    t3, t2, 5
+    slli    t4, t2, 4
+    add     t3, t3, t4
+    slli    t4, t2, 3
+    add     t3, t3, t4                  # depth*56
     add     t3, t3, s10
     addi    t3, t3, 128
     sw      t1, 0(t3)
@@ -3644,7 +3772,7 @@ dpp_cpd:
     addi    t2, t2, 1
     sw      t2, 120(s10)
     # Emit addi sp, sp, -frame_size
-    lw      t1, 36(sp)
+    lw      t1, 52(sp)
     sub     t1, x0, t1
     li      a0, 0x13
     li      a1, 2
@@ -3660,10 +3788,10 @@ dpp_cpd:
     li      a4, 0
     jal     ra, emit_s_inst
     # Emit sw regs[i], (i+1)*4(sp) loop
-    sw      x0, 40(sp)
+    sw      x0, 56(sp)
 dpp_emit:
-    lw      t0, 40(sp)
-    lw      t1, 32(sp)
+    lw      t0, 56(sp)
+    lw      t1, 48(sp)
     beq     t0, t1, dpp_ret
     slli    t2, t0, 2
     add     t2, sp, t2
@@ -3675,13 +3803,13 @@ dpp_emit:
     li      a3, 2
     mv      a4, t3
     jal     ra, emit_s_inst
-    lw      t0, 40(sp)
+    lw      t0, 56(sp)
     addi    t0, t0, 1
-    sw      t0, 40(sp)
+    sw      t0, 56(sp)
     j       dpp_emit
 dpp_ret:
-    lw      ra, 44(sp)
-    addi    sp, sp, 48
+    lw      ra, 60(sp)
+    addi    sp, sp, 64
     ret
 dpp_bad:
     li      a0, 25
@@ -3694,9 +3822,11 @@ do_ps_epilogue:
     beqz    t0, dpep_bad
     addi    t0, t0, -1
     sw      t0, 120(s10)
-    slli    t1, t0, 3
-    slli    t2, t0, 5
+    slli    t1, t0, 5
+    slli    t2, t0, 4
     add     t1, t1, t2
+    slli    t2, t0, 3
+    add     t1, t1, t2                  # depth*56
     add     t1, t1, s10
     addi    t1, t1, 128                 # entry ptr
     lw      t2, 0(t1)                   # frame_size
