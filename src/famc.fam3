@@ -23,6 +23,17 @@ wb_poll:
 	sb	a0, 0(t0)
 	return
 
+# read_byte: read one byte from UART into a0. Spins until RX ready.
+read_byte:
+	prologue	t0 t1 x0
+	lui	t0, UART
+rb_poll:
+	lbu	t1, 5(t0)
+	andi	t1, t1, 1		# RX data ready (bit 0 of LSR)
+	beqz	t1, rb_poll
+	lbu	a0, 0(t0)
+	return
+
 # print_hex: print 32-bit value in a0 as "0xHHHHHHHH"
 print_hex:
 	prologue	s0 s1 t0 t1 t2 x0
