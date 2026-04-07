@@ -2824,6 +2824,8 @@ gen_expr:
 	beq	s4, t0, ge_postfix
 	li	t0, NK_ASM
 	beq	s4, t0, ge_asm
+	li	t0, NK_STR
+	beq	s4, t0, ge_str
 	j	cg_err
 
 # --- Number literal ---
@@ -2850,6 +2852,76 @@ ge_char:
 	li	a0, R_T0
 	mv	a1, s5
 	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- String literal ---
+ge_str:
+	lw	s5, N_LOC_OFF(s3)
+	lw	s6, N_LOC_LEN(s3)
+	add	s5, s2, s5
+	add	s6, s5, s6
+	# s5 = ptr to opening quote, s6 = ptr past closing quote
+	addi	s5, s5, 1
+	addi	s6, s6, -1
+	# Emit: jal t0, past_string (t0 gets PC+4 = address of string data)
+	# Save patch location, emit placeholder
+	mv	s7, s0
+	li	a0, 0
+	li	a1, R_T0
+	jal	em_jtype
+	# Emit string bytes with escape processing
+gs_loop:
+	bgeu	s5, s6, gs_pad
+	lbu	t0, 0(s5)
+	addi	s5, s5, 1
+	li	t1, 92
+	bne	t0, t1, gs_raw
+	# Escape sequence
+	bgeu	s5, s6, gs_pad
+	lbu	t0, 0(s5)
+	addi	s5, s5, 1
+	li	t1, 'n'
+	beq	t0, t1, gs_nl
+	li	t1, 't'
+	beq	t0, t1, gs_tab
+	li	t1, 'r'
+	beq	t0, t1, gs_cr
+	li	t1, '0'
+	beq	t0, t1, gs_nul
+	# Other escapes: emit raw char (\\, \", etc.)
+	j	gs_raw
+gs_nl:
+	li	t0, 10
+	j	gs_raw
+gs_tab:
+	li	t0, 9
+	j	gs_raw
+gs_cr:
+	li	t0, 13
+	j	gs_raw
+gs_nul:
+	li	t0, 0
+gs_raw:
+	sb	t0, 0(s0)
+	addi	s0, s0, 1
+	j	gs_loop
+gs_pad:
+	# Null terminator
+	sb	x0, 0(s0)
+	addi	s0, s0, 1
+	# Align to 4 bytes
+	addi	s0, s0, 3
+	andi	s0, s0, -4
+	# Backpatch: jal t0, offset (t0 gets PC+4 = string data addr)
+	sub	a0, s0, s7
+	li	a1, R_T0
+	mv	t3, s0
+	mv	s0, s7
+	jal	em_jtype
+	mv	s0, t3
+	# Push t0 (string pointer)
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
@@ -4341,6 +4413,9 @@ asm_err:
 codegen:
 	prologue s0 s1 s2 s3 s4 s5 s6 s7 s8 s9 x0
 	mv	s3, a0
+	# Align output buffer start to 4 bytes
+	addi	a1, a1, 3
+	andi	a1, a1, -4
 	mv	s0, a1
 	mv	s2, a2
 	mv	s4, a1
