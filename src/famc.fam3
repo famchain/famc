@@ -279,6 +279,8 @@ pd_done:
 .equ	R_ZERO,	0
 .equ	R_RA,	1
 .equ	R_SP,	2
+.equ	R_GP,	3
+.equ	R_TP,	4
 .equ	R_T0,	5
 .equ	R_T1,	6
 .equ	R_T2,	7
@@ -296,7 +298,8 @@ pd_done:
 # Symbol table header
 .equ	ST_CNT,	0
 .equ	ST_NEXT,	4
-.equ	ST_DATA,	8
+.equ	ST_CAP,	8
+.equ	ST_DATA,	12
 
 # ============================================================================
 # Memory helpers
@@ -2207,6 +2210,13 @@ em_utype:
 # em_jtype: emit J-type instruction (opcode 0x6F)
 #   a0=imm (byte offset, 21-bit signed), a1=rd
 em_jtype:
+	# Check offset fits in 21-bit signed (±1MB)
+	srai	t0, a0, 20
+	beqz	t0, ej_ok
+	li	t1, -1
+	beq	t0, t1, ej_ok
+	j	ej_err
+ej_ok:
 	li	t0, 0x6F
 	slli	t1, a1, 7
 	or	t0, t0, t1
@@ -2275,8 +2285,9 @@ el_large:
 el_done:
 	return
 
-# em_push: emit push register onto stack
+# em_push: emit push register onto stack with overflow check
 #   a0 = register number
+#   s8 = address of stack overflow handler in output buffer
 em_push:
 	prologue s3 x0
 	mv	s3, a0
@@ -2287,6 +2298,16 @@ em_push:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+	# bgeu sp, tp, +8 (no overflow, skip jal)
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	# jal x0, overflow_handler
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
 	# sw reg, 0(sp)
 	li	a0, 0
 	mv	a1, s3
@@ -2317,9 +2338,94 @@ em_pop:
 	jal	em_itype
 	return
 
+# em_var_load: emit code to load word from variable slot into register
+#   a0 = offset from frame pointer, a1 = dest register
+#   Uses t2 as scratch for large offsets
+em_var_load:
+	prologue s3 s4 x0
+	mv	s3, a0
+	mv	s4, a1
+	li	t0, 2047
+	blt	t0, s3, evl_large
+	li	t0, -2048
+	blt	s3, t0, evl_large
+	# Small offset: lw dest, offset(s0)
+	mv	a0, s3
+	li	a1, R_S0
+	li	a2, 2
+	mv	a3, s4
+	li	a4, 0x03
+	jal	em_itype
+	j	evl_done
+evl_large:
+	# li t2, offset; add t2, s0, t2; lw dest, 0(t2)
+	li	a0, R_T2
+	mv	a1, s3
+	jal	em_li
+	li	a0, 0
+	li	a1, R_T2
+	li	a2, R_S0
+	li	a3, 0
+	li	a4, R_T2
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T2
+	li	a2, 2
+	mv	a3, s4
+	li	a4, 0x03
+	jal	em_itype
+evl_done:
+	return
+
+# em_var_store: emit code to store register to variable slot
+#   a0 = offset from frame pointer, a1 = source register
+#   Uses t2 as scratch for large offsets
+em_var_store:
+	prologue s3 s4 x0
+	mv	s3, a0
+	mv	s4, a1
+	li	t0, 2047
+	blt	t0, s3, evs_large
+	li	t0, -2048
+	blt	s3, t0, evs_large
+	# Small offset: sw src, offset(s0)
+	mv	a0, s3
+	mv	a1, s4
+	li	a2, R_S0
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	j	evs_done
+evs_large:
+	# li t2, offset; add t2, s0, t2; sw src, 0(t2)
+	li	a0, R_T2
+	mv	a1, s3
+	jal	em_li
+	li	a0, 0
+	li	a1, R_T2
+	li	a2, R_S0
+	li	a3, 0
+	li	a4, R_T2
+	jal	em_rtype
+	li	a0, 0
+	mv	a1, s4
+	li	a2, R_T2
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+evs_done:
+	return
+
 # patch_jal: patch a JAL x0 instruction at address a0 with offset a1
 #   Clobbers t0-t1
 patch_jal:
+	# Check offset fits in 21-bit signed
+	srai	t0, a1, 20
+	beqz	t0, pj_ok
+	li	t1, -1
+	beq	t0, t1, pj_ok
+	j	ej_err
+pj_ok:
 	li	t0, 0x6F
 	srli	t1, a1, 12
 	andi	t1, t1, 0xFF
@@ -2371,10 +2477,14 @@ pi_dec:
 	bgeu	s3, s5, pi_done
 	lbu	t0, 0(s3)
 	addi	t0, t0, -48
+	# Overflow check: s6 must be <= 429496729 before *10
+	li	t3, 429496729
+	bltu	t3, s6, pi_ovf
 	slli	t1, s6, 3
 	slli	t2, s6, 1
 	add	s6, t1, t2
 	add	s6, s6, t0
+	bltu	s6, t0, pi_ovf
 	addi	s3, s3, 1
 	j	pi_dec
 pi_hex:
@@ -2394,8 +2504,12 @@ pi_hex_lo:
 pi_hex_up:
 	addi	t0, t0, -55
 pi_hex_add:
+	# Overflow check: top 4 bits must be clear before shift
+	srli	t1, s6, 28
+	bnez	t1, pi_ovf
 	slli	s6, s6, 4
 	add	s6, s6, t0
+	bltu	s6, t0, pi_ovf
 	addi	s3, s3, 1
 	j	pi_hex_loop
 pi_bin:
@@ -2404,6 +2518,9 @@ pi_bin_loop:
 	bgeu	s3, s5, pi_done
 	lbu	t0, 0(s3)
 	addi	t0, t0, -48
+	# Overflow check: top bit must be clear before shift
+	srli	t1, s6, 31
+	bnez	t1, pi_ovf
 	slli	s6, s6, 1
 	add	s6, s6, t0
 	addi	s3, s3, 1
@@ -2411,6 +2528,14 @@ pi_bin_loop:
 pi_done:
 	mv	a0, s6
 	return
+pi_ovf:
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'i'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
 
 # parse_char: parse character literal from source text
 #   a0 = pointer to first char (including quotes), a1 = length
@@ -2452,28 +2577,68 @@ pc_done:
 # Codegen: symbol table
 # ============================================================================
 
-# sym_init: allocate and zero symbol table header
+# sym_init: allocate symbol table with initial capacity 256
 #   Returns a0 = symbol table pointer
 sym_init:
 	prologue s3 x0
-	li	a0, 8192
+	# 12 header + 256 * 16 entries = 4108
+	li	a0, 4108
 	jal	alloc
 	mv	s3, a0
-	li	a1, 8192
+	li	a1, 4108
 	jal	memzero
+	li	t0, 256
+	sw	t0, ST_CAP(s3)
 	mv	a0, s3
 	return
 
-# sym_def: define a new variable
+# sym_def: define a new variable, growing table if needed
 #   a0=name offset, a1=name length, s1=symtab
 #   Returns a0 = stack slot offset (negative)
+#   May update s1 if table is reallocated
 sym_def:
+	prologue s3 s4 s5 x0
+	mv	s3, a0
+	mv	s4, a1
+	# Check if table is full
+	lw	t0, ST_CNT(s1)
+	lw	t1, ST_CAP(s1)
+	blt	t0, t1, sd_ok
+	# Grow: double capacity
+	slli	s5, t1, 1
+	slli	a0, s5, 4
+	addi	a0, a0, ST_DATA
+	jal	alloc
+	mv	t3, a0
+	# Copy header
+	lw	t0, ST_CNT(s1)
+	sw	t0, ST_CNT(t3)
+	lw	t0, ST_NEXT(s1)
+	sw	t0, ST_NEXT(t3)
+	sw	s5, ST_CAP(t3)
+	# Copy entries (count * 16 bytes)
+	lw	t0, ST_CNT(s1)
+	slli	t0, t0, 4
+	addi	t1, s1, ST_DATA
+	addi	t2, t3, ST_DATA
+sd_copy:
+	beqz	t0, sd_copied
+	lw	t4, 0(t1)
+	sw	t4, 0(t2)
+	addi	t1, t1, 4
+	addi	t2, t2, 4
+	addi	t0, t0, -4
+	j	sd_copy
+sd_copied:
+	mv	s1, t3
+sd_ok:
+	# Add entry
 	lw	t0, ST_CNT(s1)
 	slli	t1, t0, 4
 	addi	t1, t1, ST_DATA
 	add	t1, s1, t1
-	sw	a0, SY_OFF(t1)
-	sw	a1, SY_LEN(t1)
+	sw	s3, SY_OFF(t1)
+	sw	s4, SY_LEN(t1)
 	lw	t2, ST_NEXT(s1)
 	addi	t2, t2, -4
 	sw	t2, ST_NEXT(s1)
@@ -2481,7 +2646,7 @@ sym_def:
 	addi	t0, t0, 1
 	sw	t0, ST_CNT(s1)
 	mv	a0, t2
-	ret
+	return
 
 # sym_find: look up variable by name
 #   a0=name offset, a1=name length, s1=symtab, s2=input base
@@ -2602,14 +2767,8 @@ ge_ident:
 	lw	a0, N_LOC_OFF(s3)
 	lw	a1, N_LOC_LEN(s3)
 	jal	sym_find
-	mv	s5, a0
-	# lw t0, offset(s0) in generated code
-	mv	a0, s5
-	li	a1, R_S0
-	li	a2, 2
-	li	a3, R_T0
-	li	a4, 0x03
-	jal	em_itype
+	li	a1, R_T0
+	jal	em_var_load
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
@@ -2911,13 +3070,19 @@ ga_ident:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+	# Stack overflow check: bgeu sp, tp, +8; jal x0, handler
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
 	# Store value and push result
 	mv	a0, s5
 	li	a1, R_T0
-	li	a2, R_S0
-	li	a3, 2
-	li	a4, 0x23
-	jal	em_stype
+	jal	em_var_store
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
@@ -2930,13 +3095,10 @@ ga_store:
 	# pop value into t0
 	li	a0, R_T0
 	jal	em_pop
-	# sw t0, offset(s0) in generated code
+	# store t0 at variable slot
 	mv	a0, s5
 	li	a1, R_T0
-	li	a2, R_S0
-	li	a3, 2
-	li	a4, 0x23
-	jal	em_stype
+	jal	em_var_store
 	# push value back (assignment returns the value)
 	li	a0, R_T0
 	jal	em_push
@@ -3138,13 +3300,10 @@ ge_postfix:
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_find
 	mv	s7, a0
-	# Load current value: lw t0, offset(s0)
+	# Load current value
 	mv	a0, s7
-	li	a1, R_S0
-	li	a2, 2
-	li	a3, R_T0
-	li	a4, 0x03
-	jal	em_itype
+	li	a1, R_T0
+	jal	em_var_load
 	# Push old value (postfix returns pre-increment)
 	li	a0, R_T0
 	jal	em_push
@@ -3161,17 +3320,24 @@ gpo_store:
 	li	a3, R_T0
 	li	a4, 0x13
 	jal	em_itype
-	# Store back: sw t0, offset(s0)
+	# Store back
 	mv	a0, s7
 	li	a1, R_T0
-	li	a2, R_S0
-	li	a3, 2
-	li	a4, 0x23
-	jal	em_stype
+	jal	em_var_store
 	j	ge_done
 
 ge_done:
 	return
+
+# --- Jump offset overflow error ---
+ej_err:
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'j'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
 
 # --- Codegen error ---
 cg_err:
@@ -3193,7 +3359,7 @@ cg_err:
 #   a0=AST root, a1=output buffer start, a2=input buffer start
 #   Returns a0=output start, a1=output end
 codegen:
-	prologue s0 s1 s2 s3 s4 s5 s6 s7 x0
+	prologue s0 s1 s2 s3 s4 s5 s6 s7 s8 x0
 	mv	s3, a0
 	mv	s0, a1
 	mv	s2, a2
@@ -3215,13 +3381,81 @@ codegen:
 	jal	em_utype
 
 	# Emit: mv s0, sp (frame pointer = sp in generated code)
-	# addi x8, x2, 0
 	li	a0, 0
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_S0
 	li	a4, 0x13
 	jal	em_itype
+
+	# Placeholder for gp setup (backpatched after codegen)
+	mv	s7, s0
+	li	a0, 0x13
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+
+	# Emit: li tp, 0 (default: no stack limit)
+	li	a0, R_TP
+	li	a1, 0
+	jal	em_li
+
+	# Emit: j past_handler (skip over overflow handler)
+	mv	s6, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+
+	# Stack overflow handler — s8 = its address for backpatch refs
+	mv	s8, s0
+	# sb 'S', 0(uart) — print 'S' to UART
+	li	a0, 0x10000
+	li	a1, R_T0
+	li	a2, 0x37
+	jal	em_utype
+	li	a0, R_T1
+	li	a1, 83
+	jal	em_li
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 0
+	li	a4, 0x23
+	jal	em_stype
+	# Write FAIL (0x3333) to test device
+	li	a0, 0x100
+	li	a1, R_T0
+	li	a2, 0x37
+	jal	em_utype
+	li	a0, 3
+	li	a1, R_T1
+	li	a2, 0x37
+	jal	em_utype
+	li	a0, 0x333
+	li	a1, R_T1
+	li	a2, 0
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	# wfi; j -4
+	li	a0, 0x10500073
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	li	a0, -4
+	li	a1, R_ZERO
+	jal	em_jtype
+
+	# Backpatch: j past_handler
+	sub	a1, s0, s6
+	mv	a0, s6
+	jal	patch_jal
 
 	# Generate code for each top-level expression
 	lw	s5, N_FIRST_CHILD(s3)
@@ -3276,6 +3510,40 @@ cg_top_done:
 	li	a0, -4
 	li	a1, R_ZERO
 	jal	em_jtype
+
+	# Backpatch gp: point to end of code, aligned to 16
+	# gp_value = 0x80000000 + (emit_cursor - output_start), aligned
+	sub	s3, s0, s4
+	lui	t0, 0x80000
+	add	s3, t0, s3
+	addi	s3, s3, 15
+	andi	s3, s3, -16
+
+	# Decompose gp_value for lui+addi
+	srli	s6, s3, 12
+	srli	t0, s3, 11
+	andi	t0, t0, 1
+	add	s6, s6, t0
+
+	# Emit lui gp, upper at patch address
+	mv	s5, s0
+	mv	s0, s7
+	mv	a0, s6
+	li	a1, R_GP
+	li	a2, 0x37
+	jal	em_utype
+
+	# Emit addi gp, gp, lower
+	slli	t0, s6, 12
+	sub	a0, s3, t0
+	li	a1, R_GP
+	li	a2, 0
+	li	a3, R_GP
+	li	a4, 0x13
+	jal	em_itype
+
+	# Restore emit cursor
+	mv	s0, s5
 
 	# Return output range
 	mv	a0, s4

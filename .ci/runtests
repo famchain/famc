@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# Test runner for famc compiler
+# Usage: .ci/runtests [--verbose]
+set -u
+
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+FAMC="$DIR/bin/famc"
+TMPDIR=$(mktemp -d)
+
+# Kill all child processes on exit or Ctrl-C
+cleanup() {
+	kill $(jobs -p) 2>/dev/null || true
+	wait 2>/dev/null || true
+	rm -rf "$TMPDIR"
+}
+trap cleanup EXIT INT TERM
+
+VERBOSE=0
+[[ "${1:-}" == "--verbose" ]] && VERBOSE=1
+
+PASS=0
+FAIL=0
+TOTAL=0
+
+# compile: run famc compiler on source code, output binary to stdout
+compile() {
+	(echo "$1"; printf '\004') | timeout -k 2 10 qemu-system-riscv32 \
+		-machine virt -cpu rv32i -nographic -bios none \
+		-device loader,file="$FAMC",addr=0x80000000 \
+		-serial mon:stdio 2>/dev/null
+}
+
+# run_bin: execute a compiled binary, stdin from /dev/null
+#   Uses -serial stdio (not mon:stdio) to avoid monitor blocking on terminal
+run_bin() {
+	timeout -k 2 10 qemu-system-riscv32 \
+		-machine virt -cpu rv32i -nographic -bios none \
+		-device loader,file="$1",addr=0x80000000 \
+		-serial stdio -monitor none < /dev/null 2>/dev/null
+}
+
+# test_compiles: compile source, expect success (output starts with NOP 0x13)
+test_compiles() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2"
+	local bin="$TMPDIR/test_${TOTAL}.bin"
+	compile "$src" > "$bin" 2>&1 || true
+	local first
+	first=$(xxd -l1 -p "$bin" 2>/dev/null || echo "")
+	if [[ "$first" == "13" ]]; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (expected binary, got: $(head -c40 "$bin"))"
+	fi
+}
+
+# test_runs: compile and run, expect exit code 0
+test_runs() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2"
+	local bin="$TMPDIR/test_${TOTAL}.bin"
+	compile "$src" > "$bin" 2>&1 || true
+	local first
+	first=$(xxd -l1 -p "$bin" 2>/dev/null || echo "")
+	if [[ "$first" != "13" ]]; then
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (compile failed: $(head -c40 "$bin"))"
+		return
+	fi
+	local rc=0
+	run_bin "$bin" > /dev/null || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (exit code $rc)"
+	fi
+}
+
+# test_output: compile and run, check UART output matches expected
+test_output() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2" expected="$3"
+	local bin="$TMPDIR/test_${TOTAL}.bin"
+	compile "$src" > "$bin" 2>&1 || true
+	local first
+	first=$(xxd -l1 -p "$bin" 2>/dev/null || echo "")
+	if [[ "$first" != "13" ]]; then
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (compile failed: $(head -c40 "$bin"))"
+		return
+	fi
+	local actual
+	actual=$(run_bin "$bin" || true)
+	if [[ "$actual" == "$expected" ]]; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (expected '$expected', got '$actual')"
+	fi
+}
+
+# test_error: compile source, expect error output starting with 'E'
+test_error() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2" prefix="$3"
+	local out
+	out=$(compile "$src" 2>&1 || true)
+	if [[ "$out" == "${prefix}"* ]]; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (expected '${prefix}...', got '$(echo "$out" | head -c40)')"
+	fi
+}
+
+# ============================================================================
+echo "Building..."
+if ! (cd "$DIR" && python3 tools/emit_fam2.py src/fam3.S | python3 tools/fmt_asm.py > src/fam3.fam2 && bash build.sh) > /dev/null 2>&1; then
+	echo "Build failed!"
+	exit 1
+fi
+
+# Smoke test: verify QEMU can run a compiled binary
+echo "Smoke test..."
+compile "42" > "$TMPDIR/smoke.bin" 2>&1 || true
+first=$(xxd -l1 -p "$TMPDIR/smoke.bin" 2>/dev/null || echo "")
+if [[ "$first" != "13" ]]; then
+	echo "Smoke test failed: compile returned '$(head -c20 "$TMPDIR/smoke.bin")'"
+	exit 1
+fi
+rc=0
+run_bin "$TMPDIR/smoke.bin" > /dev/null || rc=$?
+if [[ $rc -ne 0 ]]; then
+	echo "Smoke test failed: compiled binary exited with $rc"
+	echo "  (If 124, QEMU may not be exiting — check test device at 0x100000)"
+	exit 1
+fi
+echo ""
+
+# ============================================================================
+echo "=== Literals ==="
+test_runs    "decimal literal"          "42"
+test_runs    "hex literal"              "0xFF"
+test_runs    "binary literal"           "0b1010"
+test_runs    "char literal"             "'x'"
+test_runs    "char escape newline"      "'\n'"
+test_runs    "char escape null"         "'\0'"
+test_runs    "zero"                     "0"
+test_runs    "max uint32 hex"           "0xFFFFFFFF"
+test_runs    "max uint32 dec"           "4294967295"
+test_runs    "large hex"                "0x10000000"
+
+# ============================================================================
+echo "=== Arithmetic ==="
+test_runs    "add"                      "3 + 4"
+test_runs    "subtract"                 "10 - 3"
+test_runs    "bitwise and"              "0xFF & 0x0F"
+test_runs    "bitwise or"               "0xF0 | 0x0F"
+test_runs    "bitwise xor"              "0xFF ^ 0x0F"
+test_runs    "shift left"               "1 << 4"
+test_runs    "shift right"              "256 >> 4"
+test_runs    "less than true"           "1 < 2"
+test_runs    "less than false"          "2 < 1"
+test_runs    "equal true"               "42 == 42"
+test_runs    "equal false"              "42 == 43"
+test_runs    "not equal"                "1 != 2"
+test_runs    "greater than"             "5 > 3"
+test_runs    "less or equal"            "3 <= 3"
+test_runs    "greater or equal"         "5 >= 5"
+test_runs    "nested arithmetic"        "(1 + 2) + (3 + 4)"
+test_runs    "precedence"               "2 + 3 << 1"
+
+# ============================================================================
+echo "=== Prefix operators ==="
+test_runs    "negate"                   "-(0 - 42)"
+test_runs    "logical not true"         "!0"
+test_runs    "logical not false"        "!1"
+test_runs    "bitwise not"              "~0"
+
+# ============================================================================
+echo "=== Variables ==="
+test_runs    "define and use"           "x := 42; x"
+test_runs    "reassign"                 "x := 1; x = 2; x"
+test_runs    "multiple vars"            "x := 10; y := 20; x + y"
+test_runs    "var in expression"        "x := 3; y := 4; x + y + 1"
+test_runs    "postfix increment"        "x := 5; x++; x"
+test_runs    "postfix decrement"        "x := 5; x--; x"
+
+# ============================================================================
+echo "=== Blocks ==="
+test_runs    "block value"              "{ 42 }"
+test_runs    "block multi"              "{ 1; 2; 3 }"
+test_runs    "empty block"              "{ }"
+test_runs    "nested blocks"            "{ { 42 } }"
+test_runs    "block with vars"          "{ x := 5; y := 3; x + y }"
+
+# ============================================================================
+echo "=== Ternary ==="
+test_runs    "ternary true"             "1 ? 42 : 99"
+test_runs    "ternary false"            "0 ? 42 : 99"
+test_runs    "ternary nested"           "1 ? (0 ? 1 : 2) : 3"
+test_runs    "ternary with expr"        "x := 5; (x == 5) ? 1 : 0"
+
+# ============================================================================
+echo "=== Pointer operations ==="
+test_compiles "word store"              "x := 0x100000; *x = 0x5555"
+test_compiles "byte store"              "x := 0x10000000; @x = 72"
+test_compiles "word deref read"         "x := 0x80000000; *x"
+test_compiles "byte deref read"         "x := 0x80000000; @x"
+
+# ============================================================================
+echo "=== UART output ==="
+test_output  "print char"              'uart := 0x10000000; @uart = 65' "A"
+test_output  "print string"            'uart := 0x10000000; @uart = 72; @uart = 105' "Hi"
+test_output  "hello world"             'uart := 0x10000000; @uart = 72; @uart = 101; @uart = 108; @uart = 108; @uart = 111' "Hello"
+test_output  "computed char"           'uart := 0x10000000; x := 3 + 4; @uart = x + 48' "7"
+
+# ============================================================================
+echo "=== Loops ==="
+test_compiles "infinite loop"           "loop { }"
+test_compiles "loop with body"          "x := 0; loop { x = x + 1 }"
+
+# ============================================================================
+echo "=== Integration ==="
+test_output  "hello 7"                 'uart := 0x10000000; @uart = 72; @uart = 101; @uart = 108; @uart = 108; @uart = 111; @uart = 32; x := 3 + 4; @uart = x + 48; @uart = 33' "Hello 7!"
+
+test_runs    "fibonacci"               'a := 1; b := 1; c := a + b; a = b; b = c; c = a + b; a = b; b = c; c = a + b; a = b; b = c; c = a + b; a = b; b = c; c = a + b; test := 0x100000; *test = (c == 13) ? 0x5555 : 0x3333'
+
+# ============================================================================
+echo "=== Many variables (stress test) ==="
+MANY_VARS=$(python3 -c "
+v = [f'v{i} := {i}' for i in range(300)]
+v.append('v0 + v100 + v200 + v299')
+print('; '.join(v))
+")
+test_runs    "300 variables"            "$MANY_VARS"
+
+MANY_VARS_600=$(python3 -c "
+v = [f'v{i} := {i}' for i in range(600)]
+v.append('v0 + v599')
+print('; '.join(v))
+")
+test_runs    "600 variables (large offsets)" "$MANY_VARS_600"
+
+# ============================================================================
+echo "=== Error detection (compile-time) ==="
+test_error   "hex overflow"             "0x1FFFFFFFF"               "Ei"
+test_error   "decimal overflow"         "4294967296"                "Ei"
+test_error   "large decimal overflow"   "99999999999"               "Ei"
+test_error   "binary overflow"          "0b100000000000000000000000000000000" "Ei"
+test_error   "undefined variable"       "x"                         "Ev"
+test_error   "undefined in expr"        "x + 1"                     "Ev"
+test_error   "parse error prefix"       "+"                         "E"
+test_error   "parse error bare rparen"  ")"                         "E"
+test_error   "unsupported switch"       "switch 1 { }"              "Ecg"
+
+# ============================================================================
+echo "=== Error detection (runtime) ==="
+
+# test_stack_overflow: compile, patch tp to trigger overflow, verify 'S' output
+#   $1 = test name, $2 = source code
+test_stack_ovf() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2"
+	local bin="$TMPDIR/test_${TOTAL}.bin"
+	compile "$src" > "$bin" 2>&1 || true
+	local first
+	first=$(xxd -l1 -p "$bin" 2>/dev/null || echo "")
+	if [[ "$first" != "13" ]]; then
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (compile failed)"
+		return
+	fi
+	# Patch: replace "li tp, 0" (0x00000213 at offset 0x14) with
+	# "lui tp, 0x88000" (0x88000237) — tp = sp, instant overflow on first push
+	local orig
+	orig=$(xxd -s 0x14 -l 4 -p "$bin")
+	if [[ "$orig" != "13020000" ]]; then
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (tp instruction not at expected offset, got $orig)"
+		return
+	fi
+	python3 -c "
+import struct, sys
+with open(sys.argv[1], 'r+b') as f:
+    f.seek(0x14)
+    f.write(struct.pack('<I', 0x88000237))
+" "$bin"
+	local actual
+	actual=$(run_bin "$bin" || true)
+	if [[ "$actual" == "S"* ]]; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (expected 'S' output, got '$actual')"
+	fi
+}
+
+# test_no_overflow: verify check is present but doesn't fire with tp=0
+test_has_check() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2"
+	local bin="$TMPDIR/test_${TOTAL}.bin"
+	compile "$src" > "$bin" 2>&1 || true
+	# Check for bgeu sp, tp pattern (0x00417463 = bgeu sp, tp, +8)
+	if xxd -p "$bin" | tr -d '\n' | grep -q "63744100"; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL  $name (no bgeu sp,tp check found in binary)"
+	fi
+}
+
+test_has_check  "sp check emitted"        "x := 42; x"
+test_stack_ovf  "stack overflow detected"  "x := 1; y := 2; x + y"
+test_stack_ovf  "overflow on push"         "42"
+
+# ============================================================================
+echo ""
+echo "=== Results ==="
+echo "  $PASS passed, $FAIL failed, $TOTAL total"
+if [[ $FAIL -gt 0 ]]; then
+	exit 1
+fi
+echo "  All tests passed."
