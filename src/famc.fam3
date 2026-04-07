@@ -4366,14 +4366,21 @@ ge_closure:
 	li	a0, 0
 	li	a1, R_T0
 	jal	em_jtype
-	# Emit prologue: save ra, s0, s1; set s0=sp
-	# addi sp, sp, -12; sw ra, 8(sp); sw s0, 4(sp); sw s1, 0(sp); mv s0, sp
+	# Emit prologue: save ra, s0, s1; set s0=sp (with tp check)
 	li	a0, -12
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
 	li	a0, 8
 	li	a1, 1
 	li	a2, R_SP
@@ -4428,13 +4435,21 @@ gc_ploop:
 	lw	a1, N_LOC_LEN(s7)
 	jal	sym_def
 	mv	s7, a0
-	# Reserve slot
+	# Reserve slot (with tp check)
 	li	a0, -4
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
 	# Store a_n at slot
 	mv	a0, s7
 	lw	t0, 0(sp)
