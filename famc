@@ -1,3 +1,22 @@
 #!/bin/sh
 
-(cat $1; printf '\004') | q32 bin/famc
+DIR="$(dirname "$(readlink -f "$0")")"
+
+if [ "$1" = "" ]; then
+	echo "Usage: famc <input_file>"
+	exit 1;
+fi
+
+if [ ! -e $1 ]; then
+	echo "file not found: $1";
+	exit 1;
+fi
+
+(cat $1; printf '\004') | qemu-system-riscv32 \
+	-machine virt \
+	-cpu rv32i \
+	-nographic \
+	-bios none \
+	-device loader,file=$DIR/bin/famc,addr=0x80000000 \
+	-serial \
+	mon:stdio 2>/dev/null || exit 1;
