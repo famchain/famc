@@ -310,7 +310,8 @@ pd_done:
 .equ	MC_SEQZ,	18
 .equ	MC_SNEZ,	19
 .equ	MC_JR,		20
-.equ	MC_CSR,		21
+.equ	MC_WFI,		21
+.equ	MC_CSR,		22
 
 # Asm label entry
 .equ	AL_OFF,	0
@@ -3827,6 +3828,8 @@ aa_mnem:
 	beq	t5, t0, aa_2reg
 	li	t0, MC_JR
 	beq	t5, t0, aa_jr
+	li	t0, MC_WFI
+	beq	t5, t0, aa_wfi
 	addi	sp, sp, 24
 	j	asm_err
 
@@ -4126,6 +4129,13 @@ aa_jr:
 aa_nop:
 	addi	sp, sp, 24
 	li	a0, 0x13
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	j	aa_line
+
+aa_wfi:
+	addi	sp, sp, 24
+	li	a0, 0x10500073
 	sw	a0, 0(s0)
 	addi	s0, s0, 4
 	j	aa_line
@@ -4843,6 +4853,9 @@ asm_mnem_tbl:
 	.ascii	"jr"
 	.zero	6
 	.word	0x000014
+	.ascii	"wfi"
+	.zero	5
+	.word	0x000015
 	# End sentinel
 	.byte	0
 

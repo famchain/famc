@@ -1,0 +1,5 @@
+asm putchar {
+	lui t0, 0x10000
+	sb a0, 0(t0)
+	ret
+};

@@ -1,6 +1,8 @@
 #!/bin/sh
 
 DIR="$(dirname "$(readlink -f "$0")")"
+INPUT=$1
+OUTPUT_NAME="${INPUT%.*}.bin"
 
 if [ "$1" = "" ]; then
 	echo "Usage: famc <input_file>"
@@ -12,11 +14,18 @@ if [ ! -e $1 ]; then
 	exit 1;
 fi
 
-(cat $1; printf '\004') | qemu-system-riscv32 \
+(cat ${DIR}/lib/stdlib.fam $1; printf '\004') | qemu-system-riscv32 \
 	-machine virt \
 	-cpu rv32i \
 	-nographic \
 	-bios none \
 	-device loader,file=$DIR/bin/famc,addr=0x80000000 \
 	-serial \
-	mon:stdio 2>/dev/null || exit 1;
+	mon:stdio 2>/dev/null > $OUTPUT_NAME;
+
+
+MAGIC=$(head -c 4 ${OUTPUT_NAME} | xxd -p)
+if [ "$MAGIC" != "13000000" ]; then
+	cat ${OUTPUT_NAME}
+	exit 1;
+fi
