@@ -322,6 +322,14 @@ test_runs    "struct construct"         "struct P { x; y }; p = P(10, 20); p.x +
 test_runs    "struct field write"       "struct P { x }; p = P(1); p.x = 99; p.x"
 test_runs    "sizeof"                   "struct V { a; b; c }; sizeof(V)"
 test_runs    "struct array"             "struct P { x; y }; a = 0x80100000; p = a; p.x = 1; p.y = 2; q = a + sizeof(P); q.x = 3; q.y = 4; q.x + q.y"
+test_runs    "nested construct"        "struct P { x; y }; struct L { s; e }; l = L(P(10,20),P(30,40)); l.s.x + l.e.y"
+test_runs    "nested field write"      "struct P { x; y }; struct L { s; e }; l = L(P(1,2),P(3,4)); l.s.x = 99; l.s.x"
+test_output  "chained dot read"        'asm pc { lui t0, 0x10000
+sb a0, 0(t0)
+ret };
+struct P { x; y }; struct L { s; e }; l = L(P(65,66),P(67,68)); pc(l.e.y)' "D"
+test_error   "bad field read"          "struct P { x; y }; struct R { a; b }; r = R(1,2); r.x" "Ecg"
+test_error   "bad field write"         "struct P { x; y }; struct R { a; b }; r = R(1,2); r.x = 5" "Ecg"
 
 echo "=== Error detection (compile-time) ==="
 test_error   "hex overflow"             "0x1FFFFFFFF"               "Ei"

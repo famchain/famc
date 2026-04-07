@@ -2783,12 +2783,18 @@ sym_def:
 	addi	a0, a0, ST_DATA
 	jal	alloc
 	mv	t3, a0
-	# Copy header
+	# Copy header (all fields)
 	lw	t0, ST_CNT(s1)
 	sw	t0, ST_CNT(t3)
 	lw	t0, ST_NEXT(s1)
 	sw	t0, ST_NEXT(t3)
 	sw	s5, ST_CAP(t3)
+	lw	t0, ST_CAPS(s1)
+	sw	t0, ST_CAPS(t3)
+	lw	t0, ST_STRT(s1)
+	sw	t0, ST_STRT(t3)
+	lw	t0, ST_STYP(s1)
+	sw	t0, ST_STYP(t3)
 	# Copy entries (count * 16 bytes)
 	lw	t0, ST_CNT(s1)
 	slli	t0, t0, 4
@@ -4027,6 +4033,10 @@ gb_restore:
 	jal	em_stype
 	# Record break fixup
 	lw	t0, 16(s10)
+	li	t1, 64
+	blt	t0, t1, gb_fx_ok
+	j	cg_err
+gb_fx_ok:
 	lw	t1, 20(s10)
 	slli	t2, t0, 2
 	add	t2, t1, t2
@@ -4110,27 +4120,61 @@ ge_tern:
 ge_call:
 	# first child = callee (ident), rest = args
 	lw	s5, N_FIRST_CHILD(s3)
-	# For now: push args into a0-a7, then jal to label
-	# Count and generate args
+	# Generate args into frame slots, then load into a-regs
+	# Each arg's slot offset is saved on the compiler stack (LIFO)
 	lw	s6, N_NEXT_SIB(s5)
 	li	s7, 0
 gc_args:
 	beqz	s6, gc_emit
 	mv	a0, s6
 	jal	gen_expr
+	# Pop result from eval stack into t0
+	li	a0, R_T0
+	jal	em_pop
+	# Allocate frame slot: ST_NEXT -= 4
+	lw	t0, ST_NEXT(s1)
+	addi	t0, t0, -4
+	sw	t0, ST_NEXT(s1)
+	# Save slot offset on compiler stack (for gc_pop_args)
+	addi	sp, sp, -4
+	sw	t0, 0(sp)
+	# Emit: addi sp, sp, -4
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# Emit: sp >= tp check
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Store t0 into frame slot
+	lw	a0, 0(sp)
+	li	a1, R_T0
+	jal	em_var_store
 	addi	s7, s7, 1
 	lw	s6, N_NEXT_SIB(s6)
 	j	gc_args
 gc_emit:
-	# Pop args into a-regs (reverse order)
+	# Load args from frame slots into a-regs
+	# Slot offsets are on compiler stack in LIFO order (last arg on top)
 	mv	t2, s7
 gc_pop_args:
 	beqz	t2, gc_call
 	addi	t2, t2, -1
-	addi	a0, t2, R_A0
+	# Pop slot offset from compiler stack
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	a1, t2, R_A0
 	addi	sp, sp, -4
 	sw	t2, 0(sp)
-	jal	em_pop
+	jal	em_var_load
 	lw	t2, 0(sp)
 	addi	sp, sp, 4
 	j	gc_pop_args
@@ -4194,28 +4238,22 @@ gc_closure:
 	mv	s6, a0
 	lw	s5, SR_NFLD(s6)
 	lw	s7, SR_SIZE(s6)
-	# Compute 1-based struct type index for type tracking
-	lw	t0, ST_STRT(s1)
-	sub	t0, s6, t0
-	addi	t0, t0, -SRT_DATA
-	# t0 = byte offset of entry. Divide by 80 = divide by (64+16)
-	# Simplified: search index was implicit in str_find. Just count.
-	# Store entry ptr for later type marking
+	# Save entry ptr for type marking
 	addi	sp, sp, -4
 	sw	s6, 0(sp)
-	# Allocate struct in frame: ST_NEXT -= size
+	# Allocate struct on stack: ST_NEXT -= size
 	lw	t0, ST_NEXT(s1)
 	sub	t0, t0, s7
 	sw	t0, ST_NEXT(s1)
 	mv	s6, t0
-	# Emit: addi sp, sp, -size (runtime reservation)
+	# Emit: addi sp, sp, -size
 	neg	a0, s7
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
-	# Emit: tp check
+	# Emit: sp >= tp check
 	li	a0, 8
 	li	a1, R_SP
 	li	a2, R_TP
@@ -4358,6 +4396,18 @@ ga_body:
 	# Register asm label if present
 	beqz	s6, ga_no_lbl
 	lw	t0, AT_CNT(s9)
+	li	t1, 64
+	blt	t0, t1, ga_al_ok
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'a'
+	jal	write_byte
+	li	a0, 'l'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+ga_al_ok:
 	slli	t1, t0, 2
 	slli	t2, t0, 3
 	add	t1, t1, t2
@@ -4487,6 +4537,18 @@ ge_struct:
 	# N_DATA = name offset, N_LOC_LINE = name length (repurposed)
 	lw	s5, ST_STRT(s1)
 	lw	t0, SRT_CNT(s5)
+	li	t1, 32
+	blt	t0, t1, gs_ok
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 's'
+	jal	write_byte
+	li	a0, 't'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+gs_ok:
 	slli	t1, t0, 6
 	slli	t2, t0, 4
 	add	t1, t1, t2
@@ -4500,6 +4562,18 @@ ge_struct:
 	li	s5, 0
 gs_floop:
 	beqz	s7, gs_fdone
+	li	t0, 8
+	blt	s5, t0, gs_fok
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 's'
+	jal	write_byte
+	li	a0, 'f'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+gs_fok:
 	slli	t0, s5, 3
 	addi	t0, t0, SR_FLDS
 	add	t0, s6, t0
@@ -4543,74 +4617,29 @@ ge_sizeof:
 # --- Dot field access (expr.field) ---
 ge_dot:
 	# Check if LHS is typed ident → search that struct only
+	li	s6, 0
 	lw	s5, N_FIRST_CHILD(s3)
 	lw	t0, N_KIND(s5)
 	li	t1, NK_IDENT
-	bne	t0, t1, gd_untyped
-	# Try to find variable and get its type
+	bne	t0, t1, gd_gen
 	lw	a0, N_LOC_OFF(s5)
 	lw	a1, N_LOC_LEN(s5)
-	jal	sym_try
-	li	t0, -1
-	beq	a0, t0, gd_untyped
-	# Get type from entry offset 12
-	slli	t0, a1, 4
-	addi	t0, t0, ST_DATA
-	add	t0, s1, t0
-	lw	s6, 12(t0)
-	beqz	s6, gd_untyped
-	li	t1, -1
-	beq	s6, t1, gd_untyped
-	j	gd_typed
-gd_untyped:
-	li	s6, 0
-gd_typed:
+	jal	var_stype
+	mv	s6, a0
+gd_gen:
 	# Generate LHS
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
 	li	a0, R_T0
 	jal	em_pop
-	# Get field name
+	# Resolve field
 	lw	t0, N_FIRST_CHILD(s3)
 	lw	s5, N_NEXT_SIB(t0)
-	lw	a0, N_LOC_OFF(s5)
-	lw	a1, N_LOC_LEN(s5)
-	# If typed, search within that struct
-	beqz	s6, gd_global
-	# s6 = struct entry pointer. Search its fields.
-	lw	t2, SR_NFLD(s6)
-	li	t3, 0
-gd_floop:
-	beq	t3, t2, cg_err
-	slli	t4, t3, 3
-	addi	t4, t4, SR_FLDS
-	add	t4, s6, t4
-	lw	t5, 4(t4)
-	bne	a1, t5, gd_fnxt
-	lw	t5, 0(t4)
-	add	t5, s2, t5
-	add	t6, s2, a0
-	mv	a2, a1
-gd_fcmp:
-	beqz	a2, gd_fmatch
-	lbu	a3, 0(t5)
-	lbu	a4, 0(t6)
-	bne	a3, a4, gd_fnxt
-	addi	t5, t5, 1
-	addi	t6, t6, 1
-	addi	a2, a2, -1
-	j	gd_fcmp
-gd_fmatch:
-	slli	a0, t3, 2
-	j	gd_emit
-gd_fnxt:
-	addi	t3, t3, 1
-	j	gd_floop
-gd_global:
-	jal	fld_find
-	li	t0, -1
-	beq	a0, t0, cg_err
-gd_emit:
+	mv	a0, s6
+	lw	a1, N_LOC_OFF(s5)
+	lw	a2, N_LOC_LEN(s5)
+	jal	fld_resolve
+	# a0 = field byte offset
 	li	a1, R_T0
 	li	a2, 2
 	li	a3, R_T0
@@ -4625,17 +4654,27 @@ ga_dot_ck:
 	lw	t0, N_DATA(s6)
 	li	t1, NK_DOT
 	bne	t0, t1, cg_err
+	# Check if base is typed ident
+	li	s7, 0
+	lw	t0, N_FIRST_CHILD(s6)
+	lw	t1, N_KIND(t0)
+	li	t2, NK_IDENT
+	bne	t1, t2, gaw_gen
+	lw	a0, N_LOC_OFF(t0)
+	lw	a1, N_LOC_LEN(t0)
+	jal	var_stype
+	mv	s7, a0
+gaw_gen:
 	# RHS already on stack. Generate base pointer.
 	lw	a0, N_FIRST_CHILD(s6)
 	jal	gen_expr
-	# Look up field
+	# Resolve field (typed or global)
 	lw	t0, N_FIRST_CHILD(s6)
 	lw	t0, N_NEXT_SIB(t0)
-	lw	a0, N_LOC_OFF(t0)
-	lw	a1, N_LOC_LEN(t0)
-	jal	fld_find
-	li	t0, -1
-	beq	a0, t0, cg_err
+	mv	a0, s7
+	lw	a1, N_LOC_OFF(t0)
+	lw	a2, N_LOC_LEN(t0)
+	jal	fld_resolve
 	mv	s5, a0
 	# Pop base into t1, value into t0
 	li	a0, R_T1
@@ -5190,6 +5229,18 @@ aa_instr:
 	# Label definition: record address
 	addi	s3, s3, 1
 	lw	t0, 0(s5)
+	li	t1, 64
+	blt	t0, t1, aa_ll_ok
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'a'
+	jal	write_byte
+	li	a0, 'L'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+aa_ll_ok:
 	slli	t1, t0, 2
 	slli	t2, t0, 3
 	add	t1, t1, t2
@@ -5398,6 +5449,8 @@ aa_br:
 	jal	asm_skip
 	jal	asm_tok
 	lw	t0, 0(s6)
+	li	t1, 128
+	bge	t0, t1, asm_fx_err
 	slli	t1, t0, 4
 	addi	t1, t1, 4
 	add	t1, s6, t1
@@ -5411,8 +5464,13 @@ aa_br:
 	lw	a2, 16(sp)
 	lw	a3, 4(sp)
 	addi	sp, sp, 24
-	li	a0, 0
+	# Emit trampoline: inverted-branch +8, then placeholder jal
+	xori	a3, a3, 1
+	li	a0, 8
 	jal	em_btype
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
 	j	aa_line
 
 # --- U-type (lui/auipc): rd, imm ---
@@ -5445,6 +5503,8 @@ aa_jal:
 	jal	asm_skip
 	jal	asm_tok
 	lw	t0, 0(s6)
+	li	t1, 128
+	bge	t0, t1, asm_fx_err
 	slli	t1, t0, 4
 	addi	t1, t1, 4
 	add	t1, s6, t1
@@ -5526,6 +5586,8 @@ aa_j:
 	jal	asm_skip
 	jal	asm_tok
 	lw	t0, 0(s6)
+	li	t1, 128
+	bge	t0, t1, asm_fx_err
 	slli	t1, t0, 4
 	addi	t1, t1, 4
 	add	t1, s6, t1
@@ -5677,19 +5739,12 @@ af_lmatch:
 	sub	a0, a3, t1
 	# Patch based on type: 0=B, 1=J
 	bnez	t2, af_jtype
-	# B-type: re-encode at t1
-	# Need rs1, rs2, funct3 from the existing instruction
-	lw	t3, 0(t1)
-	srli	a1, t3, 15
-	andi	a1, a1, 0x1F
-	srli	a2, t3, 20
-	andi	a2, a2, 0x1F
-	srli	a3, t3, 12
-	andi	a3, a3, 7
-	mv	t3, s0
-	mv	s0, t1
-	jal	em_btype
-	mv	s0, t3
+	# B-type trampoline: b-type is already final (inverted, +8).
+	# Patch the jal at t1+4 with the correct offset.
+	# a0 = address to patch, a1 = offset from jal to target
+	addi	a0, t1, 4
+	sub	a1, a3, a0
+	jal	patch_jal
 	j	af_lnext2
 af_jtype:
 	mv	a1, a0
@@ -5827,7 +5882,100 @@ ff_done:
 	addi	sp, sp, 20
 	ret
 
+# var_stype: get struct type pointer for a variable
+#   a0=name offset, a1=name length, s1=symtab, s2=input base
+#   Returns a0 = struct entry pointer, or 0 if untyped/closure
+var_stype:
+	addi	sp, sp, -4
+	sw	ra, 0(sp)
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, vs_none
+	slli	t0, a1, 4
+	addi	t0, t0, ST_DATA
+	add	t0, s1, t0
+	lw	a0, 12(t0)
+	beqz	a0, vs_done
+	li	t1, -1
+	bne	a0, t1, vs_done
+vs_none:
+	li	a0, 0
+vs_done:
+	lw	ra, 0(sp)
+	addi	sp, sp, 4
+	ret
+
+# fld_resolve: find field by name in a specific struct or globally
+#   a0=struct entry ptr (0 for global), a1=field name offset,
+#   a2=field name length, s1=symtab, s2=input base
+#   Returns a0 = field byte offset. Errors via cg_err if not found.
+fld_resolve:
+	addi	sp, sp, -20
+	sw	ra, 16(sp)
+	sw	s3, 0(sp)
+	sw	s4, 4(sp)
+	sw	s5, 8(sp)
+	sw	s6, 12(sp)
+	mv	s3, a0
+	mv	s4, a1
+	mv	s5, a2
+	bnez	s3, fr_typed
+	# Global search
+	mv	a0, s4
+	mv	a1, s5
+	jal	fld_find
+	li	t0, -1
+	beq	a0, t0, cg_err
+	j	fr_done
+fr_typed:
+	lw	s6, SR_NFLD(s3)
+	li	t3, 0
+fr_floop:
+	beq	t3, s6, cg_err
+	slli	t4, t3, 3
+	addi	t4, t4, SR_FLDS
+	add	t4, s3, t4
+	lw	t5, 4(t4)
+	bne	s5, t5, fr_fnxt
+	lw	t5, 0(t4)
+	add	t5, s2, t5
+	add	t6, s2, s4
+	mv	a2, s5
+fr_fcmp:
+	beqz	a2, fr_fmatch
+	lbu	a3, 0(t5)
+	lbu	a4, 0(t6)
+	bne	a3, a4, fr_fnxt
+	addi	t5, t5, 1
+	addi	t6, t6, 1
+	addi	a2, a2, -1
+	j	fr_fcmp
+fr_fmatch:
+	slli	a0, t3, 2
+	j	fr_done
+fr_fnxt:
+	addi	t3, t3, 1
+	j	fr_floop
+fr_done:
+	lw	s3, 0(sp)
+	lw	s4, 4(sp)
+	lw	s5, 8(sp)
+	lw	s6, 12(sp)
+	lw	ra, 16(sp)
+	addi	sp, sp, 20
+	ret
+
 # --- Asm error ---
+asm_fx_err:
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'a'
+	jal	write_byte
+	li	a0, 'f'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
 asm_err:
 	li	a0, 'E'
 	jal	write_byte
