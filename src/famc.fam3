@@ -935,8 +935,32 @@ nt_scan_num:
 	bgeu	t1, s3, nt_num_dec
 	lbu	t6, 0(t1)
 	li	t4, 'x'
-	bne	t6, t4, nt_num_dec
+	beq	t6, t4, nt_hex_go
+	li	t4, 'b'
+	beq	t6, t4, nt_bin_go
+	j	nt_num_dec
+nt_hex_go:
 	addi	s2, t1, 1
+	# Must have at least one hex digit, else just parse "0"
+	bgeu	s2, s3, nt_id_done		# "0x" at EOF → just "0"
+	lbu	t6, 0(s2)
+	li	t1, '0'
+	blt	t6, t1, nt_hex_bare
+	li	t1, '9'
+	bge	t1, t6, nt_num_hex
+	li	t1, 'a'
+	blt	t6, t1, nt_hex_ck_up
+	li	t1, 'f'
+	bge	t1, t6, nt_num_hex
+nt_hex_ck_up:
+	li	t1, 'A'
+	blt	t6, t1, nt_hex_bare
+	li	t1, 'F'
+	bge	t1, t6, nt_num_hex
+nt_hex_bare:
+	# "0x" with no digits — back up to just "0"
+	addi	s2, s2, -1
+	j	nt_id_done
 nt_num_hex:
 	bgeu	s2, s3, nt_id_done
 	lbu	t6, 0(s2)
@@ -958,6 +982,29 @@ nt_num_hex_ok:
 	addi	s2, s2, 1
 	j	nt_num_hex
 
+nt_bin_go:
+	addi	s2, t1, 1
+	# Must have at least one binary digit, else just parse "0"
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	li	t1, '0'
+	beq	t6, t1, nt_num_bin
+	li	t1, '1'
+	beq	t6, t1, nt_num_bin
+	# "0b" with no digits — back up to just "0"
+	addi	s2, s2, -1
+	j	nt_id_done
+nt_num_bin:
+	bgeu	s2, s3, nt_id_done
+	lbu	t6, 0(s2)
+	li	t1, '0'
+	beq	t6, t1, nt_num_bin_ok
+	li	t1, '1'
+	bne	t6, t1, nt_id_done
+nt_num_bin_ok:
+	addi	s2, s2, 1
+	j	nt_num_bin
+
 nt_num_dec:
 	addi	s2, s2, 1
 nt_num_loop:
@@ -975,7 +1022,7 @@ nt_scan_str:
 	sw	t4, N_KIND(s1)
 	addi	s2, s2, 1
 nt_str_loop:
-	bgeu	s2, s3, nt_id_done
+	bgeu	s2, s3, nt_str_bad		# EOF without closing quote
 	lbu	t6, 0(s2)
 	addi	s2, s2, 1
 	li	t1, '\\'
@@ -984,7 +1031,7 @@ nt_str_loop:
 	beq	t6, t1, nt_id_done
 	li	t1, '\n'
 	bne	t6, t1, nt_str_loop
-	# Newline in string
+	# Newline in string (track but continue)
 	lw	t1, L_LINE(s0)
 	addi	t1, t1, 1
 	sw	t1, L_LINE(s0)
@@ -993,9 +1040,12 @@ nt_str_loop:
 	sw	t1, L_COL_START(s0)
 	j	nt_str_loop
 nt_str_esc:
-	bgeu	s2, s3, nt_id_done
+	bgeu	s2, s3, nt_str_bad		# EOF after backslash
 	addi	s2, s2, 1
 	j	nt_str_loop
+nt_str_bad:
+	sw	x0, N_KIND(s1)			# NK_ERROR
+	j	nt_id_done
 
 nt_scan_char:
 	li	t4, NK_CHAR
@@ -1004,12 +1054,17 @@ nt_scan_char:
 nt_chr_loop:
 	bgeu	s2, s3, nt_id_done
 	lbu	t6, 0(s2)
+	li	t1, '\n'
+	beq	t6, t1, nt_chr_bad		# unterminated at newline
 	addi	s2, s2, 1
 	li	t1, '\\'
 	beq	t6, t1, nt_chr_esc
 	li	t1, '\''
 	beq	t6, t1, nt_id_done
 	j	nt_chr_loop
+nt_chr_bad:
+	sw	x0, N_KIND(s1)			# NK_ERROR
+	j	nt_id_done
 nt_chr_esc:
 	bgeu	s2, s3, nt_id_done
 	addi	s2, s2, 1
@@ -1063,16 +1118,23 @@ cmp_loop:
 	li	t1, NK_TERM
 	beq	t0, t1, cmp_done
 
-	# Print token kind as decimal
+	# Print line:col kind:text
+	lw	a0, N_LOC_LINE(s1)
+	jal	print_dec
+	li	a0, ':'
+	jal	write_byte
+	lw	a0, N_LOC_COL(s1)
+	jal	print_dec
+	li	a0, 32
+	jal	write_byte
 	lw	a0, N_KIND(s1)
 	jal	print_dec
 	li	a0, ':'
 	jal	write_byte
-	# Print token text from input buffer
 	lw	t0, N_LOC_OFF(s1)
 	lw	t1, N_LOC_LEN(s1)
-	add	a0, s2, t0		# start ptr
-	add	a1, a0, t1		# end ptr
+	add	a0, s2, t0
+	add	a1, a0, t1
 	jal	write_data
 	li	a0, '\n'
 	jal	write_byte
