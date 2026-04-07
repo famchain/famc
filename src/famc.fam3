@@ -1409,6 +1409,8 @@ parse_expr:
 	beq	s3, t0, px_unary
 	li	t0, NK_STAR
 	beq	s3, t0, px_unary
+	li	t0, NK_AT
+	beq	s3, t0, px_unary
 	li	t0, NK_DBL_PLUS
 	beq	s3, t0, px_unary
 	li	t0, NK_DBL_HYPHEN
@@ -2801,6 +2803,8 @@ ge_prefix:
 	jal	gen_expr
 	li	t0, NK_STAR
 	beq	s5, t0, gp_deref
+	li	t0, NK_AT
+	beq	s5, t0, gp_bderef
 	li	t0, NK_HYPHEN
 	beq	s5, t0, gp_neg
 	li	t0, NK_BANG
@@ -2815,6 +2819,19 @@ gp_deref:
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gp_bderef:
+	# pop addr, lbu t0, 0(t0), push
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, 4
 	li	a3, R_T0
 	li	a4, 0x03
 	jal	em_itype
@@ -2884,7 +2901,26 @@ ga_ident:
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_def
 	mv	s5, a0
-	j	ga_store
+	# Pop RHS value first, THEN reserve slot
+	li	a0, R_T0
+	jal	em_pop
+	# Reserve stack slot: emit addi sp, sp, -4
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# Store value and push result
+	mv	a0, s5
+	li	a1, R_T0
+	li	a2, R_S0
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
 ga_exist:
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
@@ -2906,25 +2942,33 @@ ga_store:
 	jal	em_push
 	j	ge_done
 ga_deref:
-	# *addr = val: RHS already on stack, generate address
-	lw	t0, N_DATA(s6)
+	# *addr or @addr = val: RHS on stack, generate address
+	lw	s5, N_DATA(s6)
 	li	t1, NK_STAR
-	bne	t0, t1, cg_err
+	beq	t1, s5, ga_do_st
+	li	t1, NK_AT
+	beq	t1, s5, ga_do_st
+	j	cg_err
+ga_do_st:
 	lw	a0, N_FIRST_CHILD(s6)
 	jal	gen_expr
-	# pop addr into t1, pop value into t0
 	li	a0, R_T1
 	jal	em_pop
 	li	a0, R_T0
 	jal	em_pop
-	# sw t0, 0(t1)
+	# sw/sb t0, 0(t1): funct3=2 for *, 0 for @
+	li	t0, NK_STAR
+	beq	s5, t0, ga_sw
+	li	a3, 0
+	j	ga_emit_st
+ga_sw:
+	li	a3, 2
+ga_emit_st:
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
-	li	a3, 2
 	li	a4, 0x23
 	jal	em_stype
-	# push value back
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
