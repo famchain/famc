@@ -337,6 +337,19 @@ pd_done:
 .equ	FX_TYPE,	12
 .equ	FX_SZ,	16
 
+# Struct type table entry (max 8 fields per struct)
+# Each field: 8 bytes (name_off + name_len)
+.equ	SR_NOFF,	0
+.equ	SR_NLEN,	4
+.equ	SR_NFLD,	8
+.equ	SR_SIZE,	12
+.equ	SR_FLDS,	16
+.equ	SR_ENTRY,	80
+
+# Struct type table header
+.equ	SRT_CNT,	0
+.equ	SRT_DATA,	4
+
 # Symbol table entry (16 bytes, power of 2 for easy indexing)
 .equ	SY_OFF,	0
 .equ	SY_LEN,	4
@@ -348,7 +361,9 @@ pd_done:
 .equ	ST_NEXT,	4
 .equ	ST_CAP,	8
 .equ	ST_CAPS,	12
-.equ	ST_DATA,	16
+.equ	ST_STRT,	16
+.equ	ST_STYP,	20
+.equ	ST_DATA,	24
 
 # ============================================================================
 # Memory helpers
@@ -1812,6 +1827,17 @@ px_struct:
 	mv	a1, s4
 	jal	copy_loc
 	jal	advance			# consume 'struct'
+	# Check for optional struct name
+	lw	t0, N_KIND(s1)
+	li	t1, NK_IDENT
+	bne	t0, t1, st_noname
+	# Store name loc in the struct node
+	lw	t0, N_LOC_OFF(s1)
+	sw	t0, N_DATA(s4)
+	lw	t0, N_LOC_LEN(s1)
+	sw	t0, N_LOC_LINE(s4)
+	jal	advance
+st_noname:
 	li	a0, NK_LBRACE
 	jal	expect
 st_loop:
@@ -1828,7 +1854,10 @@ st_loop:
 st_semi:
 	lw	t0, N_KIND(s1)
 	li	t1, NK_SEMI
+	beq	t0, t1, st_skip
+	li	t1, NK_COMMA
 	bne	t0, t1, st_loop
+st_skip:
 	jal	advance
 	j	st_semi
 st_end:
@@ -2717,15 +2746,22 @@ pc_done:
 # sym_init: allocate symbol table with initial capacity 256
 #   Returns a0 = symbol table pointer
 sym_init:
-	prologue s3 x0
-	# 12 header + 256 * 16 entries = 4108
-	li	a0, 4108
+	prologue s3 s4 x0
+	# 24 header + 256 * 16 entries = 4120
+	li	a0, 4120
 	jal	alloc
 	mv	s3, a0
-	li	a1, 4108
+	li	a1, 4120
 	jal	memzero
 	li	t0, 256
 	sw	t0, ST_CAP(s3)
+	# Allocate struct type table: 4 + 32*80 = 2564
+	li	a0, 2564
+	jal	alloc
+	mv	s4, a0
+	li	a1, 2564
+	jal	memzero
+	sw	s4, ST_STRT(s3)
 	mv	a0, s3
 	return
 
@@ -2923,6 +2959,10 @@ gen_expr:
 	beq	s4, t0, ge_cont
 	li	t0, NK_CLOSURE
 	beq	s4, t0, ge_closure
+	li	t0, NK_STRUCT
+	beq	s4, t0, ge_struct
+	li	t0, NK_SIZEOF
+	beq	s4, t0, ge_sizeof
 	j	cg_err
 
 # --- Number literal ---
@@ -3056,6 +3096,9 @@ gi_push:
 # --- Binary operation ---
 ge_binop:
 	lw	s5, N_DATA(s3)
+	# Dot access handled separately (RHS is a name, not a value)
+	li	t0, NK_DOT
+	beq	s5, t0, ge_dot
 	# Generate LHS
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
@@ -3536,6 +3579,8 @@ ge_assign:
 	beq	t0, t1, ga_ident
 	li	t1, NK_PREFIX
 	beq	t0, t1, ga_deref
+	li	t1, NK_BINOP
+	beq	t0, t1, ga_dot_ck
 	j	cg_err
 ga_ident:
 	# Try to find existing variable first
@@ -3558,8 +3603,13 @@ ga_newvar:
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_def
 	mv	s5, a0
-	# Mark if capturing closure (use last entry = ST_CNT-1)
+	# Mark variable: struct type (>0), capturing closure (-1), or plain (0)
+	lw	t0, ST_STYP(s1)
+	bnez	t0, ga_nm_set
 	lw	t0, ST_CAPS(s1)
+	beqz	t0, ga_nm_set
+	li	t0, -1
+ga_nm_set:
 	lw	t1, ST_CNT(s1)
 	addi	t1, t1, -1
 	slli	t1, t1, 4
@@ -3567,6 +3617,7 @@ ga_newvar:
 	add	t1, s1, t1
 	sw	t0, 12(t1)
 	sw	x0, ST_CAPS(s1)
+	sw	x0, ST_STYP(s1)
 	# Pop RHS value first, THEN reserve slot
 	li	a0, R_T0
 	jal	em_pop
@@ -3614,13 +3665,19 @@ ga_reassign:
 	jal	write_byte
 	j	exit
 ga_ra_ok:
-	# Mark variable if it holds a capturing closure
+	# Mark variable: struct type (>0), capturing closure (-1), or plain (0)
+	lw	t0, ST_STYP(s1)
+	bnez	t0, ga_rm_set
 	lw	t0, ST_CAPS(s1)
+	beqz	t0, ga_rm_set
+	li	t0, -1
+ga_rm_set:
 	slli	t1, s6, 4
 	addi	t1, t1, ST_DATA
 	add	t1, s1, t1
 	sw	t0, 12(t1)
 	sw	x0, ST_CAPS(s1)
+	sw	x0, ST_STYP(s1)
 ga_store:
 	# pop RHS value into t0
 	li	a0, R_T0
@@ -4127,14 +4184,83 @@ gc_closure:
 	lw	a1, N_LOC_LEN(s5)
 	jal	sym_try
 	li	t0, -1
-	beq	a0, t0, sf_fail
+	bne	a0, t0, gc_cl_chk
+	# Not in symtab — try struct table (constructor)
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	str_find
+	beqz	a0, sf_fail
+	# Struct constructor! a0 = entry ptr. Stack-allocated via ST_NEXT.
+	mv	s6, a0
+	lw	s5, SR_NFLD(s6)
+	lw	s7, SR_SIZE(s6)
+	# Compute 1-based struct type index for type tracking
+	lw	t0, ST_STRT(s1)
+	sub	t0, s6, t0
+	addi	t0, t0, -SRT_DATA
+	# t0 = byte offset of entry. Divide by 80 = divide by (64+16)
+	# Simplified: search index was implicit in str_find. Just count.
+	# Store entry ptr for later type marking
+	addi	sp, sp, -4
+	sw	s6, 0(sp)
+	# Allocate struct in frame: ST_NEXT -= size
+	lw	t0, ST_NEXT(s1)
+	sub	t0, t0, s7
+	sw	t0, ST_NEXT(s1)
+	mv	s6, t0
+	# Emit: addi sp, sp, -size (runtime reservation)
+	neg	a0, s7
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# Emit: tp check
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Store each field: a_i at (struct_base + i*4)(s0)
+	li	s7, 0
+gc_sf_loop:
+	beq	s7, s5, gc_sf_done
+	slli	t0, s7, 2
+	add	a0, s6, t0
+	addi	a1, s7, R_A0
+	jal	em_var_store
+	addi	s7, s7, 1
+	j	gc_sf_loop
+gc_sf_done:
+	# Set struct type for variable type tracking
+	lw	t0, 0(sp)
+	addi	sp, sp, 4
+	sw	t0, ST_STYP(s1)
+	# Compute struct pointer: t0 = s0 + struct_base_offset
+	li	a0, R_T0
+	mv	a1, s6
+	jal	em_li
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_S0
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gc_cl_chk:
 	# If inside closure body (s11>0), check if callee has captures
 	beqz	s11, gc_cl_ok
 	slli	t0, a1, 4
 	addi	t0, t0, ST_DATA
 	add	t0, s1, t0
 	lw	t1, 12(t0)
-	beqz	t1, gc_cl_ok
+	li	t2, -1
+	bne	t1, t2, gc_cl_ok
 	# Error: calling capturing closure from inside closure body
 	li	a0, 'E'
 	jal	write_byte
@@ -4354,6 +4480,177 @@ gpo_sloc:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_store
+	j	ge_done
+
+# --- Struct definition ---
+ge_struct:
+	# N_DATA = name offset, N_LOC_LINE = name length (repurposed)
+	lw	s5, ST_STRT(s1)
+	lw	t0, SRT_CNT(s5)
+	slli	t1, t0, 6
+	slli	t2, t0, 4
+	add	t1, t1, t2
+	addi	t1, t1, SRT_DATA
+	add	s6, s5, t1
+	lw	t0, N_DATA(s3)
+	sw	t0, SR_NOFF(s6)
+	lw	t0, N_LOC_LINE(s3)
+	sw	t0, SR_NLEN(s6)
+	lw	s7, N_FIRST_CHILD(s3)
+	li	s5, 0
+gs_floop:
+	beqz	s7, gs_fdone
+	slli	t0, s5, 3
+	addi	t0, t0, SR_FLDS
+	add	t0, s6, t0
+	lw	t1, N_LOC_OFF(s7)
+	sw	t1, 0(t0)
+	lw	t1, N_LOC_LEN(s7)
+	sw	t1, 4(t0)
+	addi	s5, s5, 1
+	lw	s7, N_NEXT_SIB(s7)
+	j	gs_floop
+gs_fdone:
+	sw	s5, SR_NFLD(s6)
+	slli	t0, s5, 2
+	sw	t0, SR_SIZE(s6)
+	lw	s5, ST_STRT(s1)
+	lw	t0, SRT_CNT(s5)
+	addi	t0, t0, 1
+	sw	t0, SRT_CNT(s5)
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- sizeof(StructName) ---
+ge_sizeof:
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	str_find
+	beqz	a0, cg_err
+	lw	s5, SR_SIZE(a0)
+	li	a0, R_T0
+	mv	a1, s5
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Dot field access (expr.field) ---
+ge_dot:
+	# Check if LHS is typed ident → search that struct only
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	t0, N_KIND(s5)
+	li	t1, NK_IDENT
+	bne	t0, t1, gd_untyped
+	# Try to find variable and get its type
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, gd_untyped
+	# Get type from entry offset 12
+	slli	t0, a1, 4
+	addi	t0, t0, ST_DATA
+	add	t0, s1, t0
+	lw	s6, 12(t0)
+	beqz	s6, gd_untyped
+	li	t1, -1
+	beq	s6, t1, gd_untyped
+	j	gd_typed
+gd_untyped:
+	li	s6, 0
+gd_typed:
+	# Generate LHS
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	# Get field name
+	lw	t0, N_FIRST_CHILD(s3)
+	lw	s5, N_NEXT_SIB(t0)
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	# If typed, search within that struct
+	beqz	s6, gd_global
+	# s6 = struct entry pointer. Search its fields.
+	lw	t2, SR_NFLD(s6)
+	li	t3, 0
+gd_floop:
+	beq	t3, t2, cg_err
+	slli	t4, t3, 3
+	addi	t4, t4, SR_FLDS
+	add	t4, s6, t4
+	lw	t5, 4(t4)
+	bne	a1, t5, gd_fnxt
+	lw	t5, 0(t4)
+	add	t5, s2, t5
+	add	t6, s2, a0
+	mv	a2, a1
+gd_fcmp:
+	beqz	a2, gd_fmatch
+	lbu	a3, 0(t5)
+	lbu	a4, 0(t6)
+	bne	a3, a4, gd_fnxt
+	addi	t5, t5, 1
+	addi	t6, t6, 1
+	addi	a2, a2, -1
+	j	gd_fcmp
+gd_fmatch:
+	slli	a0, t3, 2
+	j	gd_emit
+gd_fnxt:
+	addi	t3, t3, 1
+	j	gd_floop
+gd_global:
+	jal	fld_find
+	li	t0, -1
+	beq	a0, t0, cg_err
+gd_emit:
+	li	a1, R_T0
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Dot field assignment (expr.field = val) ---
+ga_dot_ck:
+	lw	t0, N_DATA(s6)
+	li	t1, NK_DOT
+	bne	t0, t1, cg_err
+	# RHS already on stack. Generate base pointer.
+	lw	a0, N_FIRST_CHILD(s6)
+	jal	gen_expr
+	# Look up field
+	lw	t0, N_FIRST_CHILD(s6)
+	lw	t0, N_NEXT_SIB(t0)
+	lw	a0, N_LOC_OFF(t0)
+	lw	a1, N_LOC_LEN(t0)
+	jal	fld_find
+	li	t0, -1
+	beq	a0, t0, cg_err
+	mv	s5, a0
+	# Pop base into t1, value into t0
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	# sw t0, offset(t1)
+	mv	a0, s5
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	li	a0, R_T0
+	jal	em_push
 	j	ge_done
 
 # --- Closure |params| body ---
@@ -5409,6 +5706,126 @@ af_lnext:
 
 aa_fdone:
 	return
+
+# ============================================================================
+# Struct helpers
+# ============================================================================
+
+# str_find: search struct table by name
+#   a0=name offset, a1=name length, s1=symtab, s2=input base
+#   Returns a0 = entry pointer, or 0 if not found
+str_find:
+	addi	sp, sp, -16
+	sw	ra, 12(sp)
+	sw	s3, 0(sp)
+	sw	s4, 4(sp)
+	sw	s5, 8(sp)
+	mv	s3, a0
+	mv	s4, a1
+	lw	s5, ST_STRT(s1)
+	lw	t0, SRT_CNT(s5)
+	li	t1, 0
+stf_loop:
+	beq	t1, t0, stf_fail
+	slli	t2, t1, 6
+	slli	t3, t1, 4
+	add	t2, t2, t3
+	addi	t2, t2, SRT_DATA
+	add	t2, s5, t2
+	lw	t3, SR_NLEN(t2)
+	bne	s4, t3, stf_next
+	lw	t3, SR_NOFF(t2)
+	add	t3, s2, t3
+	add	t4, s2, s3
+	mv	t5, s4
+stf_cmp:
+	beqz	t5, stf_found
+	lbu	t6, 0(t3)
+	lbu	a2, 0(t4)
+	bne	t6, a2, stf_next
+	addi	t3, t3, 1
+	addi	t4, t4, 1
+	addi	t5, t5, -1
+	j	stf_cmp
+stf_found:
+	mv	a0, t2
+	j	stf_done
+stf_next:
+	addi	t1, t1, 1
+	j	stf_loop
+stf_fail:
+	li	a0, 0
+stf_done:
+	lw	s3, 0(sp)
+	lw	s4, 4(sp)
+	lw	s5, 8(sp)
+	lw	ra, 12(sp)
+	addi	sp, sp, 16
+	ret
+
+# fld_find: search all structs for a field name
+#   a0=field name offset, a1=field name length, s1=symtab, s2=input base
+#   Returns a0 = field byte offset, or -1 if not found
+fld_find:
+	addi	sp, sp, -20
+	sw	ra, 16(sp)
+	sw	s3, 0(sp)
+	sw	s4, 4(sp)
+	sw	s5, 8(sp)
+	sw	s6, 12(sp)
+	mv	s3, a0
+	mv	s4, a1
+	lw	s5, ST_STRT(s1)
+	lw	t0, SRT_CNT(s5)
+	li	t1, 0
+ff_sloop:
+	beq	t1, t0, ff_fail
+	slli	t2, t1, 6
+	slli	t3, t1, 4
+	add	t2, t2, t3
+	addi	t2, t2, SRT_DATA
+	add	s6, s5, t2
+	lw	t2, SR_NFLD(s6)
+	li	t3, 0
+ff_floop:
+	beq	t3, t2, ff_fnext
+	slli	t4, t3, 3
+	addi	t4, t4, SR_FLDS
+	add	t4, s6, t4
+	lw	t5, 4(t4)
+	bne	s4, t5, ff_fnxt2
+	lw	t5, 0(t4)
+	add	t5, s2, t5
+	add	t6, s2, s3
+	mv	a2, s4
+ff_fcmp:
+	beqz	a2, ff_match
+	lbu	a3, 0(t5)
+	lbu	a4, 0(t6)
+	bne	a3, a4, ff_fnxt2
+	addi	t5, t5, 1
+	addi	t6, t6, 1
+	addi	a2, a2, -1
+	j	ff_fcmp
+ff_match:
+	slli	a0, t3, 2
+	j	ff_done
+ff_fnxt2:
+	addi	t3, t3, 1
+	j	ff_floop
+ff_fnext:
+	addi	t1, t1, 1
+	j	ff_sloop
+ff_fail:
+	li	a0, -1
+ff_done:
+	lw	s3, 0(sp)
+	lw	s4, 4(sp)
+	lw	s5, 8(sp)
+	lw	s6, 12(sp)
+	lw	ra, 16(sp)
+	addi	sp, sp, 20
+	ret
 
 # --- Asm error ---
 asm_err:

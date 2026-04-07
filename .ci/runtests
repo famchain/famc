@@ -316,6 +316,13 @@ print('; '.join(v))
 test_runs    "600 variables (large offsets)" "$MANY_VARS_600"
 
 # ============================================================================
+echo "=== Structs ==="
+test_compiles "struct def"              "struct Point { x; y }; 42"
+test_runs    "struct construct"         "struct P { x; y }; p = P(10, 20); p.x + p.y"
+test_runs    "struct field write"       "struct P { x }; p = P(1); p.x = 99; p.x"
+test_runs    "sizeof"                   "struct V { a; b; c }; sizeof(V)"
+test_runs    "struct array"             "struct P { x; y }; a = 0x80100000; p = a; p.x = 1; p.y = 2; q = a + sizeof(P); q.x = 3; q.y = 4; q.x + q.y"
+
 echo "=== Error detection (compile-time) ==="
 test_error   "hex overflow"             "0x1FFFFFFFF"               "Ei"
 test_error   "decimal overflow"         "4294967296"                "Ei"
