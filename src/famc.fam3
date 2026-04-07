@@ -203,15 +203,47 @@ pd_done:
 .equ	NK_FAT_ARROW,	49
 .equ	NK_LOOP,	50
 .equ	NK_BREAK,	51
-.equ	NK_SWITCH,	52
-.equ	NK_RETURN,	53
-.equ	NK_ASM,		54
-.equ	NK_STRUCT,	55
-.equ	NK_SIZEOF,	56
-.equ	NK_IDENT,	57
-.equ	NK_NUMBER,	58
-.equ	NK_STR,		59
-.equ	NK_CHAR,	60
+.equ	NK_CONTINUE,	52
+.equ	NK_SWITCH,	53
+.equ	NK_RETURN,	54
+.equ	NK_ASM,		55
+.equ	NK_STRUCT,	56
+.equ	NK_SIZEOF,	57
+.equ	NK_IDENT,	58
+.equ	NK_NUMBER,	59
+.equ	NK_STR,		60
+.equ	NK_CHAR,	61
+
+# AST-only node kinds
+.equ	NK_PROGRAM,	62
+.equ	NK_BINOP,	63
+.equ	NK_PREFIX,	64
+.equ	NK_POSTFIX,	65
+.equ	NK_ASSIGN,	66
+.equ	NK_CALL,	67
+.equ	NK_TERNARY,	68
+.equ	NK_BLOCK,	69
+.equ	NK_CLOSURE,	70
+.equ	NK_INDEX,	71
+.equ	NK_SELF,	72
+
+# Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
+.equ	P_NONE,		0
+.equ	P_ASSIGN,	2
+.equ	P_TERNARY,	4
+.equ	P_OR,		6
+.equ	P_AND,		8
+.equ	P_BIT_OR,	10
+.equ	P_BIT_XOR,	12
+.equ	P_BIT_AND,	14
+.equ	P_EQUAL,	16
+.equ	P_COMPARE,	18
+.equ	P_SHIFT,	20
+.equ	P_ADD,		22
+.equ	P_MUL,		24
+.equ	P_UNARY,	26
+.equ	P_POSTFIX,	28
+.equ	P_CALL,		30
 
 # Trie node struct (1036 bytes)
 .equ	T_KIND,		0
@@ -242,6 +274,29 @@ pd_done:
 .equ	N_PREV_SIB,	36
 .equ	N_DATA,		40
 .equ	N_SZ,		44
+
+# Register numbers (for generated code)
+.equ	R_ZERO,	0
+.equ	R_RA,	1
+.equ	R_SP,	2
+.equ	R_T0,	5
+.equ	R_T1,	6
+.equ	R_T2,	7
+.equ	R_S0,	8
+.equ	R_S1,	9
+.equ	R_A0,	10
+.equ	R_A1,	11
+
+# Symbol table entry (16 bytes, power of 2 for easy indexing)
+.equ	SY_OFF,	0
+.equ	SY_LEN,	4
+.equ	SY_SLOT,	8
+.equ	SY_SZ,	16
+
+# Symbol table header
+.equ	ST_CNT,	0
+.equ	ST_NEXT,	4
+.equ	ST_DATA,	8
 
 # ============================================================================
 # Memory helpers
@@ -648,6 +703,12 @@ lexer_init:
 	lla	a1, kw_break
 	li	a2, 5
 	li	a3, NK_BREAK
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_continue
+	li	a2, 8
+	li	a3, NK_CONTINUE
 	li	a4, 1
 	jal	lex_register
 	mv	a0, s0
@@ -1085,40 +1146,72 @@ nt_done:
 	return
 
 # ============================================================================
-# Compile: entry point for the compilation pipeline
+# AST helpers
 # ============================================================================
 
-# compile: a0=input start, a1=input end
-#   Returns a0=output start, a1=output end
-#   For now: lex all tokens and print them as a test
-compile:
-	prologue s0 s1 s2 s3 x0
-	mv	s2, a0			# save input start
-	mv	s3, a1			# save input end
-
-	# Init lexer
-	mv	a0, s2
-	mv	a1, s3
-	jal	lexer_init
-	mv	s0, a0			# s0 = lexer
-
-	# Allocate a token node
+# alloc_node: allocate and zero an N_SZ node. Returns a0 = ptr.
+alloc_node:
+	prologue s0 x0
 	li	a0, N_SZ
 	jal	alloc
-	mv	s1, a0			# s1 = token
+	mv	s0, a0
 	li	a1, N_SZ
 	jal	memzero
+	mv	a0, s0
+	return
 
-	# Lex loop: print each token kind
-cmp_loop:
+# append_child: a0=parent, a1=child. Appends child to parent's child list.
+append_child:
+	sw	a0, N_PARENT(a1)
+	lw	t0, N_LAST_CHILD(a0)
+	bnez	t0, ac_has_last
+	sw	a1, N_FIRST_CHILD(a0)
+	sw	a1, N_LAST_CHILD(a0)
+	ret
+ac_has_last:
+	sw	a1, N_NEXT_SIB(t0)
+	sw	t0, N_PREV_SIB(a1)
+	sw	a1, N_LAST_CHILD(a0)
+	ret
+
+# copy_loc: copy source location from a0 (src node) to a1 (dst node)
+copy_loc:
+	lw	t0, N_LOC_OFF(a0)
+	sw	t0, N_LOC_OFF(a1)
+	lw	t0, N_LOC_LEN(a0)
+	sw	t0, N_LOC_LEN(a1)
+	lw	t0, N_LOC_LINE(a0)
+	sw	t0, N_LOC_LINE(a1)
+	lw	t0, N_LOC_COL(a0)
+	sw	t0, N_LOC_COL(a1)
+	ret
+
+# ============================================================================
+# Parser globals (stored at known offsets from gp-relative addresses)
+# We use s-regs during parsing:
+#   s0 = lexer ptr
+#   s1 = current token node (reused across advance calls)
+#   s2 = input buffer start (for error messages)
+# ============================================================================
+
+# advance: lex next token into s1. Uses parser globals s0, s1.
+advance:
 	mv	a0, s0
 	mv	a1, s1
-	jal	next_token
-	lw	t0, N_KIND(s1)
-	li	t1, NK_TERM
-	beq	t0, t1, cmp_done
+	j	next_token		# tail call
 
-	# Print line:col kind:text
+# expect: verify current token kind == a0, then advance. Error if mismatch.
+expect:
+	prologue s3 x0
+	mv	s3, a0			# expected kind
+	lw	t0, N_KIND(s1)
+	bne	t0, s3, exp_fail
+	jal	advance			# consume the expected token
+	j	exp_ok
+exp_fail:
+	# Error: unexpected token
+	li	a0, 'E'
+	jal	write_byte
 	lw	a0, N_LOC_LINE(s1)
 	jal	print_dec
 	li	a0, ':'
@@ -1127,23 +1220,2083 @@ cmp_loop:
 	jal	print_dec
 	li	a0, 32
 	jal	write_byte
-	lw	a0, N_KIND(s1)
+	li	a0, 'e'
+	jal	write_byte
+	li	a0, 'x'
+	jal	write_byte
+	li	a0, 'p'
+	jal	write_byte
+	li	a0, 32
+	jal	write_byte
+	mv	a0, s3
+	jal	print_dec
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+exp_ok:
+	return
+
+# get_prec: return precedence of infix operator in a0 (token kind).
+#   Returns a0 = precedence level.
+get_prec:
+	# Assignment operators (right-assoc, P_ASSIGN=1)
+	li	t0, NK_EQUAL
+	beq	a0, t0, gp_assign
+	li	t0, NK_ASSIGN_MUT
+	beq	a0, t0, gp_assign
+	li	t0, NK_PLUS_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_MINUS_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_STAR_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_SLASH_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_PERCENT_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_AMP_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_PIPE_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_CARET_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_LSHIFT_EQ
+	beq	a0, t0, gp_assign
+	li	t0, NK_RSHIFT_EQ
+	beq	a0, t0, gp_assign
+	# Ternary
+	li	t0, NK_QMARK
+	beq	a0, t0, gp_ternary
+	# Logical
+	li	t0, NK_PIPE_PIPE
+	beq	a0, t0, gp_or
+	li	t0, NK_AMP_AMP
+	beq	a0, t0, gp_and
+	# Bitwise
+	li	t0, NK_PIPE
+	beq	a0, t0, gp_bitor
+	li	t0, NK_CARET
+	beq	a0, t0, gp_bitxor
+	li	t0, NK_AMP
+	beq	a0, t0, gp_bitand
+	# Equality
+	li	t0, NK_DBL_EQUAL
+	beq	a0, t0, gp_equal
+	li	t0, NK_NE
+	beq	a0, t0, gp_equal
+	# Comparison
+	li	t0, NK_LT
+	beq	a0, t0, gp_cmp
+	li	t0, NK_GT
+	beq	a0, t0, gp_cmp
+	li	t0, NK_LTE
+	beq	a0, t0, gp_cmp
+	li	t0, NK_GTE
+	beq	a0, t0, gp_cmp
+	# Shift
+	li	t0, NK_LSHIFT
+	beq	a0, t0, gp_shift
+	li	t0, NK_RSHIFT
+	beq	a0, t0, gp_shift
+	# Additive
+	li	t0, NK_PLUS
+	beq	a0, t0, gp_add
+	li	t0, NK_HYPHEN
+	beq	a0, t0, gp_add
+	# Multiplicative
+	li	t0, NK_STAR
+	beq	a0, t0, gp_mul
+	li	t0, NK_SLASH
+	beq	a0, t0, gp_mul
+	li	t0, NK_PERCENT
+	beq	a0, t0, gp_mul
+	# Postfix: call, index, member access
+	li	t0, NK_LPAREN
+	beq	a0, t0, gp_call
+	li	t0, NK_LBRACKET
+	beq	a0, t0, gp_call
+	li	t0, NK_DOT
+	beq	a0, t0, gp_call
+	li	t0, NK_ARROW
+	beq	a0, t0, gp_call
+	li	t0, NK_DBL_PLUS
+	beq	a0, t0, gp_postfix
+	li	t0, NK_DBL_HYPHEN
+	beq	a0, t0, gp_postfix
+	# Fat arrow (switch arms, same prec as assign)
+	li	t0, NK_FAT_ARROW
+	beq	a0, t0, gp_assign
+	# No infix precedence
+	li	a0, P_NONE
+	ret
+gp_assign:
+	li	a0, P_ASSIGN
+	ret
+gp_ternary:
+	li	a0, P_TERNARY
+	ret
+gp_or:
+	li	a0, P_OR
+	ret
+gp_and:
+	li	a0, P_AND
+	ret
+gp_bitor:
+	li	a0, P_BIT_OR
+	ret
+gp_bitxor:
+	li	a0, P_BIT_XOR
+	ret
+gp_bitand:
+	li	a0, P_BIT_AND
+	ret
+gp_equal:
+	li	a0, P_EQUAL
+	ret
+gp_cmp:
+	li	a0, P_COMPARE
+	ret
+gp_shift:
+	li	a0, P_SHIFT
+	ret
+gp_add:
+	li	a0, P_ADD
+	ret
+gp_mul:
+	li	a0, P_MUL
+	ret
+gp_call:
+	li	a0, P_CALL
+	ret
+gp_postfix:
+	li	a0, P_POSTFIX
+	ret
+
+# ============================================================================
+# Pratt parser
+# ============================================================================
+
+# parse_expr: parse expression with minimum precedence a0.
+#   s0=lexer, s1=current token, s2=input base.
+#   Returns a0 = AST node ptr.
+parse_expr:
+	prologue s3 s4 s5 s6 x0
+	mv	s5, a0			# s5 = min_prec
+
+	# s1 already holds the current token (primed by caller)
+	lw	s3, N_KIND(s1)		# s3 = token kind
+
+	# --- Prefix handlers ---
+
+	# Atoms: ident, number, string, char
+	li	t0, NK_IDENT
+	beq	s3, t0, px_atom
+	li	t0, NK_NUMBER
+	beq	s3, t0, px_atom
+	li	t0, NK_STR
+	beq	s3, t0, px_atom
+	li	t0, NK_CHAR
+	beq	s3, t0, px_atom
+
+	# Prefix unary: - ! ~ & * ++ --
+	li	t0, NK_HYPHEN
+	beq	s3, t0, px_unary
+	li	t0, NK_BANG
+	beq	s3, t0, px_unary
+	li	t0, NK_TILDE
+	beq	s3, t0, px_unary
+	li	t0, NK_AMP
+	beq	s3, t0, px_unary
+	li	t0, NK_STAR
+	beq	s3, t0, px_unary
+	li	t0, NK_DBL_PLUS
+	beq	s3, t0, px_unary
+	li	t0, NK_DBL_HYPHEN
+	beq	s3, t0, px_unary
+
+	# Parenthesized expression
+	li	t0, NK_LPAREN
+	beq	s3, t0, px_paren
+
+	# Block expression
+	li	t0, NK_LBRACE
+	beq	s3, t0, px_block
+
+	# Keywords
+	li	t0, NK_LOOP
+	beq	s3, t0, px_loop
+	li	t0, NK_BREAK
+	beq	s3, t0, px_break
+	li	t0, NK_CONTINUE
+	beq	s3, t0, px_continue
+	li	t0, NK_RETURN
+	beq	s3, t0, px_return
+	li	t0, NK_SWITCH
+	beq	s3, t0, px_switch
+	li	t0, NK_ASM
+	beq	s3, t0, px_asm
+	li	t0, NK_STRUCT
+	beq	s3, t0, px_struct
+	li	t0, NK_SIZEOF
+	beq	s3, t0, px_sizeof
+
+	# Unknown prefix — error
+	li	a0, 'E'
+	jal	write_byte
+	lw	a0, N_LOC_LINE(s1)
 	jal	print_dec
 	li	a0, ':'
 	jal	write_byte
-	lw	t0, N_LOC_OFF(s1)
-	lw	t1, N_LOC_LEN(s1)
+	lw	a0, N_LOC_COL(s1)
+	jal	print_dec
+	li	a0, 32
+	jal	write_byte
+	li	a0, 'p'
+	jal	write_byte
+	li	a0, 'x'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
+	# --- Prefix: atom (leaf node) ---
+px_atom:
+	jal	alloc_node
+	mv	s4, a0			# s4 = node
+	sw	s3, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume atom, get next token
+	j	px_infix
+
+	# --- Prefix: unary operator ---
+px_unary:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_PREFIX
+	sw	t0, N_KIND(s4)
+	sw	s3, N_DATA(s4)		# op kind
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume operator, get operand
+	li	a0, P_UNARY
+	jal	parse_expr		# parse operand
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
+	# --- Prefix: parenthesized expression ---
+px_paren:
+	jal	advance			# consume '('
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	s4, a0
+	li	a0, NK_RPAREN
+	jal	expect
+	j	px_infix
+
+	# --- Prefix: block { expr; expr; ... } ---
+px_block:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_BLOCK
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume '{'
+blk_loop:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_RBRACE
+	beq	t0, t1, blk_end
+	li	t1, NK_TERM
+	beq	t0, t1, blk_end
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	# Skip optional semicolons
+blk_semi:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_SEMI
+	bne	t0, t1, blk_loop
+	jal	advance
+	j	blk_semi
+blk_end:
+	li	a0, NK_RBRACE
+	jal	expect
+	j	px_infix
+
+	# --- Prefix: loop { ... } ---
+px_loop:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_LOOP
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'loop'
+	li	a0, P_NONE
+	jal	parse_expr		# body (should be a block)
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
+	# --- Prefix: break [expr] ---
+px_break:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_BREAK
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'break'
+	# Check if next token could be a value (not ; or } or term)
+	lw	t0, N_KIND(s1)
+	li	t1, NK_SEMI
+	beq	t0, t1, px_infix
+	li	t1, NK_RBRACE
+	beq	t0, t1, px_infix
+	li	t1, NK_TERM
+	beq	t0, t1, px_infix
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
+	# --- Prefix: return [expr] ---
+	# --- Prefix: continue ---
+px_continue:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_CONTINUE
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'continue'
+	j	px_infix
+
+	# --- Prefix: return [expr] ---
+px_return:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_RETURN
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'return'
+	lw	t0, N_KIND(s1)
+	li	t1, NK_SEMI
+	beq	t0, t1, px_infix
+	li	t1, NK_RBRACE
+	beq	t0, t1, px_infix
+	li	t1, NK_TERM
+	beq	t0, t1, px_infix
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
+	# --- Prefix: switch { arms } ---
+px_switch:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_SWITCH
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'switch'
+	li	a0, P_NONE
+	jal	parse_expr		# scrutinee
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	# Parse block body
+	li	a0, NK_LBRACE
+	jal	expect
+sw_loop:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_RBRACE
+	beq	t0, t1, sw_end
+	li	t1, NK_TERM
+	beq	t0, t1, sw_end
+	li	a0, P_NONE
+	jal	parse_expr		# arm expression
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+sw_semi:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_SEMI
+	bne	t0, t1, sw_loop
+	jal	advance
+	j	sw_semi
+sw_end:
+	li	a0, NK_RBRACE
+	jal	expect
+	j	px_infix
+
+	# --- Prefix: asm [label] { ... } ---
+px_asm:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_ASM
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'asm'
+	# Check for optional label (ident before '{')
+	lw	t0, N_KIND(s1)
+	li	t1, NK_IDENT
+	bne	t0, t1, asm_body
+	# Label present — store as first child
+	jal	alloc_node
+	mv	s6, a0
+	lw	t0, N_KIND(s1)
+	sw	t0, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s4
+	mv	a1, s6
+	jal	append_child
+	jal	advance			# consume the ident
+asm_body:
+	li	a0, NK_LBRACE
+	jal	expect
+	# Read raw asm text as a single string node until '}'
+	# We record the offset range of everything between { and }
+	jal	alloc_node
+	mv	s6, a0
+	li	t0, NK_STR
+	sw	t0, N_KIND(s6)
+	# Record start offset
+	lw	t0, L_OFF(s0)
+	sw	t0, N_LOC_OFF(s6)
+	# Scan forward to closing '}'
+	lw	t0, L_IN(s0)
+	lw	t1, L_OFF(s0)
+	add	t2, t0, t1		# current ptr
+	lw	t3, L_END(s0)
+	li	t4, 1			# brace depth
+asm_scan:
+	bgeu	t2, t3, asm_scan_end
+	lbu	t5, 0(t2)
+	addi	t2, t2, 1
+	li	t6, '{'
+	beq	t5, t6, asm_open
+	li	t6, '}'
+	beq	t5, t6, asm_close
+	li	t6, '\n'
+	bne	t5, t6, asm_scan
+	# Track newline
+	lw	t6, L_LINE(s0)
+	addi	t6, t6, 1
+	sw	t6, L_LINE(s0)
+	sub	t6, t2, t0
+	sw	t6, L_COL_START(s0)
+	j	asm_scan
+asm_open:
+	addi	t4, t4, 1
+	j	asm_scan
+asm_close:
+	addi	t4, t4, -1
+	bnez	t4, asm_scan
+asm_scan_end:
+	# t2 points past closing '}'. Set length and update lexer offset.
+	sub	t5, t2, t0		# absolute offset past '}'
+	lw	t6, N_LOC_OFF(s6)
+	sub	t6, t5, t6
+	addi	t6, t6, -1		# exclude closing '}'
+	sw	t6, N_LOC_LEN(s6)
+	sw	t5, L_OFF(s0)
+	mv	a0, s4
+	mv	a1, s6
+	jal	append_child
+	# Advance past the '}' we consumed manually
+	jal	advance
+	j	px_infix
+
+	# --- Prefix: struct { fields } ---
+px_struct:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_STRUCT
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'struct'
+	li	a0, NK_LBRACE
+	jal	expect
+st_loop:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_RBRACE
+	beq	t0, t1, st_end
+	li	t1, NK_TERM
+	beq	t0, t1, st_end
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+st_semi:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_SEMI
+	bne	t0, t1, st_loop
+	jal	advance
+	j	st_semi
+st_end:
+	li	a0, NK_RBRACE
+	jal	expect
+	j	px_infix
+
+	# --- Prefix: sizeof ( expr ) ---
+px_sizeof:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_SIZEOF
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'sizeof'
+	li	a0, NK_LPAREN
+	jal	expect
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	li	a0, NK_RPAREN
+	jal	expect
+	j	px_infix
+
+	# --- Infix loop (Pratt) ---
+px_infix:
+	# Peek at next token kind (already in s1 from advance/expect)
+	lw	a0, N_KIND(s1)
+	jal	get_prec
+	mv	s6, a0			# s6 = next prec
+	bge	s5, s6, px_done		# min_prec >= next_prec → stop
+
+	# Save the operator token info
+	lw	s3, N_KIND(s1)		# op kind
+	jal	advance			# consume operator
+
+	# --- Infix: assignment (right-associative) ---
+	li	t0, P_ASSIGN
+	bne	s6, t0, ix_ck_ternary
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_ASSIGN
+	sw	t1, N_KIND(s6)
+	sw	s3, N_DATA(s6)		# op kind in data
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# LHS
+	mv	s4, s6
+	li	a0, P_ASSIGN		# right-assoc: same prec
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child		# RHS
+	j	px_infix
+
+	# --- Infix: ternary ? : ---
+ix_ck_ternary:
+	li	t0, NK_QMARK
+	bne	s3, t0, ix_ck_call
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_TERNARY
+	sw	t1, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# condition
+	mv	s4, s6
+	li	a0, P_NONE
+	jal	parse_expr		# then branch
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	li	a0, NK_COLON
+	jal	expect
+	li	a0, P_TERNARY
+	jal	parse_expr		# else branch
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
+	# --- Infix: call f(args) ---
+ix_ck_call:
+	li	t0, NK_LPAREN
+	bne	s3, t0, ix_ck_index
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_CALL
+	sw	t1, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# callee
+	mv	s4, s6
+call_args:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_RPAREN
+	beq	t0, t1, call_end
+	li	t1, NK_TERM
+	beq	t0, t1, call_end
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	lw	t0, N_KIND(s1)
+	li	t1, NK_COMMA
+	bne	t0, t1, call_args
+	jal	advance			# skip comma
+	j	call_args
+call_end:
+	li	a0, NK_RPAREN
+	jal	expect
+	j	px_infix
+
+	# --- Infix: index a[b] ---
+ix_ck_index:
+	li	t0, NK_LBRACKET
+	bne	s3, t0, ix_ck_member
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_INDEX
+	sw	t1, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# base
+	mv	s4, s6
+	li	a0, P_NONE
+	jal	parse_expr		# index
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	li	a0, NK_RBRACKET
+	jal	expect
+	j	px_infix
+
+	# --- Infix: member access a.b or a->b ---
+ix_ck_member:
+	li	t0, NK_DOT
+	beq	s3, t0, ix_member
+	li	t0, NK_ARROW
+	bne	s3, t0, ix_ck_postfix
+ix_member:
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_BINOP
+	sw	t1, N_KIND(s6)
+	sw	s3, N_DATA(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# LHS
+	mv	s4, s6
+	# RHS must be ident
+	jal	alloc_node
+	mv	s6, a0
+	lw	t0, N_KIND(s1)
+	sw	t0, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s4
+	mv	a1, s6
+	jal	append_child
+	jal	advance			# consume ident
+	j	px_infix
+
+	# --- Infix: postfix ++ / -- ---
+ix_ck_postfix:
+	li	t0, NK_DBL_PLUS
+	beq	s3, t0, ix_postfix
+	li	t0, NK_DBL_HYPHEN
+	bne	s3, t0, ix_binop
+ix_postfix:
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_POSTFIX
+	sw	t1, N_KIND(s6)
+	sw	s3, N_DATA(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child
+	mv	s4, s6
+	j	px_infix
+
+	# --- Infix: binary operator (left-associative) ---
+ix_binop:
+	# s3 = op kind, s6 = prec. Save prec on stack before alloc clobbers s6.
+	addi	sp, sp, -4
+	sw	s6, 0(sp)		# save prec
+	jal	alloc_node
+	mv	s6, a0			# s6 = new binop node
+	li	t1, NK_BINOP
+	sw	t1, N_KIND(s6)
+	sw	s3, N_DATA(s6)		# op kind (s3 still valid)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# LHS
+	mv	s4, s6
+	# Left-assoc: parse RHS with prec+1
+	lw	a0, 0(sp)		# restore prec
+	addi	sp, sp, 4
+	addi	a0, a0, 1
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child		# RHS
+	j	px_infix
+
+px_done:
+	mv	a0, s4			# return node
+	return
+
+# ============================================================================
+# AST printer (debug)
+# ============================================================================
+
+# print_ast: print AST rooted at a0, with indent level a1.
+#   s2 = input buffer start (for printing source text).
+print_ast:
+	prologue s3 s4 s5 x0
+	mv	s3, a0			# s3 = node
+	mv	s4, a1			# s4 = indent level
+
+	# Print indent
+	mv	s5, s4
+pa_indent:
+	beqz	s5, pa_kind
+	li	a0, 32
+	jal	write_byte
+	li	a0, 32
+	jal	write_byte
+	addi	s5, s5, -1
+	j	pa_indent
+
+pa_kind:
+	# Print node kind
+	lw	a0, N_KIND(s3)
+	jal	print_dec
+
+	# Print line:col
+	li	a0, 32
+	jal	write_byte
+	lw	a0, N_LOC_LINE(s3)
+	jal	print_dec
+	li	a0, ':'
+	jal	write_byte
+	lw	a0, N_LOC_COL(s3)
+	jal	print_dec
+
+	# For atoms/idents/numbers/strings: print source text
+	lw	t0, N_KIND(s3)
+	li	t1, NK_IDENT
+	beq	t0, t1, pa_text
+	li	t1, NK_NUMBER
+	beq	t0, t1, pa_text
+	li	t1, NK_STR
+	beq	t0, t1, pa_text
+	li	t1, NK_CHAR
+	beq	t0, t1, pa_text
+
+	# For ops with N_DATA: print op kind
+	li	t1, NK_BINOP
+	beq	t0, t1, pa_data
+	li	t1, NK_PREFIX
+	beq	t0, t1, pa_data
+	li	t1, NK_POSTFIX
+	beq	t0, t1, pa_data
+	li	t1, NK_ASSIGN
+	beq	t0, t1, pa_data
+	j	pa_nl
+
+pa_text:
+	li	a0, 32
+	jal	write_byte
+	lw	t0, N_LOC_OFF(s3)
+	lw	t1, N_LOC_LEN(s3)
 	add	a0, s2, t0
 	add	a1, a0, t1
 	jal	write_data
+	j	pa_nl
+
+pa_data:
+	li	a0, 32
+	jal	write_byte
+	li	a0, 'o'
+	jal	write_byte
+	li	a0, 'p'
+	jal	write_byte
+	li	a0, '='
+	jal	write_byte
+	lw	a0, N_DATA(s3)
+	jal	print_dec
+	j	pa_nl
+
+pa_nl:
 	li	a0, '\n'
 	jal	write_byte
-	j	cmp_loop
+
+	# Recurse on children
+	lw	s3, N_FIRST_CHILD(s3)
+pa_child:
+	beqz	s3, pa_ret
+	mv	a0, s3
+	addi	a1, s4, 1
+	jal	print_ast
+	lw	s3, N_NEXT_SIB(s3)
+	j	pa_child
+
+pa_ret:
+	return
+
+# ============================================================================
+# Codegen: instruction encoding helpers
+# ============================================================================
+# During codegen, register convention:
+#   s0 = emit cursor (output buffer write pointer)
+#   s1 = symbol table pointer
+#   s2 = input buffer start (for reading source text from AST nodes)
+#   s3-s7 = used per-function in gen_expr (saved by prologue)
+
+# emit: store raw word a0 at [s0], advance s0 by 4
+emit:
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_rtype: emit R-type instruction (opcode 0x33)
+#   a0=funct7, a1=rs2, a2=rs1, a3=funct3, a4=rd
+em_rtype:
+	slli	a0, a0, 25
+	slli	t0, a1, 20
+	or	a0, a0, t0
+	slli	t0, a2, 15
+	or	a0, a0, t0
+	slli	t0, a3, 12
+	or	a0, a0, t0
+	slli	t0, a4, 7
+	or	a0, a0, t0
+	ori	a0, a0, 0x33
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_itype: emit I-type instruction
+#   a0=imm12, a1=rs1, a2=funct3, a3=rd, a4=opcode
+em_itype:
+	slli	a0, a0, 20
+	slli	t0, a1, 15
+	or	a0, a0, t0
+	slli	t0, a2, 12
+	or	a0, a0, t0
+	slli	t0, a3, 7
+	or	a0, a0, t0
+	or	a0, a0, a4
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_stype: emit S-type instruction
+#   a0=imm12, a1=rs2, a2=rs1, a3=funct3, a4=opcode
+em_stype:
+	mv	t0, a4
+	andi	t1, a0, 0x1F
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	slli	t1, a3, 12
+	or	t0, t0, t1
+	slli	t1, a2, 15
+	or	t0, t0, t1
+	slli	t1, a1, 20
+	or	t0, t0, t1
+	srai	t1, a0, 5
+	slli	t1, t1, 25
+	or	t0, t0, t1
+	sw	t0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_btype: emit B-type instruction (opcode 0x63)
+#   a0=imm (byte offset), a1=rs1, a2=rs2, a3=funct3
+em_btype:
+	li	t0, 0x63
+	srli	t1, a0, 11
+	andi	t1, t1, 1
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	srli	t1, a0, 1
+	andi	t1, t1, 0xF
+	slli	t1, t1, 8
+	or	t0, t0, t1
+	slli	t1, a3, 12
+	or	t0, t0, t1
+	slli	t1, a1, 15
+	or	t0, t0, t1
+	slli	t1, a2, 20
+	or	t0, t0, t1
+	srli	t1, a0, 5
+	andi	t1, t1, 0x3F
+	slli	t1, t1, 25
+	or	t0, t0, t1
+	srli	t1, a0, 12
+	andi	t1, t1, 1
+	slli	t1, t1, 31
+	or	t0, t0, t1
+	sw	t0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_utype: emit U-type instruction
+#   a0=imm20, a1=rd, a2=opcode
+em_utype:
+	slli	a0, a0, 12
+	slli	t0, a1, 7
+	or	a0, a0, t0
+	or	a0, a0, a2
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_jtype: emit J-type instruction (opcode 0x6F)
+#   a0=imm (byte offset, 21-bit signed), a1=rd
+em_jtype:
+	li	t0, 0x6F
+	slli	t1, a1, 7
+	or	t0, t0, t1
+	srli	t1, a0, 12
+	andi	t1, t1, 0xFF
+	slli	t1, t1, 12
+	or	t0, t0, t1
+	srli	t1, a0, 11
+	andi	t1, t1, 1
+	slli	t1, t1, 20
+	or	t0, t0, t1
+	srli	t1, a0, 1
+	andi	t1, t1, 0x3FF
+	slli	t1, t1, 21
+	or	t0, t0, t1
+	srli	t1, a0, 20
+	andi	t1, t1, 1
+	slli	t1, t1, 31
+	or	t0, t0, t1
+	sw	t0, 0(s0)
+	addi	s0, s0, 4
+	ret
+
+# em_li: emit load immediate (handles lui+addi for large values)
+#   a0=rd, a1=value
+em_li:
+	prologue s3 s4 s5 x0
+	mv	s3, a0
+	mv	s4, a1
+	# Check if value fits in 12-bit signed [-2048, 2047]
+	li	t0, 2047
+	blt	t0, s4, el_large
+	li	t0, -2048
+	blt	s4, t0, el_large
+	# Small: addi rd, x0, value
+	mv	a0, s4
+	li	a1, R_ZERO
+	li	a2, 0
+	mv	a3, s3
+	li	a4, 0x13
+	jal	em_itype
+	j	el_done
+el_large:
+	# lui + addi decomposition
+	srli	s5, s4, 12
+	srli	t0, s4, 11
+	andi	t0, t0, 1
+	add	s5, s5, t0
+	# lui rd, upper
+	mv	a0, s5
+	mv	a1, s3
+	li	a2, 0x37
+	jal	em_utype
+	# compute lower = value - (upper << 12)
+	slli	t0, s5, 12
+	sub	s5, s4, t0
+	# skip addi if lower == 0
+	beqz	s5, el_done
+	# addi rd, rd, lower
+	mv	a0, s5
+	mv	a1, s3
+	li	a2, 0
+	mv	a3, s3
+	li	a4, 0x13
+	jal	em_itype
+el_done:
+	return
+
+# em_push: emit push register onto stack
+#   a0 = register number
+em_push:
+	prologue s3 x0
+	mv	s3, a0
+	# addi sp, sp, -4
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# sw reg, 0(sp)
+	li	a0, 0
+	mv	a1, s3
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	return
+
+# em_pop: emit pop from stack into register
+#   a0 = register number
+em_pop:
+	prologue s3 x0
+	mv	s3, a0
+	# lw reg, 0(sp)
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 2
+	mv	a3, s3
+	li	a4, 0x03
+	jal	em_itype
+	# addi sp, sp, 4
+	li	a0, 4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	return
+
+# patch_jal: patch a JAL x0 instruction at address a0 with offset a1
+#   Clobbers t0-t1
+patch_jal:
+	li	t0, 0x6F
+	srli	t1, a1, 12
+	andi	t1, t1, 0xFF
+	slli	t1, t1, 12
+	or	t0, t0, t1
+	srli	t1, a1, 11
+	andi	t1, t1, 1
+	slli	t1, t1, 20
+	or	t0, t0, t1
+	srli	t1, a1, 1
+	andi	t1, t1, 0x3FF
+	slli	t1, t1, 21
+	or	t0, t0, t1
+	srli	t1, a1, 20
+	andi	t1, t1, 1
+	slli	t1, t1, 31
+	or	t0, t0, t1
+	sw	t0, 0(a0)
+	ret
+
+# ============================================================================
+# Codegen: number and character parsing
+# ============================================================================
+
+# parse_int: parse integer from source text
+#   a0 = pointer to first char, a1 = length
+#   Returns a0 = value
+parse_int:
+	prologue s3 s4 s5 s6 x0
+	mv	s3, a0
+	add	s5, a0, a1
+	li	s6, 0
+	# Check for 0x or 0b prefix
+	li	t0, 2
+	blt	a1, t0, pi_dec
+	lbu	t0, 0(s3)
+	li	t1, '0'
+	bne	t0, t1, pi_dec
+	lbu	t0, 1(s3)
+	li	t1, 'x'
+	beq	t0, t1, pi_hex
+	li	t1, 'X'
+	beq	t0, t1, pi_hex
+	li	t1, 'b'
+	beq	t0, t1, pi_bin
+	li	t1, 'B'
+	beq	t0, t1, pi_bin
+pi_dec:
+	bgeu	s3, s5, pi_done
+	lbu	t0, 0(s3)
+	addi	t0, t0, -48
+	slli	t1, s6, 3
+	slli	t2, s6, 1
+	add	s6, t1, t2
+	add	s6, s6, t0
+	addi	s3, s3, 1
+	j	pi_dec
+pi_hex:
+	addi	s3, s3, 2
+pi_hex_loop:
+	bgeu	s3, s5, pi_done
+	lbu	t0, 0(s3)
+	li	t1, 'a'
+	bge	t0, t1, pi_hex_lo
+	li	t1, 'A'
+	bge	t0, t1, pi_hex_up
+	addi	t0, t0, -48
+	j	pi_hex_add
+pi_hex_lo:
+	addi	t0, t0, -87
+	j	pi_hex_add
+pi_hex_up:
+	addi	t0, t0, -55
+pi_hex_add:
+	slli	s6, s6, 4
+	add	s6, s6, t0
+	addi	s3, s3, 1
+	j	pi_hex_loop
+pi_bin:
+	addi	s3, s3, 2
+pi_bin_loop:
+	bgeu	s3, s5, pi_done
+	lbu	t0, 0(s3)
+	addi	t0, t0, -48
+	slli	s6, s6, 1
+	add	s6, s6, t0
+	addi	s3, s3, 1
+	j	pi_bin_loop
+pi_done:
+	mv	a0, s6
+	return
+
+# parse_char: parse character literal from source text
+#   a0 = pointer to first char (including quotes), a1 = length
+#   Returns a0 = character value
+parse_char:
+	lbu	t0, 1(a0)
+	li	t1, 92
+	bne	t0, t1, pc_done
+	# Escape sequence
+	lbu	t0, 2(a0)
+	li	t1, 'n'
+	beq	t0, t1, pc_nl
+	li	t1, 't'
+	beq	t0, t1, pc_tab
+	li	t1, 'r'
+	beq	t0, t1, pc_cr
+	li	t1, '0'
+	beq	t0, t1, pc_nul
+	# '\'' or '\\' or unknown: use raw char
+	mv	a0, t0
+	ret
+pc_nl:
+	li	a0, 10
+	ret
+pc_tab:
+	li	a0, 9
+	ret
+pc_cr:
+	li	a0, 13
+	ret
+pc_nul:
+	li	a0, 0
+	ret
+pc_done:
+	mv	a0, t0
+	ret
+
+# ============================================================================
+# Codegen: symbol table
+# ============================================================================
+
+# sym_init: allocate and zero symbol table header
+#   Returns a0 = symbol table pointer
+sym_init:
+	prologue s3 x0
+	li	a0, 1024
+	jal	alloc
+	mv	s3, a0
+	li	a1, 1024
+	jal	memzero
+	mv	a0, s3
+	return
+
+# sym_def: define a new variable
+#   a0=name offset, a1=name length, s1=symtab
+#   Returns a0 = stack slot offset (negative)
+sym_def:
+	lw	t0, ST_CNT(s1)
+	slli	t1, t0, 4
+	addi	t1, t1, ST_DATA
+	add	t1, s1, t1
+	sw	a0, SY_OFF(t1)
+	sw	a1, SY_LEN(t1)
+	lw	t2, ST_NEXT(s1)
+	addi	t2, t2, -4
+	sw	t2, ST_NEXT(s1)
+	sw	t2, SY_SLOT(t1)
+	addi	t0, t0, 1
+	sw	t0, ST_CNT(s1)
+	mv	a0, t2
+	ret
+
+# sym_find: look up variable by name
+#   a0=name offset, a1=name length, s1=symtab, s2=input base
+#   Returns a0 = stack slot offset
+sym_find:
+	prologue s3 s4 s5 s6 s7 x0
+	mv	s3, a0
+	mv	s4, a1
+	lw	s5, ST_CNT(s1)
+	addi	s5, s5, -1
+sf_loop:
+	blt	s5, x0, sf_fail
+	slli	t0, s5, 4
+	addi	t0, t0, ST_DATA
+	add	t0, s1, t0
+	lw	t1, SY_LEN(t0)
+	bne	s4, t1, sf_next
+	lw	t1, SY_OFF(t0)
+	add	t1, s2, t1
+	add	t2, s2, s3
+	mv	t3, s4
+sf_cmp:
+	beqz	t3, sf_found
+	lbu	t4, 0(t1)
+	lbu	t5, 0(t2)
+	bne	t4, t5, sf_next
+	addi	t1, t1, 1
+	addi	t2, t2, 1
+	addi	t3, t3, -1
+	j	sf_cmp
+sf_found:
+	slli	t0, s5, 4
+	addi	t0, t0, ST_DATA
+	add	t0, s1, t0
+	lw	a0, SY_SLOT(t0)
+	return
+sf_next:
+	addi	s5, s5, -1
+	j	sf_loop
+sf_fail:
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'v'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
+# ============================================================================
+# Codegen: expression code generation
+# ============================================================================
+
+# gen_expr: generate code for an expression node
+#   a0 = AST node pointer
+#   s0 = emit cursor, s1 = symtab, s2 = input base
+#   Emits code that pushes one value onto the runtime stack
+gen_expr:
+	prologue s3 s4 s5 s6 s7 x0
+	mv	s3, a0
+	lw	s4, N_KIND(s3)
+	# Dispatch on node kind
+	li	t0, NK_NUMBER
+	beq	s4, t0, ge_num
+	li	t0, NK_CHAR
+	beq	s4, t0, ge_char
+	li	t0, NK_IDENT
+	beq	s4, t0, ge_ident
+	li	t0, NK_BINOP
+	beq	s4, t0, ge_binop
+	li	t0, NK_PREFIX
+	beq	s4, t0, ge_prefix
+	li	t0, NK_ASSIGN
+	beq	s4, t0, ge_assign
+	li	t0, NK_BLOCK
+	beq	s4, t0, ge_block
+	li	t0, NK_LOOP
+	beq	s4, t0, ge_loop
+	li	t0, NK_TERNARY
+	beq	s4, t0, ge_tern
+	li	t0, NK_CALL
+	beq	s4, t0, ge_call
+	li	t0, NK_RETURN
+	beq	s4, t0, ge_return
+	li	t0, NK_POSTFIX
+	beq	s4, t0, ge_postfix
+	j	cg_err
+
+# --- Number literal ---
+ge_num:
+	lw	t0, N_LOC_OFF(s3)
+	add	a0, s2, t0
+	lw	a1, N_LOC_LEN(s3)
+	jal	parse_int
+	mv	s5, a0
+	li	a0, R_T0
+	mv	a1, s5
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Character literal ---
+ge_char:
+	lw	t0, N_LOC_OFF(s3)
+	add	a0, s2, t0
+	lw	a1, N_LOC_LEN(s3)
+	jal	parse_char
+	mv	s5, a0
+	li	a0, R_T0
+	mv	a1, s5
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Identifier (variable reference) ---
+ge_ident:
+	lw	a0, N_LOC_OFF(s3)
+	lw	a1, N_LOC_LEN(s3)
+	jal	sym_find
+	mv	s5, a0
+	# lw t0, offset(s0) in generated code
+	mv	a0, s5
+	li	a1, R_S0
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Binary operation ---
+ge_binop:
+	lw	s5, N_DATA(s3)
+	# Generate LHS
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	# Generate RHS
+	lw	t0, N_FIRST_CHILD(s3)
+	lw	a0, N_NEXT_SIB(t0)
+	jal	gen_expr
+	# Pop RHS into t1, LHS into t0
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	# Dispatch on operator kind
+	li	t0, NK_PLUS
+	beq	s5, t0, gbo_add
+	li	t0, NK_HYPHEN
+	beq	s5, t0, gbo_sub
+	li	t0, NK_AMP
+	beq	s5, t0, gbo_and
+	li	t0, NK_PIPE
+	beq	s5, t0, gbo_or
+	li	t0, NK_CARET
+	beq	s5, t0, gbo_xor
+	li	t0, NK_LSHIFT
+	beq	s5, t0, gbo_sll
+	li	t0, NK_RSHIFT
+	beq	s5, t0, gbo_srl
+	li	t0, NK_LT
+	beq	s5, t0, gbo_slt
+	li	t0, NK_GT
+	beq	s5, t0, gbo_gt
+	li	t0, NK_LTE
+	beq	s5, t0, gbo_lte
+	li	t0, NK_GTE
+	beq	s5, t0, gbo_gte
+	li	t0, NK_DBL_EQUAL
+	beq	s5, t0, gbo_eq
+	li	t0, NK_NE
+	beq	s5, t0, gbo_ne
+	j	cg_err
+
+gbo_add:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_sub:
+	li	a0, 0x20
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_and:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 7
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_or:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 6
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_xor:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 4
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_sll:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 1
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_srl:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 5
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_slt:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_gt:
+	# a > b → slt t0, t1, t0
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_lte:
+	# a <= b → not(a > b) → slt t0, t1, t0; xori t0, t0, 1
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 4
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+gbo_gte:
+	# a >= b → not(a < b) → slt t0, t0, t1; xori t0, t0, 1
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 4
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+gbo_eq:
+	# sub t0, t0, t1; sltiu t0, t0, 1 (seqz)
+	li	a0, 0x20
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 3
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+gbo_ne:
+	# sub t0, t0, t1; sltu t0, x0, t0 (snez)
+	li	a0, 0x20
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 3
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_push:
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Prefix unary ---
+ge_prefix:
+	lw	s5, N_DATA(s3)
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	li	t0, NK_STAR
+	beq	s5, t0, gp_deref
+	li	t0, NK_HYPHEN
+	beq	s5, t0, gp_neg
+	li	t0, NK_BANG
+	beq	s5, t0, gp_not
+	li	t0, NK_TILDE
+	beq	s5, t0, gp_bnot
+	j	cg_err
+gp_deref:
+	# pop addr, lw t0, 0(t0), push
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gp_neg:
+	# pop, sub t0, x0, t0, push
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 0x20
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gp_not:
+	# pop, sltiu t0, t0, 1, push
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 3
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gp_bnot:
+	# pop, xori t0, t0, -1, push
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, -1
+	li	a1, R_T0
+	li	a2, 4
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Assignment ---
+ge_assign:
+	lw	s5, N_DATA(s3)
+	lw	s6, N_FIRST_CHILD(s3)
+	lw	s7, N_NEXT_SIB(s6)
+	# Generate RHS
+	mv	a0, s7
+	jal	gen_expr
+	# Check LHS kind
+	lw	t0, N_KIND(s6)
+	li	t1, NK_IDENT
+	beq	t0, t1, ga_ident
+	li	t1, NK_PREFIX
+	beq	t0, t1, ga_deref
+	j	cg_err
+ga_ident:
+	li	t0, NK_ASSIGN_MUT
+	bne	s5, t0, ga_exist
+	# := define new variable
+	lw	a0, N_LOC_OFF(s6)
+	lw	a1, N_LOC_LEN(s6)
+	jal	sym_def
+	mv	s5, a0
+	j	ga_store
+ga_exist:
+	lw	a0, N_LOC_OFF(s6)
+	lw	a1, N_LOC_LEN(s6)
+	jal	sym_find
+	mv	s5, a0
+ga_store:
+	# pop value into t0
+	li	a0, R_T0
+	jal	em_pop
+	# sw t0, offset(s0) in generated code
+	mv	a0, s5
+	li	a1, R_T0
+	li	a2, R_S0
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	# push value back (assignment returns the value)
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+ga_deref:
+	# *addr = val: RHS already on stack, generate address
+	lw	t0, N_DATA(s6)
+	li	t1, NK_STAR
+	bne	t0, t1, cg_err
+	lw	a0, N_FIRST_CHILD(s6)
+	jal	gen_expr
+	# pop addr into t1, pop value into t0
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	# sw t0, 0(t1)
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	# push value back
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Block ---
+ge_block:
+	lw	s5, N_FIRST_CHILD(s3)
+	beqz	s5, gbl_empty
+	# Find last child
+	mv	s6, s5
+gbl_last:
+	lw	t0, N_NEXT_SIB(s6)
+	beqz	t0, gbl_gen
+	mv	s6, t0
+	j	gbl_last
+gbl_gen:
+	# s6 = last child; generate all children
+	mv	s7, s5
+gbl_child:
+	mv	a0, s7
+	jal	gen_expr
+	beq	s7, s6, ge_done
+	# pop intermediate value
+	li	a0, R_T0
+	jal	em_pop
+	lw	s7, N_NEXT_SIB(s7)
+	j	gbl_child
+gbl_empty:
+	# push 0
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Loop (infinite, no break support yet) ---
+ge_loop:
+	mv	s5, s0
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	# pop body result
+	li	a0, R_T0
+	jal	em_pop
+	# j back to loop start
+	sub	a0, s5, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	j	ge_done
+
+# --- Ternary (cond ? then : else) ---
+ge_tern:
+	# children: cond, then_expr, else_expr
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	s6, N_NEXT_SIB(s5)
+	lw	s7, N_NEXT_SIB(s6)
+	# generate condition
+	mv	a0, s5
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	# beq t0, x0, else_branch (placeholder)
+	mv	s5, s0
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 0
+	jal	em_btype
+	# generate then
+	mv	a0, s6
+	jal	gen_expr
+	# j past else (placeholder)
+	mv	s6, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# backpatch beq to here (else start)
+	sub	a0, s0, s5
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 0
+	mv	t3, s0
+	mv	s0, s5
+	jal	em_btype
+	mv	s0, t3
+	# generate else
+	mv	a0, s7
+	jal	gen_expr
+	# backpatch j to here
+	sub	a1, s0, s6
+	mv	a0, s6
+	jal	patch_jal
+	j	ge_done
+
+# --- Function call ---
+ge_call:
+	# first child = callee (ident), rest = args
+	lw	s5, N_FIRST_CHILD(s3)
+	# For now: push args into a0-a7, then jal to label
+	# Count and generate args
+	lw	s6, N_NEXT_SIB(s5)
+	li	s7, 0
+gc_args:
+	beqz	s6, gc_emit
+	mv	a0, s6
+	jal	gen_expr
+	addi	s7, s7, 1
+	lw	s6, N_NEXT_SIB(s6)
+	j	gc_args
+gc_emit:
+	# Pop args into a-regs (reverse order)
+	mv	t2, s7
+gc_pop_args:
+	beqz	t2, gc_call
+	addi	t2, t2, -1
+	addi	a0, t2, R_A0
+	addi	sp, sp, -4
+	sw	t2, 0(sp)
+	jal	em_pop
+	lw	t2, 0(sp)
+	addi	sp, sp, 4
+	j	gc_pop_args
+gc_call:
+	# For now, error - function calls need label resolution
+	# TODO: implement asm label tracking
+	j	cg_err
+
+# --- Return ---
+ge_return:
+	lw	s5, N_FIRST_CHILD(s3)
+	beqz	s5, gr_void
+	mv	a0, s5
+	jal	gen_expr
+	li	a0, R_A0
+	jal	em_pop
+	j	gr_emit
+gr_void:
+	# return without value: a0 = 0
+	li	a0, R_A0
+	li	a1, 0
+	jal	em_li
+gr_emit:
+	# TODO: emit epilogue (restore fp, ra, ret)
+	# For now just emit ret (jalr x0, ra, 0)
+	li	a0, 0
+	li	a1, R_RA
+	li	a2, 0
+	li	a3, R_ZERO
+	li	a4, 0x67
+	jal	em_itype
+	# Push dummy value (unreachable but maintains invariant)
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Postfix (++ / --) ---
+ge_postfix:
+	# child = operand (must be ident)
+	lw	s5, N_DATA(s3)
+	lw	s6, N_FIRST_CHILD(s3)
+	lw	t0, N_KIND(s6)
+	li	t1, NK_IDENT
+	bne	t0, t1, cg_err
+	# Look up variable
+	lw	a0, N_LOC_OFF(s6)
+	lw	a1, N_LOC_LEN(s6)
+	jal	sym_find
+	mv	s7, a0
+	# Load current value: lw t0, offset(s0)
+	mv	a0, s7
+	li	a1, R_S0
+	li	a2, 2
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	# Push old value (postfix returns pre-increment)
+	li	a0, R_T0
+	jal	em_push
+	# Compute new value: addi t0, t0, 1 or -1
+	li	t0, NK_DBL_PLUS
+	beq	s5, t0, gpo_inc
+	li	a0, -1
+	j	gpo_store
+gpo_inc:
+	li	a0, 1
+gpo_store:
+	li	a1, R_T0
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	# Store back: sw t0, offset(s0)
+	mv	a0, s7
+	li	a1, R_T0
+	li	a2, R_S0
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	j	ge_done
+
+ge_done:
+	return
+
+# --- Codegen error ---
+cg_err:
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'c'
+	jal	write_byte
+	li	a0, 'g'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
+# ============================================================================
+# Codegen: top-level entry point
+# ============================================================================
+
+# codegen: generate machine code from AST
+#   a0=AST root, a1=output buffer start, a2=input buffer start
+#   Returns a0=output start, a1=output end
+codegen:
+	prologue s0 s1 s2 s3 s4 s5 s6 s7 x0
+	mv	s3, a0
+	mv	s0, a1
+	mv	s2, a2
+	mv	s4, a1
+
+	# Initialize symbol table
+	jal	sym_init
+	mv	s1, a0
+
+	# Emit NOP (success magic)
+	li	a0, 0x13
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+
+	# Emit: lui sp, 0x88000 (sp = top of 128MB RAM)
+	li	a0, 0x88000
+	li	a1, R_SP
+	li	a2, 0x37
+	jal	em_utype
+
+	# Emit: mv s0, sp (frame pointer = sp in generated code)
+	# addi x8, x2, 0
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_S0
+	li	a4, 0x13
+	jal	em_itype
+
+	# Generate code for each top-level expression
+	lw	s5, N_FIRST_CHILD(s3)
+cg_top_loop:
+	beqz	s5, cg_top_done
+	mv	a0, s5
+	jal	gen_expr
+	lw	s6, N_NEXT_SIB(s5)
+	beqz	s6, cg_top_last
+	# Pop intermediate result
+	li	a0, R_T0
+	jal	em_pop
+	mv	s5, s6
+	j	cg_top_loop
+cg_top_last:
+	# Last expression: pop into a0
+	li	a0, R_A0
+	jal	em_pop
+	mv	s5, s6
+	j	cg_top_loop
+cg_top_done:
+	# Emit exit sequence
+	# lui t0, 0x100 (test finisher device)
+	li	a0, 0x100
+	li	a1, R_T0
+	li	a2, 0x37
+	jal	em_utype
+	# lui t1, 5
+	li	a0, 5
+	li	a1, R_T1
+	li	a2, 0x37
+	jal	em_utype
+	# addi t1, t1, 0x555
+	li	a0, 0x555
+	li	a1, R_T1
+	li	a2, 0
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
+	# sw t1, 0(t0)
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	# wfi
+	li	a0, 0x10500073
+	sw	a0, 0(s0)
+	addi	s0, s0, 4
+	# j -4 (loop back to wfi)
+	li	a0, -4
+	li	a1, R_ZERO
+	jal	em_jtype
+
+	# Return output range
+	mv	a0, s4
+	mv	a1, s0
+	return
+
+# ============================================================================
+# Compile: entry point for the compilation pipeline
+# ============================================================================
+
+# compile: a0=input start, a1=input end
+#   Returns a0=output start, a1=output end
+compile:
+	prologue s0 s1 s2 s3 s4 x0
+	mv	s2, a0			# input start
+	mv	s3, a1			# input end
+	mv	s4, a1			# output buffer start = input end
+
+	# Init lexer
+	mv	a0, s2
+	mv	a1, s3
+	jal	lexer_init
+	mv	s0, a0			# s0 = lexer
+
+	# Allocate token node (reused by advance)
+	li	a0, N_SZ
+	jal	alloc
+	mv	s1, a0			# s1 = token node
+	li	a1, N_SZ
+	jal	memzero
+
+	# Build AST: parse as program (list of top-level expressions)
+	jal	alloc_node
+	mv	s3, a0
+	li	t0, NK_PROGRAM
+	sw	t0, N_KIND(s3)
+
+	# Prime the lexer (first advance)
+	jal	advance
+
+cmp_loop:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_TERM
+	beq	t0, t1, cmp_done
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s3
+	jal	append_child
+	# Skip optional semicolons between top-level exprs
+cmp_semi:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_SEMI
+	bne	t0, t1, cmp_loop
+	jal	advance
+	j	cmp_semi
 
 cmp_done:
-	# For now return empty output (start == end)
-	mv	a0, s2
-	mv	a1, s2
+	# Codegen: generate machine code from AST
+	mv	a0, s3			# AST root
+	mv	a1, s4			# output buffer start
+	mv	a2, s2			# input buffer start
+	jal	codegen			# returns a0=start, a1=end
 	return
 
 main:
@@ -1280,6 +3433,8 @@ kw_loop:
 	.ascii	"loop"
 kw_break:
 	.ascii	"break"
+kw_continue:
+	.ascii	"continue"
 kw_switch:
 	.ascii	"switch"
 kw_return:
