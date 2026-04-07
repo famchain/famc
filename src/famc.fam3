@@ -347,7 +347,8 @@ pd_done:
 .equ	ST_CNT,	0
 .equ	ST_NEXT,	4
 .equ	ST_CAP,	8
-.equ	ST_DATA,	12
+.equ	ST_CAPS,	12
+.equ	ST_DATA,	16
 
 # ============================================================================
 # Memory helpers
@@ -3033,7 +3034,9 @@ ge_ident:
 	# Check if outer variable (inside closure and index < boundary)
 	beqz	s11, gi_local
 	bge	a1, s11, gi_local
-	# Outer variable: emit lw t0, slot(s1)
+	# Outer variable: record capture scope boundary
+	sw	s11, ST_CAPS(s1)
+	# Emit lw t0, slot(s1)
 	mv	a0, s5
 	li	a1, R_S1
 	li	a2, 2
@@ -3550,6 +3553,9 @@ ga_chk_out:
 	li	s7, 1
 	j	ga_reassign
 ga_newvar:
+	# If assigning a closure with captures to a new variable,
+	# that's safe (var is in current scope with the captures).
+	sw	x0, ST_CAPS(s1)
 	# Variable not found — define new (both = and := declare)
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
@@ -3582,7 +3588,27 @@ ga_newvar:
 	jal	em_push
 	j	ge_done
 ga_reassign:
+	# Check: closure with captures escaping scope?
+	# ST_CAPS = capture boundary (s11 value from closure). If > 0,
+	# the closure has captures. If target var index < ST_CAPS,
+	# the target outlives the captures → error.
 	mv	s5, a0
+	mv	s6, a1
+	lw	t0, ST_CAPS(s1)
+	beqz	t0, ga_ra_ok
+	bge	s6, t0, ga_ra_ok
+	# Error: closure captures escaping scope
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'c'
+	jal	write_byte
+	li	a0, 'e'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+ga_ra_ok:
+	sw	x0, ST_CAPS(s1)
 ga_store:
 	# pop RHS value into t0
 	li	a0, R_T0
@@ -4091,6 +4117,13 @@ gc_closure:
 	# a0 = slot offset. Load code pointer from variable.
 	li	a1, R_T0
 	jal	em_var_load
+	# Emit: andi t0, t0, -2 (clear capture tag bit)
+	li	a0, -2
+	li	a1, R_T0
+	li	a2, 7
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
 	# Emit: mv s1, s0 (pass outer frame to closure)
 	li	a0, 0
 	li	a1, R_S0
@@ -4406,7 +4439,18 @@ gc_body:
 	jal	em_jtype
 	mv	s0, t3
 	addi	sp, sp, 16
-	# Push t0 (code pointer = closure value)
+	# If closure has captures, tag code pointer (set bit 0)
+	lw	t0, ST_CAPS(s1)
+	beqz	t0, gc_no_tag
+	# Emit: ori t0, t0, 1 (tag the code pointer)
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 6
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+gc_no_tag:
+	# Push t0 (code pointer, possibly tagged)
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
