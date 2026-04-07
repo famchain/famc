@@ -347,7 +347,7 @@ test_stack_ovf() {
 	# Patch: replace "li tp, 0" (0x00000213 at offset 0x14) with
 	# "lui tp, 0x88000" (0x88000237) — tp = sp, instant overflow on first push
 	local orig
-	orig=$(xxd -s 0x14 -l 4 -p "$bin")
+	orig=$(xxd -s 0x18 -l 4 -p "$bin")
 	if [[ "$orig" != "13020000" ]]; then
 		FAIL=$((FAIL + 1))
 		echo "  FAIL  $name (tp instruction not at expected offset, got $orig)"
@@ -356,7 +356,7 @@ test_stack_ovf() {
 	python3 -c "
 import struct, sys
 with open(sys.argv[1], 'r+b') as f:
-    f.seek(0x14)
+    f.seek(0x18)
     f.write(struct.pack('<I', 0x88000237))
 " "$bin"
 	local actual
