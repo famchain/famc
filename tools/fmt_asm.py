@@ -59,6 +59,9 @@ def format_line(line):
 
     # Pure comment line (no code before #)
     if code == '' and comment:
+        # Preserve indentation: if original line was indented, keep one tab
+        if stripped[0] in (' ', '\t'):
+            return '\t' + comment
         return comment
 
     # Label line: starts with non-whitespace, contains ':'

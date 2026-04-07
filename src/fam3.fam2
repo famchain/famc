@@ -89,20 +89,20 @@
 _start:
 	jal	t0, after_mnem_tab	# t0 = &mnem_table (byte after jal)
 mnem_table:
-# Each entry: 8-byte padded name + class[1] + f3[1] + f7[1] + pad[1] = 12B
-# Classes: 1=R, 2=I_arith, 3=I_shift, 4=I_load, 5=S, 6=B,
-#          7=U_lui, 8=U_auipc, 9=J_jal, 10=I_jalr,
-#          11=ps_li, 12=ps_mv, 13=ps_j, 14=ps_ret, 15=ps_beqz, 16=ps_bnez,
-#          17=ps_equ, 18=ps_set,
-#          19=ps_byte, 20=ps_half, 21=ps_word,
-#          22=ps_ascii, 23=ps_asciz, 24=ps_zero,
-#          25=ps_align, 26=ps_balign, 27=ps_fill,
-#          28=ps_lla, 29=ps_call, 30=ps_tail,
-#          31=ps_nop, 32=ps_neg, 33=ps_not,
-#          34=ps_seqz, 35=ps_snez, 36=ps_sltz, 37=ps_sgtz,
-#          38=ps_bgt, 39=ps_ble, 40=ps_bgtu, 41=ps_bleu,
-#          42=ps_prologue, 43=ps_epilogue, 44=ps_return,
-#          45=ps_macro, 48=ps_wfi
+	# Each entry: 8-byte padded name + class[1] + f3[1] + f7[1] + pad[1] = 12B
+	# Classes: 1=R, 2=I_arith, 3=I_shift, 4=I_load, 5=S, 6=B,
+	#          7=U_lui, 8=U_auipc, 9=J_jal, 10=I_jalr,
+	#          11=ps_li, 12=ps_mv, 13=ps_j, 14=ps_ret, 15=ps_beqz, 16=ps_bnez,
+	#          17=ps_equ, 18=ps_set,
+	#          19=ps_byte, 20=ps_half, 21=ps_word,
+	#          22=ps_ascii, 23=ps_asciz, 24=ps_zero,
+	#          25=ps_align, 26=ps_balign, 27=ps_fill,
+	#          28=ps_lla, 29=ps_call, 30=ps_tail,
+	#          31=ps_nop, 32=ps_neg, 33=ps_not,
+	#          34=ps_seqz, 35=ps_snez, 36=ps_sltz, 37=ps_sgtz,
+	#          38=ps_bgt, 39=ps_ble, 40=ps_bgtu, 41=ps_bleu,
+	#          42=ps_prologue, 43=ps_epilogue, 44=ps_return,
+	#          45=ps_macro, 48=ps_wfi
 	61 64 64  00 00 00 00 00  01 00 00 00
 	73 75 62  00 00 00 00 00  01 00 20 00
 	73 6C 6C  00 00 00 00 00  01 01 00 00
@@ -183,7 +183,7 @@ after_mnem_tab:
 
 	jal	t1, after_reg_tab	# t1 = &reg_table
 reg_table:
-# Each entry: 4-byte padded name + 4-byte reg number (LE) = 8 bytes
+	# Each entry: 4-byte padded name + 4-byte reg number (LE) = 8 bytes
 	7A 65 72 6F  00 00 00 00
 	72 61  00 00  01 00 00 00
 	73 70  00 00  02 00 00 00
@@ -241,14 +241,14 @@ after_reg_tab:
 	lui	t2, 0x110
 	add	s10, a0, t2		# token buf   = PC + 0x110000 (64 KB)
 	sb	x0, 32(s10)		# sticky EOT flag at token_buf+32
-# Zero counters, frame depth, macro globals, eol/pushback/pending flags
+	# Zero counters, frame depth, macro globals, eol/pushback/pending flags
 	addi	t2, s10, 64
 	addi	t3, s10, 488
 ll_cnt_z:
 	sw	x0, 0(t2)
 	addi	t2, t2, 4
 	bne	t2, t3, ll_cnt_z
-# Store buffer end addresses for bounds checking
+	# Store buffer end addresses for bounds checking
 	lui	t2, 0x90
 	add	t2, a0, t2
 	sw	t2, 488(s10)		# output_end  = PC + 0x90000
@@ -272,10 +272,10 @@ ll_cnt_z:
 
 main_loop:
 	jal	ra, read_token
-# s0 = token length. Sticky EOT flag at 32(s10) (set by read_token).
+	# s0 = token length. Sticky EOT flag at 32(s10) (set by read_token).
 	beqz	s0, ml_post
 
-# Check if last char is ':' → label definition
+	# Check if last char is ':' → label definition
 	add	t0, s10, s0
 	lbu	t1, -1(t0)
 	li	t2, 0x3A
@@ -283,7 +283,7 @@ main_loop:
 	j	ml_mnem
 
 ml_label:
-# Numeric local label? (len==2, first char 0-9)
+	# Numeric local label? (len==2, first char 0-9)
 	li	t2, 2
 	bne	s0, t2, ml_named_label
 	lbu	t0, 0(s10)
@@ -326,7 +326,7 @@ ml_post:
 finish_all:
 	jal	ra, fixup_pass
 	jal	ra, dump_output
-# fall through to powoff
+	# fall through to powoff
 powoff:
 	lui	s5, 0x100
 	lui	t0, 5
@@ -336,27 +336,27 @@ powoff_hang:
 	j	powoff_hang
 
 halt_err:
-# Emit "ENN@LINE\n" to UART.
-# a0 = error code (1-29), line number from 504(s10).
-# Error codes:
-#   E01 unrecognized mnemonic/macro   E02 read after EOT
-#   E03 token too long                E05 bad immediate
-#   E06 bad memory operand            E07 bad expression
-#   E08 bad register                  E09 bad %hi/%lo
-#   E10 bad branch target             E11 label name too long
-#   E12 duplicate label               E13 symtab overflow
-#   E14 fixup table overflow          E15 output buffer overflow
-#   E16 expansion buffer overflow     E17 unresolved symbol
-#   E18 unknown fixup type            E19 fixup name length error
-#   E21 B-type range overflow         E22 J-type range overflow
-#   E23 bad .equ/.set                 E24 bad string literal
-#   E25 bad prologue                  E26 bad epilogue
-#   E27 macro definition error        E28 macro invocation error
-#   E29 bad symbol lookup
+	# Emit "ENN@LINE\n" to UART.
+	# a0 = error code (1-29), line number from 504(s10).
+	# Error codes:
+	#   E01 unrecognized mnemonic/macro   E02 read after EOT
+	#   E03 token too long                E05 bad immediate
+	#   E06 bad memory operand            E07 bad expression
+	#   E08 bad register                  E09 bad %hi/%lo
+	#   E10 bad branch target             E11 label name too long
+	#   E12 duplicate label               E13 symtab overflow
+	#   E14 fixup table overflow          E15 output buffer overflow
+	#   E16 expansion buffer overflow     E17 unresolved symbol
+	#   E18 unknown fixup type            E19 fixup name length error
+	#   E21 B-type range overflow         E22 J-type range overflow
+	#   E23 bad .equ/.set                 E24 bad string literal
+	#   E25 bad prologue                  E26 bad epilogue
+	#   E27 macro definition error        E28 macro invocation error
+	#   E29 bad symbol lookup
 	mv	a1, a0			# save error code
 	li	t0, 69			# 'E'
 	jal	ra, wrch
-# Tens digit: a1 / 10
+	# Tens digit: a1 / 10
 	li	t2, 10
 	mv	a2, a1
 	li	a3, 0
@@ -372,14 +372,14 @@ he_tens:
 	jal	ra, wrch
 	li	t0, 64			# '@'
 	jal	ra, wrch
-# Print line number as decimal (up to 6 digits with leading-zero suppression)
+	# Print line number as decimal (up to 6 digits with leading-zero suppression)
 	lw	a1, 504(s10)		# line_count
 	li	a2, 1			# leading-zero suppression flag
-# 100000
+	# 100000
 	lui	a3, 0x19		# a3 = 0x19000 (not quite)
-# Actually: 100000 = 0x186A0. lui gives upper 20 bits.
-# Use repeated subtraction approach instead:
-# Divisors: push on stack, iterate
+	# Actually: 100000 = 0x186A0. lui gives upper 20 bits.
+	# Use repeated subtraction approach instead:
+	# Divisors: push on stack, iterate
 	addi	sp, sp, -24
 	li	t2, 100000
 	sw	t2, 0(sp)
@@ -405,7 +405,7 @@ he_dec_sub:
 	addi	a3, a3, 1
 	j	he_dec_sub
 he_dec_emit:
-# Skip leading zeros (but always print last digit)
+	# Skip leading zeros (but always print last digit)
 	addi	t5, t3, 4
 	beq	t5, t4, he_dec_pr	# last digit: always print
 	beqz	a3, he_dec_skip
@@ -435,9 +435,9 @@ halt_err_hang:
 # ============================================================================
 
 rdch:
-# No saves. Reads one char into t1. If input_flag (456(s10)) is set,
-# reads from expansion buffer at input_ptr (460) up to input_end (464),
-# resetting flag on exhaustion.
+	# No saves. Reads one char into t1. If input_flag (456(s10)) is set,
+	# reads from expansion buffer at input_ptr (460) up to input_end (464),
+	# resetting flag on exhaustion.
 	lw	t5, 456(s10)
 	beqz	t5, rdch_uart
 	lw	t5, 460(s10)
@@ -461,7 +461,7 @@ rdch_uart:
 	ret
 
 wrch:
-# Input: t0 = byte. No saves.
+	# Input: t0 = byte. No saves.
 	lbu	t5, 5(s5)
 	andi	t5, t5, 0x20
 	beqz	t5, wrch
@@ -477,20 +477,20 @@ wrch:
 # ============================================================================
 
 read_token:
-# Pushback: if active, clear flag and return with existing s10/s0.
+	# Pushback: if active, clear flag and return with existing s10/s0.
 	lw	t0, 476(s10)
 	beqz	t0, rt_entry
 	sw	x0, 476(s10)
 	ret
 rt_entry:
-# Transfer pending_nl → eol_flag (newline seen at end of prev token).
+	# Transfer pending_nl → eol_flag (newline seen at end of prev token).
 	lw	t0, 480(s10)
 	sw	t0, 472(s10)
 	sw	x0, 480(s10)
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
 	li	s0, 0
-# Zero token buffer
+	# Zero token buffer
 	mv	t0, s10
 	addi	t2, s10, 32
 rt_zero:
@@ -602,7 +602,7 @@ rt_str_lp:
 	beq	t1, t0, rt_done
 	j	rt_str_lp
 rt_str_bs:
-# append '\' then next char unconditionally
+	# append '\' then next char unconditionally
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
@@ -674,7 +674,7 @@ parse_reg:
 	lbu	t2, 0(t0)
 	li	t3, 120			# 'x'
 	bne	t2, t3, pr_abi
-# xN form: length 2 or 3
+	# xN form: length 2 or 3
 	li	t3, 2
 	beq	t1, t3, pr_x1
 	li	t3, 3
@@ -706,7 +706,7 @@ pr_x2:
 	bge	a0, t3, pr_bad
 	ret
 pr_abi:
-# ABI names are 2-4 chars. Longer input can't match.
+	# ABI names are 2-4 chars. Longer input can't match.
 	li	t2, 5
 	bge	t1, t2, pr_bad
 	beqz	t1, pr_bad
@@ -725,7 +725,7 @@ pr_a_cmp:
 	addi	t5, t5, 1
 	addi	t6, t6, -1
 	bnez	t6, pr_a_cmp
-# Matched first `t1` bytes. Now ensure entry bytes at positions t1..3 are null.
+	# Matched first `t1` bytes. Now ensure entry bytes at positions t1..3 are null.
 	li	t6, 4
 	sub	t6, t6, t1
 	beqz	t6, pr_a_found
@@ -755,10 +755,10 @@ parse_imm:
 	li	t2, 1			# sign
 	beqz	t1, pi_bad
 	lbu	t3, 0(t0)
-# Check for char literal: 'x' or '\n' etc.
+	# Check for char literal: 'x' or '\n' etc.
 	li	t4, 39			# single quote
 	bne	t3, t4, pi_not_char
-# Must end with quote: len>=3, last byte = quote
+	# Must end with quote: len>=3, last byte = quote
 	li	t4, 3
 	blt	t1, t4, pi_bad
 	add	t4, t0, t1
@@ -766,12 +766,12 @@ parse_imm:
 	lbu	t5, 0(t4)
 	li	t4, 39
 	bne	t5, t4, pi_bad
-# Check for backslash escape: 'x' (len=3) vs '\x' (len=4)
+	# Check for backslash escape: 'x' (len=3) vs '\x' (len=4)
 	li	t4, 3
 	beq	t1, t4, pi_char_plain
 	li	t4, 4
 	bne	t1, t4, pi_bad
-# Escape: '\x' — check second byte is backslash
+	# Escape: '\x' — check second byte is backslash
 	lbu	t3, 1(t0)
 	li	t4, 0x5C		# backslash
 	bne	t3, t4, pi_bad
@@ -971,7 +971,7 @@ rme_chk_eol:
 	sw	t2, 476(s10)		# push_back
 	j	rme_eval
 rme_accept:
-# Append s0 bytes from s10 to buf+t1
+	# Append s0 bytes from s10 to buf+t1
 	add	t2, t0, t1
 	mv	t3, s10
 	mv	t4, s0
@@ -1073,26 +1073,26 @@ rio_hilo_body:
 	beq	a0, a1, rio_bad		# empty inner
 	jal	ra, is_single_ident	# a2 = 1 if single ident, else 0
 	bnez	a2, rio_try_sym
-# Complex expr: eval_expr must fully resolve
+	# Complex expr: eval_expr must fully resolve
 	jal	ra, eval_expr
 	bne	a2, a1, rio_bad
 	j	rio_xform
 rio_try_sym:
-# Single ident: look up in symtab
+	# Single ident: look up in symtab
 	sub	a2, a1, a0		# length
 	mv	a1, a2
 	jal	ra, find_sym		# a0=val, a1=kind, a2=found
 	beqz	a2, rio_fixup
 rio_xform:
-# a0 = value; apply transform based on kind at 4(sp).
+	# a0 = value; apply transform based on kind at 4(sp).
 	lw	a4, 4(sp)
 	beqz	a4, rio_xf_hi
-# lo: mask low 12 bits (signed interpretation done by I-type encoder)
+	# lo: mask low 12 bits (signed interpretation done by I-type encoder)
 	slli	a0, a0, 20
 	srli	a0, a0, 20
 	j	rio_hilo_ret
 rio_xf_hi:
-# hi: ((value + 0x800) >> 12), low 20 bits
+	# hi: ((value + 0x800) >> 12), low 20 bits
 	lui	t0, 1
 	srli	t0, t0, 1		# t0 = 0x800
 	add	a0, a0, t0
@@ -1102,7 +1102,7 @@ rio_hilo_ret:
 	addi	sp, sp, 8
 	ret
 rio_fixup:
-# Record fixup: slot_type = kind+2 (2=U_hi20, 3=I_lo12)
+	# Record fixup: slot_type = kind+2 (2=U_hi20, 3=I_lo12)
 	addi	a0, s10, 4		# name_ptr
 	addi	a1, s0, -5		# name_len
 	sub	a2, s2, s1		# patch_offset
@@ -1135,7 +1135,7 @@ read_br_target:
 	sw	ra, 0(sp)
 	sw	a0, 4(sp)		# save slot_type
 	jal	ra, read_token
-# Check for local-label ref: len==2, digit, then 'f' or 'b'
+	# Check for local-label ref: len==2, digit, then 'f' or 'b'
 	li	t2, 2
 	bne	s0, t2, rbt_not_local
 	lbu	t0, 0(s10)
@@ -1150,7 +1150,7 @@ read_br_target:
 	beq	t1, t2, rbt_local
 	j	rbt_not_local
 rbt_local:
-# t0 = digit ASCII, t1 = 'f' or 'b'
+	# t0 = digit ASCII, t1 = 'f' or 'b'
 	addi	t3, t0, -48		# digit
 	slli	t4, t3, 2
 	add	t4, s10, t4
@@ -1172,7 +1172,7 @@ rbt_local_build:
 	sub	a2, s2, s1
 	lw	a3, 20(sp)		# slot_type (saved pre-16-push at 4(sp), now 20)
 	bnez	a3, rbt_local_nob	# non-B-type: record as-is
-# B-type → always relax: record J-type fixup at offset+4
+	# B-type → always relax: record J-type fixup at offset+4
 	addi	a2, a2, 4		# patch the JAL (2nd instruction)
 	li	a3, 1			# J-type slot
 	jal	ra, record_fixup_arg
@@ -1189,7 +1189,7 @@ rbt_bad:
 	j	halt_err
 rbt_not_local:
 	lbu	t0, 0(s10)
-# Letter or underscore → label
+	# Letter or underscore → label
 	li	t1, 65			# 'A'
 	blt	t0, t1, rbt_imm
 	li	t1, 91			# 'Z'+1
@@ -1206,14 +1206,14 @@ rbt_imm:
 	jal	ra, parse_imm
 	j	rbt_done
 rbt_label:
-# Length check (label name must fit in 16 bytes)
+	# Length check (label name must fit in 16 bytes)
 	li	t0, 17
 	blt	s0, t0, 12
 	li	a0, 11
 	j	halt_err
 	lw	a1, 4(sp)		# slot_type
 	bnez	a1, rbt_label_nob	# non-B-type: record as-is
-# B-type → always relax: record J-type fixup at offset+4 (for JAL trampoline)
+	# B-type → always relax: record J-type fixup at offset+4 (for JAL trampoline)
 	sub	a0, s2, s1
 	addi	a0, a0, 4		# patch the JAL (2nd instruction)
 	li	a1, 1			# J-type slot
@@ -1242,7 +1242,7 @@ define_label:
 	addi	t0, s0, -1		# position of ':'
 	add	t1, s10, t0
 	sb	x0, 0(t1)		# zero out the colon
-# Duplicate-label check via find_sym.
+	# Duplicate-label check via find_sym.
 	addi	sp, sp, -8
 	sw	ra, 0(sp)
 	mv	a0, s10
@@ -1288,7 +1288,7 @@ record_fixup:
 	mv	a3, a1
 	mv	a0, s10
 	mv	a1, s0
-# fall through
+	# fall through
 record_fixup_arg:
 	li	t0, 17
 	blt	a1, t0, 12
@@ -1455,8 +1455,8 @@ emit_b_inst:
 #   inverted-cond branch +8, then JAL x0 (placeholder with J-type fixup).
 # When flag is clear (numeric target), emits compact B-type via emit_b_inst.
 emit_branch_auto:
-# Always emit relaxed form: inverted branch +8, then JAL trampoline.
-# The fixup for the label target was recorded as J-type by read_br_target.
+	# Always emit relaxed form: inverted branch +8, then JAL trampoline.
+	# The fixup for the label target was recorded as J-type by read_br_target.
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
 	xori	a3, a3, 1		# invert branch condition
@@ -1548,7 +1548,7 @@ d_c18t:
 	bne	a0, t0, d_c19
 	j	do_ps_set
 d_c19:
-# classes 19-30: all far targets, use bne+j trampoline (as GAS relaxation).
+	# classes 19-30: all far targets, use bne+j trampoline (as GAS relaxation).
 	li	t0, 19
 	bne	a0, t0, d_c20
 	j	do_ps_byte
@@ -1789,7 +1789,7 @@ do_i_load:
 	jal	ra, read_reg_op
 	sw	a0, 8(sp)		# rd
 	jal	ra, read_mem_op
-# a0 = imm, a1 = rs1
+	# a0 = imm, a1 = rs1
 	mv	t0, a0			# imm
 	mv	t3, a1			# rs1
 	lw	ra, 0(sp)
@@ -1824,7 +1824,7 @@ do_s:
 	lw	a1, 4(sp)
 	lw	a2, 8(sp)		# rs2
 	addi	sp, sp, 12
-# imm[11:5] → bits 31:25 ; imm[4:0] → bits 11:7
+	# imm[11:5] → bits 31:25 ; imm[4:0] → bits 11:7
 	srli	t1, t0, 5
 	andi	t1, t1, 0x7F
 	slli	t1, t1, 25
@@ -1907,16 +1907,16 @@ do_u_auipc:
 do_j_jal:
 	addi	sp, sp, -8
 	sw	ra, 0(sp)
-# Read first operand: could be rd (register) or target (label/imm).
-# If it parses as a register, read the next token as target.
-# If not, default rd=ra and use this token as target (pushback).
+	# Read first operand: could be rd (register) or target (label/imm).
+	# If it parses as a register, read the next token as target.
+	# If not, default rd=ra and use this token as target (pushback).
 	jal	ra, read_token
 	mv	a0, s10
 	mv	a1, s0
 	jal	ra, parse_reg
 	li	t0, -1
 	bne	a0, t0, jal_have_rd
-# Not a register — default rd=ra, pushback token for read_br_target
+	# Not a register — default rd=ra, pushback token for read_br_target
 	li	a0, 1			# ra
 	li	t0, 1
 	sw	t0, 476(s10)		# pushback flag
@@ -1928,7 +1928,7 @@ jal_have_rd:
 	lw	ra, 0(sp)
 	lw	a1, 4(sp)
 	addi	sp, sp, 8
-# J-type encode
+	# J-type encode
 	li	t1, 0
 	srli	t2, t0, 20
 	andi	t2, t2, 1
@@ -1985,11 +1985,11 @@ do_ps_li:
 	sw	a0, 4(sp)		# rd
 	jal	ra, read_imm_op
 	sw	a0, 8(sp)		# imm
-# Fits in 12-bit signed?
+	# Fits in 12-bit signed?
 	slli	t0, a0, 20
 	srai	t0, t0, 20
 	beq	t0, a0, li_small
-# Large: emit lui rd, hi20(imm)
+	# Large: emit lui rd, hi20(imm)
 	lui	t0, 1
 	srli	t0, t0, 1		# 0x800
 	add	t0, a0, t0
@@ -1998,12 +1998,12 @@ do_ps_li:
 	lw	a1, 4(sp)
 	mv	a2, t0
 	jal	ra, emit_u_inst
-# Skip addi if lo12 == 0 (GAS-compatible optimization)
+	# Skip addi if lo12 == 0 (GAS-compatible optimization)
 	lw	a0, 8(sp)
 	slli	t0, a0, 20
 	srli	t0, t0, 20
 	beqz	t0, li_done
-# Emit addi rd, rd, lo12(imm)
+	# Emit addi rd, rd, lo12(imm)
 	li	a0, 0x13
 	lw	a1, 4(sp)
 	lw	a2, 4(sp)
@@ -2036,7 +2036,7 @@ do_ps_mv:
 	lw	ra, 0(sp)
 	lw	a1, 4(sp)
 	addi	sp, sp, 8
-# imm=0, rs1=t3, rd=a1, f3=0, opcode=0x13
+	# imm=0, rs1=t3, rd=a1, f3=0, opcode=0x13
 	andi	t3, t3, 0x1F
 	slli	t1, t3, 15
 	andi	a1, a1, 0x1F
@@ -2175,7 +2175,7 @@ fp_cmp:
 	addi	t2, t2, 1
 	addi	t3, t3, -1
 	bnez	t3, fp_cmp
-# matched — resolve
+	# matched — resolve
 	lw	t5, 16(a6)		# symbol value (absolute)
 	lw	t6, 16(t0)		# patch offset
 	lw	a7, 20(t0)		# slot_type
@@ -2207,7 +2207,7 @@ fp_noresolve:
 	j	halt_err
 fp_enc_b:
 	sub	t5, t5, t6		# PC-relative imm
-# Range check: B-type imm must fit in signed 13 bits (-4096..+4094).
+	# Range check: B-type imm must fit in signed 13 bits (-4096..+4094).
 	li	a7, 4096
 	blt	t5, a7, fpb_hi_ok
 	li	a0, 21
@@ -2242,7 +2242,7 @@ fpb_lo_ok:
 	j	fp_next
 fp_enc_j:
 	sub	t5, t5, t6		# PC-relative imm
-# Range check: J-type imm must fit in signed 21 bits (-1048576..1048575).
+	# Range check: J-type imm must fit in signed 21 bits (-1048576..1048575).
 	lui	a7, 0x100
 	blt	t5, a7, fpj_lo_ok
 	li	a0, 22
@@ -2277,12 +2277,12 @@ fpj_ok:
 	sw	t3, 0(t2)
 	j	fp_next
 fp_enc_u_hi20:
-# %hi = ((value + 0x800) >> 12), placed in bits 31:12 of word at patch.
+	# %hi = ((value + 0x800) >> 12), placed in bits 31:12 of word at patch.
 	lw	t3, 0(t2)
-# Preserve low 12 bits of t3 (opcode+rd); clear bits 31:12.
+	# Preserve low 12 bits of t3 (opcode+rd); clear bits 31:12.
 	slli	t3, t3, 20
 	srli	t3, t3, 20
-# Compute (value + 0x800) >> 12; keep low 20 bits; shift to bits 31:12.
+	# Compute (value + 0x800) >> 12; keep low 20 bits; shift to bits 31:12.
 	lui	t4, 1			# t4 = 0x1000
 	srli	t4, t4, 1		# t4 = 0x800
 	add	t5, t5, t4
@@ -2292,9 +2292,9 @@ fp_enc_u_hi20:
 	sw	t3, 0(t2)
 	j	fp_next
 fp_enc_i_lo12:
-# %lo = value & 0xFFF (12-bit signed), placed in bits 31:20.
+	# %lo = value & 0xFFF (12-bit signed), placed in bits 31:20.
 	lw	t3, 0(t2)
-# Clear bits 31:20: slli 12, srli 12.
+	# Clear bits 31:20: slli 12, srli 12.
 	slli	t3, t3, 12
 	srli	t3, t3, 12
 	slli	t5, t5, 20		# low 12 bits → bits 31:20
@@ -2319,7 +2319,7 @@ fp_enc_raw_b:
 	sb	t5, 0(t2)
 	j	fp_next
 fp_enc_uhi_pcrel:
-# delta = symbol - patch_offset; hi20 = (delta+0x800)>>12
+	# delta = symbol - patch_offset; hi20 = (delta+0x800)>>12
 	sub	t5, t5, t6
 	lw	t3, 0(t2)
 	slli	t3, t3, 20
@@ -2333,7 +2333,7 @@ fp_enc_uhi_pcrel:
 	sw	t3, 0(t2)
 	j	fp_next
 fp_enc_ilo_pcrp:
-# delta = symbol - (patch_offset - 4); lo12 = delta & 0xFFF
+	# delta = symbol - (patch_offset - 4); lo12 = delta & 0xFFF
 	addi	t6, t6, -4		# auipc PC = this PC - 4
 	sub	t5, t5, t6
 	lw	t3, 0(t2)
@@ -2385,7 +2385,7 @@ find_sym:
 	mv	t0, s3			# entry ptr
 fs_nx:
 	beq	t0, s4, fs_notfound
-# Compare first a1 bytes against [a0, a0+a1), then 16-a1 bytes against 0
+	# Compare first a1 bytes against [a0, a0+a1), then 16-a1 bytes against 0
 	mv	t1, a0			# src cursor
 	mv	t2, t0			# entry cursor
 	mv	t3, a1			# remaining of name
@@ -2431,7 +2431,7 @@ fs_bad:
 # ============================================================================
 
 parse_num:
-# Check for 0x / 0X prefix
+	# Check for 0x / 0X prefix
 	addi	t0, a0, 2
 	blt	a1, t0, pn_dec		# end < ptr+2 → can't have prefix
 	lbu	t1, 0(a0)
@@ -2654,7 +2654,7 @@ emu_lp:
 	sw	a0, 4(sp)
 	addi	a0, a2, 1
 	jal	ra, eval_unary
-# save a1(end) and a2(new_ptr) across mul_u32 (which clobbers a0/a1)
+	# save a1(end) and a2(new_ptr) across mul_u32 (which clobbers a0/a1)
 	addi	sp, sp, -8
 	sw	a1, 0(sp)
 	sw	a2, 4(sp)
@@ -2728,14 +2728,14 @@ ep_chk_us:
 	beq	t0, t1, ep_char
 	j	ep_bad
 ep_char:
-# Char literal: 'x' (3 bytes) or '\x' (4 bytes).
-# a0 = ptr at opening quote. Check for backslash escape.
+	# Char literal: 'x' (3 bytes) or '\x' (4 bytes).
+	# a0 = ptr at opening quote. Check for backslash escape.
 	addi	t2, a0, 1		# past opening quote
 	beq	t2, a1, ep_bad
 	lbu	t3, 0(t2)		# char after quote
 	li	t4, 0x5C		# backslash?
 	beq	t3, t4, ep_char_esc
-# Plain char: value = t3, expect closing quote at a0+2
+	# Plain char: value = t3, expect closing quote at a0+2
 	mv	a0, t3
 	addi	a2, t2, 1
 	beq	a2, a1, ep_bad
@@ -2745,7 +2745,7 @@ ep_char:
 	addi	a2, a2, 1		# past closing quote
 	j	ep_ret
 ep_char_esc:
-# Escape: '\x' — read escape char
+	# Escape: '\x' — read escape char
 	addi	t2, t2, 1		# past backslash
 	beq	t2, a1, ep_bad
 	lbu	t3, 0(t2)
@@ -2777,7 +2777,7 @@ epc_0:
 epc_lit:
 	mv	a0, t3
 epc_close:
-# Expect closing quote at t2+1
+	# Expect closing quote at t2+1
 	addi	a2, t2, 1
 	beq	a2, a1, ep_bad
 	lbu	t4, 0(a2)
@@ -2821,20 +2821,20 @@ find_sym_ident:
 fsi_scan:
 	beq	t0, a1, fsi_end
 	lbu	t1, 0(t0)
-# _
+	# _
 	li	t2, 95
 	beq	t1, t2, fsi_go
-# 0-9
+	# 0-9
 	li	t2, 48
 	blt	t1, t2, fsi_end
 	li	t2, 58
 	blt	t1, t2, fsi_go
-# A-Z
+	# A-Z
 	li	t2, 65
 	blt	t1, t2, fsi_end
 	li	t2, 91
 	blt	t1, t2, fsi_go
-# a-z
+	# a-z
 	li	t2, 97
 	blt	t1, t2, fsi_end
 	li	t2, 123
@@ -2876,7 +2876,7 @@ do_ps_equ:
 	li	t0, 1
 	blt	s0, t0, dpe_bad
 	sw	s0, 16(sp)
-# Copy name (s0 bytes) to 0(sp), zero-pad to 16
+	# Copy name (s0 bytes) to 0(sp), zero-pad to 16
 	mv	t1, s10
 	mv	t2, sp
 	mv	t3, s0
@@ -2897,14 +2897,14 @@ dpe_pad:
 	addi	t4, t4, -1
 	j	dpe_pad
 dpe_have:
-# Check duplicate
+	# Check duplicate
 	mv	a0, sp
 	lw	a1, 16(sp)
 	jal	ra, find_sym
 	bnez	a2, dpe_bad		# already defined → error
-# Read EXPR (multi-token), evaluate
+	# Read EXPR (multi-token), evaluate
 	jal	ra, read_multi_expr
-# Append symtab entry: name (0..15 of sp), value, kind=1
+	# Append symtab entry: name (0..15 of sp), value, kind=1
 	addi	t5, s4, 24
 	lw	t6, 492(s10)		# symtab_end
 	bgeu	t6, t5, 12		# symtab overflow
@@ -2968,7 +2968,7 @@ dps_pad:
 	j	dps_pad
 dps_have:
 	jal	ra, read_multi_expr
-# Find existing entry by scanning symtab
+	# Find existing entry by scanning symtab
 	mv	t0, s3
 dps_scan:
 	beq	t0, s4, dps_new
@@ -2983,7 +2983,7 @@ dps_cmp:
 	addi	t2, t2, 1
 	addi	t3, t3, -1
 	bnez	t3, dps_cmp
-# Matched: check kind
+	# Matched: check kind
 	lw	t4, 20(t0)
 	beqz	t4, dps_bad		# kind=0 (label) → refuse
 	sw	a0, 16(t0)		# update value
@@ -3170,7 +3170,7 @@ do_ps_fill:
 	mv	t2, a0			# value
 	lw	t0, 4(sp)		# count
 	lw	t1, 8(sp)		# size
-# Bounds check: compute total = count * size (via repeated add on size)
+	# Bounds check: compute total = count * size (via repeated add on size)
 	mv	t5, x0			# accumulator
 	mv	t6, t1			# iterate size times
 dpf_mul:
@@ -3243,7 +3243,7 @@ do_ps_asciz:
 # ============================================================================
 
 emit_string_body:
-# Validate: s0 >= 2, first and last chars are '"'
+	# Validate: s0 >= 2, first and last chars are '"'
 	li	t0, 2
 	blt	s0, t0, esb_bad
 	lbu	t0, 0(s10)
@@ -3253,9 +3253,9 @@ emit_string_body:
 	addi	t2, t2, -1		# ptr to last char
 	lbu	t0, 0(t2)
 	bne	t0, t1, esb_bad
-# Walk body: [s10+1, s10+s0-1)
+	# Walk body: [s10+1, s10+s0-1)
 	addi	t0, s10, 1		# cursor
-# t2 = end (exclusive)
+	# t2 = end (exclusive)
 esb_lp:
 	beq	t0, t2, esb_done
 	lbu	t3, 0(t0)
@@ -3728,7 +3728,7 @@ dll_z:
 # ============================================================================
 
 do_ps_prologue:
-# Stack: 0..47=regs[0..11], 48=nregs, 52=frame_size, 56=i, 60=ra
+	# Stack: 0..47=regs[0..11], 48=nregs, 52=frame_size, 56=i, 60=ra
 	addi	sp, sp, -64
 	sw	ra, 60(sp)
 	sw	x0, 48(sp)
@@ -3777,7 +3777,7 @@ dpp_cp:
 dpp_cpd:
 	addi	t2, t2, 1
 	sw	t2, 120(s10)
-# Emit addi sp, sp, -frame_size
+	# Emit addi sp, sp, -frame_size
 	lw	t1, 52(sp)
 	sub	t1, x0, t1
 	li	a0, 0x13
@@ -3786,14 +3786,14 @@ dpp_cpd:
 	li	a3, 0
 	mv	a4, t1
 	jal	ra, emit_i_inst
-# Emit sw ra, 0(sp)
+	# Emit sw ra, 0(sp)
 	li	a0, 0x23
 	li	a1, 2
 	li	a2, 1
 	li	a3, 2
 	li	a4, 0
 	jal	ra, emit_s_inst
-# Emit sw regs[i], (i+1)*4(sp) loop
+	# Emit sw regs[i], (i+1)*4(sp) loop
 	sw	x0, 56(sp)
 dpp_emit:
 	lw	t0, 56(sp)
@@ -3862,14 +3862,14 @@ dpe_lp:
 	sw	t0, 12(sp)
 	j	dpe_lp
 dpe_end:
-# Emit lw ra, 0(sp)
+	# Emit lw ra, 0(sp)
 	li	a0, 0x03
 	li	a1, 1
 	li	a2, 2
 	li	a3, 2
 	li	a4, 0
 	jal	ra, emit_i_inst
-# Emit addi sp, sp, frame_size
+	# Emit addi sp, sp, frame_size
 	lw	t0, 0(sp)
 	li	a0, 0x13
 	li	a1, 2
@@ -3889,7 +3889,7 @@ do_ps_return:
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
 	jal	ra, do_ps_epilogue
-# Emit ret (jalr x0, ra, 0)
+	# Emit ret (jalr x0, ra, 0)
 	lui	t0, 8
 	addi	t0, t0, 0x067
 	mv	a0, t0
@@ -3917,18 +3917,18 @@ do_ps_macro:
 	lw	t0, 448(s10)
 	li	t1, 32
 	bge	t0, t1, dpm_bad
-# Read NAME token
+	# Read NAME token
 	jal	ra, read_token
 	li	t0, 17
 	bge	s0, t0, dpm_bad
-# entry_ptr = macro_table + count*48
+	# entry_ptr = macro_table + count*48
 	lw	t0, 448(s10)
 	slli	t1, t0, 4
 	slli	t2, t0, 5
 	add	t1, t1, t2
 	add	t1, t1, s10
 	addi	t1, t1, 512
-# Zero name field
+	# Zero name field
 	mv	t2, t1
 	li	t3, 16
 dpm_z:
@@ -3936,7 +3936,7 @@ dpm_z:
 	addi	t2, t2, 1
 	addi	t3, t3, -1
 	bnez	t3, dpm_z
-# Copy name from s10 to entry
+	# Copy name from s10 to entry
 	mv	t2, s10
 	mv	t3, t1
 	mv	t4, s0
@@ -3949,15 +3949,15 @@ dpm_cp:
 	addi	t4, t4, -1
 	j	dpm_cp
 dpm_count:
-# Read COUNT token, evaluate
+	# Read COUNT token, evaluate
 	jal	ra, read_token
 	mv	a0, s10
 	add	a1, s10, s0
 	jal	ra, eval_expr
-# a0 = arg_count (must be 0..9)
+	# a0 = arg_count (must be 0..9)
 	li	t2, 10
 	bge	a0, t2, dpm_bad
-# Reload entry_ptr
+	# Reload entry_ptr
 	lw	t0, 448(s10)
 	slli	t1, t0, 4
 	slli	t2, t0, 5
@@ -3968,7 +3968,7 @@ dpm_count:
 	lw	t2, 452(s10)
 	sw	t2, 28(t1)		# arg_names_start
 	mv	t3, t2			# body write cursor
-# Read arg_count arg name tokens, append to body buf space-separated.
+	# Read arg_count arg name tokens, append to body buf space-separated.
 	li	t4, 0
 dpm_argn:
 	beq	t4, a0, dpm_argn_done
@@ -4020,7 +4020,7 @@ dpm_body:
 	lw	t1, 0(sp)
 	lw	t3, 4(sp)
 	addi	sp, sp, 8
-# Check if token is ".endm" (5 chars)
+	# Check if token is ".endm" (5 chars)
 	li	t2, 5
 	bne	s0, t2, dpm_append
 	lbu	t2, 0(s10)
@@ -4038,7 +4038,7 @@ dpm_body:
 	lbu	t2, 4(s10)
 	li	t4, 109
 	bne	t2, t4, dpm_append
-# Matched .endm → finalize
+	# Matched .endm → finalize
 	lw	t2, 20(t1)
 	sub	t4, t3, t2
 	sw	t4, 24(t1)
@@ -4055,7 +4055,7 @@ dpm_append:
 	li	t4, 2048
 	add	t4, s10, t4
 	add	t4, t4, t3		# body write ptr
-# Emit leading separator if body has content.
+	# Emit leading separator if body has content.
 	lw	a4, 20(t1)		# body_start
 	beq	t3, a4, dpm_copy
 	lw	a5, 472(s10)		# eol_flag
@@ -4195,17 +4195,17 @@ iml_esc:
 	lbu	t6, 0(t1)
 	li	a2, 64			# '@'
 	beq	t6, a2, iml_at
-# Digit?
+	# Digit?
 	li	a2, 49			# '1'
 	blt	t6, a2, iml_try_named
 	li	a2, 58			# '9'+1
 	bge	t6, a2, iml_try_named
 	addi	t6, t6, -49		# index 0..8
-# Advance t1 past the digit
+	# Advance t1 past the digit
 	addi	t1, t1, 1
 	j	iml_use_idx
 iml_try_named:
-# Identifier start (letter or underscore)?
+	# Identifier start (letter or underscore)?
 	li	a2, 95
 	beq	t6, a2, iml_scan_id
 	li	a2, 65
@@ -4217,7 +4217,7 @@ iml_try_named:
 	li	a2, 123
 	blt	t6, a2, iml_scan_id
 iml_pass1:
-# Not an identifier start: emit '\' + this char raw
+	# Not an identifier start: emit '\' + this char raw
 	addi	a2, t5, 2
 	lw	a3, 500(s10)		# expbuf_end
 	bltu	a2, a3, 12		# expansion buffer overflow
@@ -4231,7 +4231,7 @@ iml_pass1:
 	addi	t1, t1, 1
 	j	iml_exp
 iml_scan_id:
-# Scan id starting at t1, save start in sp-local then find end.
+	# Scan id starting at t1, save start in sp-local then find end.
 	addi	sp, sp, -16
 	sw	t1, 0(sp)		# id_start
 	mv	t6, t1			# cursor
@@ -4258,13 +4258,13 @@ iml_sc_cont:
 	j	iml_sc_lp
 iml_sc_done:
 	sw	t6, 4(sp)		# id_end
-# id length = t6 - t1 (saved id_start)
+	# id length = t6 - t1 (saved id_start)
 	lw	a2, 0(sp)
 	sub	a3, t6, a2		# id_len
 	sw	a3, 8(sp)
-# Walk arg names list
+	# Walk arg names list
 	lw	a4, 4(sp)		# need entry_ptr; a4 unused yet
-# entry_ptr is at 4(sp+16)=20(sp) after push
+	# entry_ptr is at 4(sp+16)=20(sp) after push
 	lw	a4, 20(sp)		# entry_ptr (saved pre-push)
 	lw	a5, 28(a4)		# arg_names_start
 	lw	a6, 20(a4)		# body_start = arg names end
@@ -4275,7 +4275,7 @@ iml_sc_done:
 	li	t6, 0			# index
 iml_find:
 	beq	a5, a6, iml_not_found
-# name starts at a5, find space
+	# name starts at a5, find space
 	mv	a7, a5
 iml_ff:
 	lbu	t0, 0(a7)
@@ -4287,7 +4287,7 @@ iml_fe:
 	sub	t0, a7, a5		# this name's len
 	lw	t3, 8(sp)		# id_len
 	bne	t0, t3, iml_fnext
-# Compare bytes: id vs this name
+	# Compare bytes: id vs this name
 	lw	a4, 0(sp)		# id start
 	mv	a3, a5			# name start
 	mv	t3, t0			# count
@@ -4301,7 +4301,7 @@ iml_fc:
 	addi	t3, t3, -1
 	j	iml_fc
 iml_fnext:
-# skip to after space, next arg
+	# skip to after space, next arg
 	mv	t0, a5
 iml_fskip:
 	lbu	a2, 0(t0)
@@ -4312,12 +4312,12 @@ iml_fskip:
 	addi	t6, t6, 1
 	j	iml_find
 iml_match:
-# t6 = index; restore t1 = id_end, cleanup stack
+	# t6 = index; restore t1 = id_end, cleanup stack
 	lw	t1, 4(sp)
 	addi	sp, sp, 16
 	j	iml_use_idx
 iml_not_found:
-# Passthrough: emit '\' + all id bytes, advance t1
+	# Passthrough: emit '\' + all id bytes, advance t1
 	lw	a4, 0(sp)		# id_start
 	lw	a5, 4(sp)		# id_end
 	addi	sp, sp, 16
@@ -4365,8 +4365,8 @@ iml_argc:
 	addi	a3, a3, -1
 	j	iml_argc
 iml_argd:
-# t1 has already been advanced past the \N or \name by the esc handler.
-# Do not add a trailing space — the arg substitutes transparently.
+	# t1 has already been advanced past the \N or \name by the esc handler.
+	# Do not add a trailing space — the arg substitutes transparently.
 	j	iml_exp
 iml_at:
 	lw	a2, 468(s10)
@@ -4394,7 +4394,7 @@ iml_at_done:
 	addi	t1, t1, 1
 	j	iml_exp
 iml_done:
-# Append trailing newline so the last body token terminates cleanly.
+	# Append trailing newline so the last body token terminates cleanly.
 	lw	a2, 500(s10)		# expbuf_end
 	bltu	t5, a2, 12		# expansion buffer overflow
 	li	a0, 16

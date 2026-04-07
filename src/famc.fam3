@@ -23,6 +23,20 @@ wb_poll:
 	sb	a0, 0(t0)
 	return
 
+# write_data: write bytes from a0 (start) to a1 (end) to UART.
+write_data:
+	prologue	s0 s1 x0
+	mv	s0, a0			# cursor
+	mv	s1, a1			# end
+wd_loop:
+	bgeu	s0, s1, wd_done
+	lbu	a0, 0(s0)
+	jal	write_byte
+	addi	s0, s0, 1
+	j	wd_loop
+wd_done:
+	return
+
 # read_byte: read one byte from UART into a0. Spins until RX ready.
 read_byte:
 	prologue	t0 t1 x0
@@ -32,6 +46,23 @@ rb_poll:
 	andi	t1, t1, 1		# RX data ready (bit 0 of LSR)
 	beqz	t1, rb_poll
 	lbu	a0, 0(t0)
+	return
+
+# read_data: read UART bytes into tp until EOT (0x04).
+# Returns a0 = number of bytes read. Advances tp past stored data.
+read_data:
+	prologue	s0 x0
+	mv	s0, tp			# save start
+rd_loop:
+	jal	read_byte
+	li	t0, 4			# EOT
+	beq	a0, t0, rd_done
+	sb	a0, 0(tp)
+	addi	tp, tp, 1
+	j	rd_loop
+rd_done:
+	sub	a0, tp, s0		# byte count
+	sub	tp, tp, s0		# restore tp
 	return
 
 # print_hex: print 32-bit value in a0 as "0xHHHHHHHH"
@@ -116,29 +147,29 @@ pd_done:
 	addi	sp, sp, 40
 	return
 
+compile:
+	ret
+
 main:
+	# Setup gp and stack pointer
 	lla	gp, data
 	addi	gp, gp, 15
 	andi	gp, gp, -16
-	li	sp, 0x100000
+	li	sp, 0x4000000
 	add	sp, sp, gp
 
-	li	a0, 0xDEADBEEF
-	jal	print_hex
-	li	a0, '\n'
-	jal	write_byte
-	li	a0, 12345
-	jal	print_dec
-	li	a0, '\n'
-	jal	write_byte
-	li	a0, 0x1234
-	jal	print_hex
-	li	a0, '\n'
-	jal	write_byte
-	li	a0, 9999
-	jal	print_dec
-	li	a0, '\n'
-	jal	write_byte
+	# tp points to top of stack
+	mv	tp, sp
+	mv	s0, tp			# save start of data buffer
+	jal	read_data		# a0 = byte count
+	add	s1, s0, a0		# end = start + count
+	mv	a0, s0
+	mv	a1, s1
+	jal	compile
+	mv	a0, s0
+	mv	a1, s1
+	jal	write_data
+
 	j	exit
 
 data:
