@@ -2742,6 +2742,49 @@ sf_fail:
 	jal	write_byte
 	j	exit
 
+# sym_try: like sym_find but returns -1 if not found
+#   a0=name offset, a1=name length, s1=symtab, s2=input base
+#   Returns a0 = stack slot offset, or -1 if not found
+sym_try:
+	prologue s3 s4 s5 s6 s7 x0
+	mv	s3, a0
+	mv	s4, a1
+	lw	s5, ST_CNT(s1)
+	addi	s5, s5, -1
+sy_loop:
+	blt	s5, x0, sy_fail
+	slli	t0, s5, 4
+	addi	t0, t0, ST_DATA
+	add	t0, s1, t0
+	lw	t1, SY_LEN(t0)
+	bne	s4, t1, sy_next
+	lw	t1, SY_OFF(t0)
+	add	t1, s2, t1
+	add	t2, s2, s3
+	mv	t3, s4
+sy_cmp:
+	beqz	t3, sy_found
+	lbu	t4, 0(t1)
+	lbu	t5, 0(t2)
+	bne	t4, t5, sy_next
+	addi	t1, t1, 1
+	addi	t2, t2, 1
+	addi	t3, t3, -1
+	j	sy_cmp
+sy_found:
+	slli	t0, s5, 4
+	addi	t0, t0, ST_DATA
+	add	t0, s1, t0
+	lw	a0, SY_SLOT(t0)
+	j	sy_done
+sy_next:
+	addi	s5, s5, -1
+	j	sy_loop
+sy_fail:
+	li	a0, -1
+sy_done:
+	return
+
 # ============================================================================
 # Codegen: expression code generation
 # ============================================================================
@@ -3102,9 +3145,12 @@ ge_assign:
 	beq	t0, t1, ga_deref
 	j	cg_err
 ga_ident:
-	li	t0, NK_ASSIGN_MUT
-	bne	s5, t0, ga_exist
-	# := define new variable
+	# Try to find existing variable first
+	lw	a0, N_LOC_OFF(s6)
+	lw	a1, N_LOC_LEN(s6)
+	jal	sym_try
+	bge	a0, x0, ga_reassign
+	# Variable not found — define new (both = and := declare)
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_def
@@ -3135,10 +3181,7 @@ ga_ident:
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
-ga_exist:
-	lw	a0, N_LOC_OFF(s6)
-	lw	a1, N_LOC_LEN(s6)
-	jal	sym_find
+ga_reassign:
 	mv	s5, a0
 ga_store:
 	# pop value into t0
