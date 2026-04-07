@@ -1610,13 +1610,17 @@ px_break:
 	mv	a1, s4
 	jal	copy_loc
 	jal	advance			# consume 'break'
-	# Check if next token could be a value (not ; or } or term)
+	# Check if next token could be a value
 	lw	t0, N_KIND(s1)
 	li	t1, NK_SEMI
 	beq	t0, t1, px_infix
 	li	t1, NK_RBRACE
 	beq	t0, t1, px_infix
 	li	t1, NK_TERM
+	beq	t0, t1, px_infix
+	li	t1, NK_COLON
+	beq	t0, t1, px_infix
+	li	t1, NK_RPAREN
 	beq	t0, t1, px_infix
 	li	a0, P_NONE
 	jal	parse_expr
@@ -1893,11 +1897,24 @@ ix_ck_ternary:
 	mv	a1, a0
 	mv	a0, s4
 	jal	append_child
-	li	a0, NK_COLON
-	jal	expect
+	# Optional else branch (: expr)
+	lw	t0, N_KIND(s1)
+	li	t1, NK_COLON
+	bne	t0, t1, ix_no_else
+	jal	advance
 	li	a0, P_TERNARY
-	jal	parse_expr		# else branch
+	jal	parse_expr
 	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+ix_no_else:
+	# Default else = 0
+	jal	alloc_node
+	mv	a1, a0
+	li	t0, NK_NUMBER
+	sw	t0, N_KIND(a1)
+	sw	x0, N_LOC_LEN(a1)
 	mv	a0, s4
 	jal	append_child
 	j	px_infix
@@ -2826,6 +2843,10 @@ gen_expr:
 	beq	s4, t0, ge_asm
 	li	t0, NK_STR
 	beq	s4, t0, ge_str
+	li	t0, NK_BREAK
+	beq	s4, t0, ge_break
+	li	t0, NK_CONTINUE
+	beq	s4, t0, ge_cont
 	j	cg_err
 
 # --- Number literal ---
@@ -3122,6 +3143,11 @@ gbo_push:
 # --- Prefix unary ---
 ge_prefix:
 	lw	s5, N_DATA(s3)
+	# Prefix ++/-- handled separately (don't gen_expr child)
+	li	t0, NK_DBL_PLUS
+	beq	s5, t0, gp_preinc
+	li	t0, NK_DBL_HYPHEN
+	beq	s5, t0, gp_preinc
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
 	li	t0, NK_STAR
@@ -3221,7 +3247,8 @@ ga_ident:
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_try
-	bge	a0, x0, ga_reassign
+	li	t0, -1
+	bne	a0, t0, ga_reassign
 	# Variable not found — define new (both = and := declare)
 	lw	a0, N_LOC_OFF(s6)
 	lw	a1, N_LOC_LEN(s6)
@@ -3331,18 +3358,155 @@ gbl_empty:
 	jal	em_push
 	j	ge_done
 
-# --- Loop (infinite, no break support yet) ---
+# --- Loop with break/continue ---
+# Loop context (heap-allocated):
+#   0: old s10   4: old s11
+#   8: loop_start (emit addr)  12: sp-save slot offset
+#   16: break count  20: break array ptr
 ge_loop:
-	mv	s5, s0
-	lw	a0, N_FIRST_CHILD(s3)
-	jal	gen_expr
-	# pop body result
-	li	a0, R_T0
-	jal	em_pop
-	# j back to loop start
-	sub	a0, s5, s0
+	# Allocate loop context
+	li	a0, 24
+	jal	alloc
+	sw	s10, 0(a0)
+	sw	s11, 4(a0)
+	mv	s10, a0
+	# Allocate break fixup array (max 64)
+	li	a0, 256
+	jal	alloc
+	sw	a0, 20(s10)
+	sw	x0, 16(s10)
+	# Allocate hidden sp-save slot
+	lw	t0, ST_NEXT(s1)
+	addi	t0, t0, -4
+	sw	t0, ST_NEXT(s1)
+	sw	t0, 12(s10)
+	# Emit: reserve slot (addi sp, sp, -4 + overflow check)
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
 	li	a1, R_ZERO
 	jal	em_jtype
+	# loop_start: emit sw sp, slot(s0)
+	sw	s0, 8(s10)
+	lw	a0, 12(s10)
+	li	a1, R_SP
+	jal	em_var_store
+	# Generate body
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	# Pop body result
+	li	a0, R_T0
+	jal	em_pop
+	# j loop_start
+	lw	t0, 8(s10)
+	sub	a0, t0, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Backpatch all breaks to here
+	lw	t2, 16(s10)
+	lw	t3, 20(s10)
+gl_bpatch:
+	beqz	t2, gl_bdone
+	lw	a0, 0(t3)
+	sub	a1, s0, a0
+	addi	sp, sp, -8
+	sw	t2, 0(sp)
+	sw	t3, 4(sp)
+	jal	patch_jal
+	lw	t2, 0(sp)
+	lw	t3, 4(sp)
+	addi	sp, sp, 8
+	addi	t3, t3, 4
+	addi	t2, t2, -1
+	j	gl_bpatch
+gl_bdone:
+	# Break already pushed its value onto the restored stack.
+	# Restore old loop context
+	lw	s11, 4(s10)
+	lw	s10, 0(s10)
+	j	ge_done
+
+# --- Break ---
+ge_break:
+	# Check for break value (first child)
+	lw	s5, N_FIRST_CHILD(s3)
+	beqz	s5, gb_noval
+	# Evaluate break value → on stack
+	mv	a0, s5
+	jal	gen_expr
+	# Pop value into t0 before restoring sp
+	li	a0, R_T0
+	jal	em_pop
+	j	gb_restore
+gb_noval:
+	# No value: load 0 into t0
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+gb_restore:
+	# Restore sp from hidden slot
+	lw	a0, 12(s10)
+	li	a1, R_SP
+	jal	em_var_load
+	# Push break value (t0) — manually, no overflow check (sp is restored)
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	# Record break fixup
+	lw	t0, 16(s10)
+	lw	t1, 20(s10)
+	slli	t2, t0, 2
+	add	t2, t1, t2
+	sw	s0, 0(t2)
+	addi	t0, t0, 1
+	sw	t0, 16(s10)
+	# Emit placeholder j loop_end
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Push dummy (unreachable, maintains stack invariant)
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Continue ---
+ge_cont:
+	# Emit: lw sp, slot(s0) — restore sp to loop start
+	lw	a0, 12(s10)
+	li	a1, R_SP
+	jal	em_var_load
+	# j loop_start (backward jump)
+	lw	t0, 8(s10)
+	sub	a0, t0, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Push dummy (unreachable)
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
 	j	ge_done
 
 # --- Ternary (cond ? then : else) ---
@@ -3579,6 +3743,43 @@ gpo_store:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_store
+	j	ge_done
+
+# --- Prefix ++/-- (returns new value) ---
+gp_preinc:
+	lw	s6, N_FIRST_CHILD(s3)
+	lw	t0, N_KIND(s6)
+	li	t1, NK_IDENT
+	bne	t0, t1, cg_err
+	# Look up variable
+	lw	a0, N_LOC_OFF(s6)
+	lw	a1, N_LOC_LEN(s6)
+	jal	sym_find
+	mv	s7, a0
+	# Load current value
+	mv	a0, s7
+	li	a1, R_T0
+	jal	em_var_load
+	# Increment or decrement
+	li	t0, NK_DBL_PLUS
+	beq	s5, t0, gpi_inc
+	li	a0, -1
+	j	gpi_emit
+gpi_inc:
+	li	a0, 1
+gpi_emit:
+	li	a1, R_T0
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	# Store back
+	mv	a0, s7
+	li	a1, R_T0
+	jal	em_var_store
+	# Push new value
+	li	a0, R_T0
+	jal	em_push
 	j	ge_done
 
 ge_done:

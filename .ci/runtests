@@ -225,6 +225,9 @@ test_output  "computed char"           'uart := 0x10000000; x := 3 + 4; @uart = 
 echo "=== Loops ==="
 test_compiles "infinite loop"           "loop { }"
 test_compiles "loop with body"          "x := 0; loop { x = x + 1 }"
+test_runs    "loop break"              "i := 0; loop { i = i + 1; (i == 5) ? break : 0 }; i"
+test_runs    "loop continue"           "i := 0; s := 0; loop { i = i + 1; (i > 10) ? break : 0; ((i & 1) == 0) ? continue : 0; s = s + i }; s"
+test_runs    "nested loops"            "i := 0; j := 0; loop { i = i + 1; (i > 3) ? break : 0; loop { j = j + 1; (j > 3) ? break : 0 } }; i + j"
 
 # ============================================================================
 echo "=== Asm blocks ==="
