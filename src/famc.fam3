@@ -200,32 +200,33 @@ pd_done:
 .equ	NK_AMP_AMP,	46
 .equ	NK_PIPE_PIPE,	47
 .equ	NK_AT,		48
-.equ	NK_FAT_ARROW,	49
-.equ	NK_LOOP,	50
-.equ	NK_BREAK,	51
-.equ	NK_CONTINUE,	52
-.equ	NK_SWITCH,	53
-.equ	NK_RETURN,	54
-.equ	NK_ASM,		55
-.equ	NK_STRUCT,	56
-.equ	NK_SIZEOF,	57
-.equ	NK_IDENT,	58
-.equ	NK_NUMBER,	59
-.equ	NK_STR,		60
-.equ	NK_CHAR,	61
+.equ	NK_HASH,	49
+.equ	NK_FAT_ARROW,	50
+.equ	NK_LOOP,	51
+.equ	NK_BREAK,	52
+.equ	NK_CONTINUE,	53
+.equ	NK_SWITCH,	54
+.equ	NK_RETURN,	55
+.equ	NK_ASM,		56
+.equ	NK_STRUCT,	57
+.equ	NK_SIZEOF,	58
+.equ	NK_IDENT,	59
+.equ	NK_NUMBER,	60
+.equ	NK_STR,		61
+.equ	NK_CHAR,	62
 
 # AST-only node kinds
-.equ	NK_PROGRAM,	62
-.equ	NK_BINOP,	63
-.equ	NK_PREFIX,	64
-.equ	NK_POSTFIX,	65
-.equ	NK_ASSIGN,	66
-.equ	NK_CALL,	67
-.equ	NK_TERNARY,	68
-.equ	NK_BLOCK,	69
-.equ	NK_CLOSURE,	70
-.equ	NK_INDEX,	71
-.equ	NK_SELF,	72
+.equ	NK_PROGRAM,	63
+.equ	NK_BINOP,	64
+.equ	NK_PREFIX,	65
+.equ	NK_POSTFIX,	66
+.equ	NK_ASSIGN,	67
+.equ	NK_CALL,	68
+.equ	NK_TERNARY,	69
+.equ	NK_BLOCK,	70
+.equ	NK_CLOSURE,	71
+.equ	NK_INDEX,	72
+.equ	NK_SELF,	73
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -739,6 +740,12 @@ lexer_init:
 	lla	a1, tok_at
 	li	a2, 1
 	li	a3, NK_AT
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_hash
+	li	a2, 1
+	li	a3, NK_HASH
 	li	a4, 0
 	jal	lex_register
 
@@ -1461,6 +1468,8 @@ parse_expr:
 	beq	s3, t0, px_unary
 	li	t0, NK_AT
 	beq	s3, t0, px_unary
+	li	t0, NK_HASH
+	beq	s3, t0, px_unary
 	li	t0, NK_DBL_PLUS
 	beq	s3, t0, px_unary
 	li	t0, NK_DBL_HYPHEN
@@ -1491,6 +1500,10 @@ parse_expr:
 	beq	s3, t0, px_struct
 	li	t0, NK_SIZEOF
 	beq	s3, t0, px_sizeof
+	li	t0, NK_PIPE
+	beq	s3, t0, px_closure
+	li	t0, NK_PIPE_PIPE
+	beq	s3, t0, px_closure0
 
 	# Unknown prefix — error
 	li	a0, 'E'
@@ -1843,6 +1856,65 @@ px_sizeof:
 	jal	expect
 	j	px_infix
 
+	# --- Prefix: closure |params| body ---
+px_closure:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_CLOSURE
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance
+cl_params:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_PIPE
+	beq	t0, t1, cl_body
+	li	t1, NK_TERM
+	beq	t0, t1, cl_body
+	jal	alloc_node
+	mv	s6, a0
+	lw	t0, N_KIND(s1)
+	sw	t0, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s4
+	mv	a1, s6
+	jal	append_child
+	jal	advance
+	lw	t0, N_KIND(s1)
+	li	t1, NK_COMMA
+	bne	t0, t1, cl_params
+	jal	advance
+	j	cl_params
+cl_body:
+	li	a0, NK_PIPE
+	jal	expect
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
+	# --- Prefix: closure || body (zero params) ---
+px_closure0:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_CLOSURE
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	j	px_infix
+
 	# --- Infix loop (Pratt) ---
 px_infix:
 	# Peek at next token kind (already in s1 from advance/expect)
@@ -1902,7 +1974,7 @@ ix_ck_ternary:
 	li	t1, NK_COLON
 	bne	t0, t1, ix_no_else
 	jal	advance
-	li	a0, P_TERNARY
+	li	a0, P_NONE
 	jal	parse_expr
 	mv	a1, a0
 	mv	a0, s4
@@ -2847,6 +2919,8 @@ gen_expr:
 	beq	s4, t0, ge_break
 	li	t0, NK_CONTINUE
 	beq	s4, t0, ge_cont
+	li	t0, NK_CLOSURE
+	beq	s4, t0, ge_closure
 	j	cg_err
 
 # --- Number literal ---
@@ -3000,6 +3074,12 @@ ge_binop:
 	beq	s5, t0, gbo_eq
 	li	t0, NK_NE
 	beq	s5, t0, gbo_ne
+	li	t0, NK_STAR
+	beq	s5, t0, gbo_mul
+	li	t0, NK_SLASH
+	beq	s5, t0, gbo_div
+	li	t0, NK_PERCENT
+	beq	s5, t0, gbo_mod
 	j	cg_err
 
 gbo_add:
@@ -3059,28 +3139,29 @@ gbo_srl:
 	jal	em_rtype
 	j	gbo_push
 gbo_slt:
+	# a < b (unsigned): sltu t0, t0, t1
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
-	li	a3, 2
+	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_gt:
-	# a > b → slt t0, t1, t0
+	# a > b (unsigned): sltu t0, t1, t0
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
-	li	a3, 2
+	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_lte:
-	# a <= b → not(a > b) → slt t0, t1, t0; xori t0, t0, 1
+	# a <= b (unsigned): not(a > b) → sltu t0, t1, t0; xori t0, t0, 1
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
-	li	a3, 2
+	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
 	li	a0, 1
@@ -3091,11 +3172,11 @@ gbo_lte:
 	jal	em_itype
 	j	gbo_push
 gbo_gte:
-	# a >= b → not(a < b) → slt t0, t0, t1; xori t0, t0, 1
+	# a >= b (unsigned): not(a < b) → sltu t0, t0, t1; xori t0, t0, 1
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
-	li	a3, 2
+	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
 	li	a0, 1
@@ -3135,6 +3216,183 @@ gbo_ne:
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
+
+# --- Multiply: t0 * t1 → t0 (shift-and-add) ---
+gbo_mul:
+	# Emit: li t2, 0; loop { if t1==0 break; if t1&1: t2+=t0; t0<<=1; t1>>=1 }; mv t0,t2
+	# 9 instructions, 36 bytes inline. t3=x28 as scratch.
+	li	a0, R_T2
+	li	a1, 0
+	jal	em_li
+	# beq t1, zero, +28 (past loop)
+	li	a0, 28
+	li	a1, R_T1
+	li	a2, R_ZERO
+	li	a3, 0
+	jal	em_btype
+	# andi t3(x28), t1, 1
+	li	a0, 1
+	li	a1, R_T1
+	li	a2, 7
+	li	a3, 28
+	li	a4, 0x13
+	jal	em_itype
+	# beq t3, zero, +8
+	li	a0, 8
+	li	a1, 28
+	li	a2, R_ZERO
+	li	a3, 0
+	jal	em_btype
+	# add t2, t2, t0
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T2
+	li	a3, 0
+	li	a4, R_T2
+	jal	em_rtype
+	# slli t0, t0, 1
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 1
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	# srli t1, t1, 1
+	li	a0, 1
+	li	a1, R_T1
+	li	a2, 5
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
+	# j -24 (back to beq t1,zero, skipping li t2,0)
+	li	a0, -24
+	li	a1, R_ZERO
+	jal	em_jtype
+	# mv t0, t2
+	li	a0, 0
+	li	a1, R_T2
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+
+# --- Div/Mod helpers: emit binary long division inline ---
+# t0=dividend, t1=divisor → t2=quotient, t3(x28)=remainder
+# After: for /, mv t0,t2. For %, mv t0,t3.
+gbo_div:
+	jal	gbo_divmod
+	# mv t0, t2 (quotient)
+	li	a0, 0
+	li	a1, R_T2
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+gbo_mod:
+	jal	gbo_divmod
+	# mv t0, t3(x28) (remainder)
+	li	a0, 0
+	li	a1, 28
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+
+# gbo_divmod: emit unsigned divmod (13 instructions, 52 bytes)
+#   t2=quotient, t3(x28)=remainder, t4(x29)=counter, t5(x30)=scratch
+gbo_divmod:
+	prologue x0
+	# li t2, 0 (quotient)
+	li	a0, R_T2
+	li	a1, 0
+	jal	em_li
+	# li t3(x28), 0 (remainder)
+	li	a0, 28
+	li	a1, 0
+	jal	em_li
+	# li t4(x29), 31
+	li	a0, 29
+	li	a1, 31
+	jal	em_li
+	# loop (offset 0 from here):
+	# blt t4, zero, +44 (done = 11 instrs * 4, past the j)
+	li	a0, 44
+	li	a1, 29
+	li	a2, R_ZERO
+	li	a3, 4
+	jal	em_btype
+	# slli t3, t3, 1
+	li	a0, 1
+	li	a1, 28
+	li	a2, 1
+	li	a3, 28
+	li	a4, 0x13
+	jal	em_itype
+	# srl t5(x30), t0, t4
+	li	a0, 0
+	li	a1, 29
+	li	a2, R_T0
+	li	a3, 5
+	li	a4, 30
+	jal	em_rtype
+	# andi t5, t5, 1
+	li	a0, 1
+	li	a1, 30
+	li	a2, 7
+	li	a3, 30
+	li	a4, 0x13
+	jal	em_itype
+	# or t3, t3, t5
+	li	a0, 0
+	li	a1, 30
+	li	a2, 28
+	li	a3, 6
+	li	a4, 28
+	jal	em_rtype
+	# slli t2, t2, 1
+	li	a0, 1
+	li	a1, R_T2
+	li	a2, 1
+	li	a3, R_T2
+	li	a4, 0x13
+	jal	em_itype
+	# bltu t3, t1, +12 (skip sub+or = 3 instrs * 4)
+	li	a0, 12
+	li	a1, 28
+	li	a2, R_T1
+	li	a3, 6
+	jal	em_btype
+	# sub t3, t3, t1
+	li	a0, 0x20
+	li	a1, R_T1
+	li	a2, 28
+	li	a3, 0
+	li	a4, 28
+	jal	em_rtype
+	# ori t2, t2, 1
+	li	a0, 1
+	li	a1, R_T2
+	li	a2, 6
+	li	a3, R_T2
+	li	a4, 0x13
+	jal	em_itype
+	# addi t4, t4, -1
+	li	a0, -1
+	li	a1, 29
+	li	a2, 0
+	li	a3, 29
+	li	a4, 0x13
+	jal	em_itype
+	# j -40 (back to blt)
+	li	a0, -40
+	li	a1, R_ZERO
+	jal	em_jtype
+	# done: t2=quotient, t3(x28)=remainder
+	return
+
 gbo_push:
 	li	a0, R_T0
 	jal	em_push
@@ -3154,6 +3412,8 @@ ge_prefix:
 	beq	s5, t0, gp_deref
 	li	t0, NK_AT
 	beq	s5, t0, gp_bderef
+	li	t0, NK_HASH
+	beq	s5, t0, gp_hderef
 	li	t0, NK_HYPHEN
 	beq	s5, t0, gp_neg
 	li	t0, NK_BANG
@@ -3181,6 +3441,19 @@ gp_bderef:
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, 4
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gp_hderef:
+	# pop addr, lhu t0, 0(t0), push
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, 5
 	li	a3, R_T0
 	li	a4, 0x03
 	jal	em_itype
@@ -3230,6 +3503,7 @@ gp_bnot:
 # --- Assignment ---
 ge_assign:
 	lw	s5, N_DATA(s3)
+	mv	s4, s5
 	lw	s6, N_FIRST_CHILD(s3)
 	lw	s7, N_NEXT_SIB(s6)
 	# Generate RHS
@@ -3283,9 +3557,101 @@ ga_ident:
 ga_reassign:
 	mv	s5, a0
 ga_store:
-	# pop value into t0
+	# pop RHS value into t0
 	li	a0, R_T0
 	jal	em_pop
+	# Check for compound assignment (s4 = op kind)
+	li	t0, NK_EQUAL
+	beq	s4, t0, ga_simple
+	li	t0, NK_ASSIGN_MUT
+	beq	s4, t0, ga_simple
+	# Compound: load old value into t1, compute t0 = old OP rhs
+	mv	a0, s5
+	li	a1, R_T1
+	jal	em_var_load
+	# Dispatch on compound op
+	li	t0, NK_PLUS_EQ
+	beq	s4, t0, ga_c_add
+	li	t0, NK_MINUS_EQ
+	beq	s4, t0, ga_c_sub
+	li	t0, NK_STAR_EQ
+	beq	s4, t0, ga_c_mul
+	li	t0, NK_SLASH_EQ
+	beq	s4, t0, ga_c_div
+	li	t0, NK_PERCENT_EQ
+	beq	s4, t0, ga_c_mod
+	li	t0, NK_AMP_EQ
+	beq	s4, t0, ga_c_and
+	li	t0, NK_PIPE_EQ
+	beq	s4, t0, ga_c_or
+	li	t0, NK_CARET_EQ
+	beq	s4, t0, ga_c_xor
+	li	t0, NK_LSHIFT_EQ
+	beq	s4, t0, ga_c_sll
+	li	t0, NK_RSHIFT_EQ
+	beq	s4, t0, ga_c_srl
+	j	cg_err
+ga_c_add:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_sub:
+	li	a0, 0x20
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_and:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 7
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_or:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 6
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_xor:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 4
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_sll:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 1
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_srl:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 5
+	li	a4, R_T0
+	jal	em_rtype
+	j	ga_simple
+ga_c_mul:
+ga_c_div:
+ga_c_mod:
+	j	cg_err
+ga_simple:
 	# store t0 at variable slot
 	mv	a0, s5
 	li	a1, R_T0
@@ -3295,11 +3661,13 @@ ga_store:
 	jal	em_push
 	j	ge_done
 ga_deref:
-	# *addr or @addr = val: RHS on stack, generate address
+	# *addr, @addr, or #addr = val: RHS on stack, generate address
 	lw	s5, N_DATA(s6)
 	li	t1, NK_STAR
 	beq	t1, s5, ga_do_st
 	li	t1, NK_AT
+	beq	t1, s5, ga_do_st
+	li	t1, NK_HASH
 	beq	t1, s5, ga_do_st
 	j	cg_err
 ga_do_st:
@@ -3309,10 +3677,15 @@ ga_do_st:
 	jal	em_pop
 	li	a0, R_T0
 	jal	em_pop
-	# sw/sb t0, 0(t1): funct3=2 for *, 0 for @
+	# sw/sh/sb: funct3=2 for *, 1 for #, 0 for @
 	li	t0, NK_STAR
 	beq	s5, t0, ga_sw
+	li	t0, NK_HASH
+	beq	s5, t0, ga_sh
 	li	a3, 0
+	j	ga_emit_st
+ga_sh:
+	li	a3, 1
 	j	ga_emit_st
 ga_sw:
 	li	a3, 2
@@ -3328,6 +3701,12 @@ ga_emit_st:
 
 # --- Block ---
 ge_block:
+	# Save scope state
+	lw	t0, ST_CNT(s1)
+	lw	t1, ST_NEXT(s1)
+	addi	sp, sp, -8
+	sw	t0, 0(sp)
+	sw	t1, 4(sp)
 	lw	s5, N_FIRST_CHILD(s3)
 	beqz	s5, gbl_empty
 	# Find last child
@@ -3343,19 +3722,52 @@ gbl_gen:
 gbl_child:
 	mv	a0, s7
 	jal	gen_expr
-	beq	s7, s6, ge_done
+	beq	s7, s6, gbl_end
 	# pop intermediate value
 	li	a0, R_T0
 	jal	em_pop
 	lw	s7, N_NEXT_SIB(s7)
 	j	gbl_child
+gbl_end:
+	# Block value on stack. Reclaim inner variable slots if any.
+	lw	t0, 4(sp)
+	lw	t1, ST_NEXT(s1)
+	sub	s5, t0, t1
+	beqz	s5, gbl_scope
+	# Pop value, emit sp reclaim, push value
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, R_T1
+	mv	a1, s5
+	jal	em_li
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_SP
+	li	a3, 0
+	li	a4, R_SP
+	jal	em_rtype
+	li	a0, R_T0
+	jal	em_push
+gbl_scope:
+	# Restore symbol table state
+	lw	t0, 0(sp)
+	sw	t0, ST_CNT(s1)
+	lw	t0, 4(sp)
+	sw	t0, ST_NEXT(s1)
+	addi	sp, sp, 8
+	j	ge_done
 gbl_empty:
-	# push 0
 	li	a0, R_T0
 	li	a1, 0
 	jal	em_li
 	li	a0, R_T0
 	jal	em_push
+	# Restore scope (no vars to reclaim)
+	lw	t0, 0(sp)
+	sw	t0, ST_CNT(s1)
+	lw	t0, 4(sp)
+	sw	t0, ST_NEXT(s1)
+	addi	sp, sp, 8
 	j	ge_done
 
 # --- Loop with break/continue ---
@@ -3587,7 +3999,7 @@ gc_call:
 	lw	t3, AT_CNT(s9)
 	li	t4, 0
 gc_find:
-	beq	t4, t3, cg_err
+	beq	t4, t3, gc_closure
 	slli	t0, t4, 2
 	slli	t1, t4, 3
 	add	t0, t0, t1
@@ -3618,6 +4030,26 @@ gc_found:
 	sub	a0, t1, s0
 	li	a1, 1
 	jal	em_jtype
+	# Push return value (a0)
+	li	a0, R_A0
+	jal	em_push
+	j	ge_done
+
+gc_closure:
+	# Not in asm label table — try symbol table (closure variable)
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	sym_find
+	# a0 = slot offset. Load code pointer from variable.
+	li	a1, R_T0
+	jal	em_var_load
+	# Emit: jalr ra, t0, 0 (indirect call)
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, 0
+	li	a3, 1
+	li	a4, 0x67
+	jal	em_itype
 	# Push return value (a0)
 	li	a0, R_A0
 	jal	em_push
@@ -3743,6 +4175,147 @@ gpo_store:
 	mv	a0, s7
 	li	a1, R_T0
 	jal	em_var_store
+	j	ge_done
+
+# --- Closure |params| body ---
+ge_closure:
+	# Children: param idents..., body (last child)
+	# Emit: jal t0, past_body (t0 = code addr)
+	# Stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT
+	addi	sp, sp, -12
+	sw	s0, 0(sp)
+	li	a0, 0
+	li	a1, R_T0
+	jal	em_jtype
+	# Emit function prologue in generated code:
+	# addi sp, sp, -8; sw ra, 4(sp); sw s0, 0(sp); mv s0, sp
+	li	a0, -8
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 4
+	li	a1, 1
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	li	a0, 0
+	li	a1, R_S0
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_S0
+	li	a4, 0x13
+	jal	em_itype
+	# Save compiler scope, reset for fresh frame
+	lw	t0, ST_CNT(s1)
+	sw	t0, 4(sp)
+	lw	t0, ST_NEXT(s1)
+	sw	t0, 8(sp)
+	sw	x0, ST_NEXT(s1)
+	# Find last child (body) and define param variables
+	lw	s5, N_FIRST_CHILD(s3)
+	mv	s6, s5
+gc_last:
+	lw	t0, N_NEXT_SIB(s6)
+	beqz	t0, gc_params
+	mv	s6, t0
+	j	gc_last
+gc_params:
+	# s6 = body (last child). Walk params from s5 to s6.
+	mv	s7, s5
+	li	s5, 0
+gc_ploop:
+	beq	s7, s6, gc_body
+	# Save param index and AST node ptr
+	addi	sp, sp, -8
+	sw	s5, 0(sp)
+	sw	s7, 4(sp)
+	# Define param variable
+	lw	a0, N_LOC_OFF(s7)
+	lw	a1, N_LOC_LEN(s7)
+	jal	sym_def
+	mv	s7, a0
+	# Reserve slot
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# Store a_n at slot
+	mv	a0, s7
+	lw	t0, 0(sp)
+	addi	a1, t0, R_A0
+	jal	em_var_store
+	# Restore and advance
+	lw	s5, 0(sp)
+	lw	s7, 4(sp)
+	addi	sp, sp, 8
+	addi	s5, s5, 1
+	lw	s7, N_NEXT_SIB(s7)
+	j	gc_ploop
+gc_body:
+	# Compile body expression
+	mv	a0, s6
+	jal	gen_expr
+	# Pop result into a0 (return value)
+	li	a0, R_A0
+	jal	em_pop
+	# Emit epilogue: mv sp, s0; lw s0, 0(sp); lw ra, 4(sp); addi sp, sp, 8; ret
+	li	a0, 0
+	li	a1, R_S0
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, R_S0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, 4
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, 1
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	li	a1, 1
+	li	a2, 0
+	li	a3, R_ZERO
+	li	a4, 0x67
+	jal	em_itype
+	# Restore compiler scope (stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT)
+	lw	t0, 4(sp)
+	sw	t0, ST_CNT(s1)
+	lw	t0, 8(sp)
+	sw	t0, ST_NEXT(s1)
+	# Backpatch jal t0 to here (need rd=t0, not rd=x0)
+	lw	s5, 0(sp)
+	sub	a0, s0, s5
+	li	a1, R_T0
+	mv	t3, s0
+	mv	s0, s5
+	jal	em_jtype
+	mv	s0, t3
+	addi	sp, sp, 12
+	# Push t0 (code pointer = closure value)
+	li	a0, R_T0
+	jal	em_push
 	j	ge_done
 
 # --- Prefix ++/-- (returns new value) ---
@@ -4999,6 +5572,8 @@ tok_rbracket:
 	.ascii	"]"
 tok_at:
 	.ascii	"@"
+tok_hash:
+	.ascii	"#"
 
 # Keywords
 kw_loop:

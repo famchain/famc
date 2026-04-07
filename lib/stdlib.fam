@@ -95,6 +95,15 @@ pn_done:
 	ret
 };
 
+asm alloc {
+	mv t0, gp
+	add gp, gp, a0
+	addi gp, gp, 15
+	andi gp, gp, -16
+	mv a0, t0
+	ret
+};
+
 asm exit {
 	lui t0, 0x100
 	lui t1, 5
