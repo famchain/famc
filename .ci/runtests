@@ -342,6 +342,8 @@ test_output  "halfword index"         'asm pc { lui t0, 0x10000
 sb a0, 0(t0)
 ret };
 a = 0x80100000; a[0] = 65; pc(@a[0])' "A"
+test_runs    "typed placement"        "struct P { x; y }; a = 0x80100000; P@a[0] = P(10,20); P@a[1] = P(30,40); P@a[0].x + P@a[1].y"
+test_runs    "typed field write"      "struct P { x; y }; a = 0x80100000; P@a[0] = P(1,2); P@a[0].x = 99; P@a[0].x"
 
 echo "=== Error detection (compile-time) ==="
 test_error   "hex overflow"             "0x1FFFFFFFF"               "Ei"

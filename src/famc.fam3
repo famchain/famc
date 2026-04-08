@@ -227,6 +227,7 @@ pd_done:
 .equ	NK_CLOSURE,	71
 .equ	NK_INDEX,	72
 .equ	NK_SELF,	73
+.equ	NK_TYPED,	74
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -1947,6 +1948,33 @@ px_closure0:
 
 	# --- Infix loop (Pratt) ---
 px_infix:
+	# Check for ident@ → typed placement expression
+	lw	t0, N_KIND(s1)
+	li	t1, NK_AT
+	bne	t0, t1, px_ix_norm
+	lw	t0, N_KIND(s4)
+	li	t1, NK_IDENT
+	bne	t0, t1, px_ix_norm
+	# ident@ detected: create NK_TYPED node
+	jal	advance			# consume @
+	jal	alloc_node
+	mv	s6, a0
+	li	t0, NK_TYPED
+	sw	t0, N_KIND(s6)
+	# Store struct name from the ident
+	lw	t0, N_LOC_OFF(s4)
+	sw	t0, N_DATA(s6)
+	lw	t0, N_LOC_LEN(s4)
+	sw	t0, N_LOC_LINE(s6)
+	# Parse the operand (with P_CALL prec so [] and . bind)
+	li	a0, P_CALL
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s6
+	jal	append_child
+	mv	s4, s6
+	j	px_infix
+px_ix_norm:
 	# Peek at next token kind (already in s1 from advance/expect)
 	lw	a0, N_KIND(s1)
 	jal	get_prec
@@ -2971,6 +2999,8 @@ gen_expr:
 	beq	s4, t0, ge_sizeof
 	li	t0, NK_INDEX
 	beq	s4, t0, ge_index
+	li	t0, NK_TYPED
+	beq	s4, t0, ge_typed
 	j	cg_err
 
 # --- Number literal ---
@@ -3613,6 +3643,8 @@ ge_assign:
 	beq	t0, t1, ga_dot_ck
 	li	t1, NK_INDEX
 	beq	t0, t1, ga_index
+	li	t1, NK_TYPED
+	beq	t0, t1, ga_typed
 	j	cg_err
 ga_ident:
 	# Try to find existing variable first
@@ -4944,6 +4976,141 @@ gai_st:
 	li	a4, 0x23
 	jal	em_stype
 	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Typed placement read: abc@expr ---
+# N_DATA = struct name offset, N_LOC_LINE = name length
+# Child = operand expression (e.g. arr[i] or arr[i].x)
+ge_typed:
+	# Look up struct to get size
+	lw	a0, N_DATA(s3)
+	lw	a1, N_LOC_LINE(s3)
+	jal	str_find
+	beqz	a0, cg_err
+	mv	s6, a0
+	lw	s7, SR_SIZE(s6)
+	# Check if child is NK_INDEX → use struct stride
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	t0, N_KIND(s5)
+	li	t1, NK_INDEX
+	bne	t0, t1, gt_plain
+	# Index child: compute base + index * sizeof
+	lw	a0, N_FIRST_CHILD(s5)
+	jal	gen_expr
+	lw	t0, N_FIRST_CHILD(s5)
+	lw	a0, N_NEXT_SIB(t0)
+	jal	gen_expr
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	# Emit: li t2, sizeof; mul t1, t1, t2
+	li	a0, R_T2
+	mv	a1, s7
+	jal	em_li
+	li	a0, 1
+	li	a1, R_T1
+	li	a2, R_T2
+	li	a3, 0
+	li	a4, R_T1
+	jal	em_rtype
+	# Emit: add t0, t0, t1
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gt_plain:
+	# Non-index child: just evaluate it
+	mv	a0, s5
+	jal	gen_expr
+	j	ge_done
+
+# --- Typed placement write: abc@expr = val ---
+# Copies sizeof(abc) bytes from RHS pointer to computed dest
+ga_typed:
+	# Look up struct
+	lw	a0, N_DATA(s6)
+	lw	a1, N_LOC_LINE(s6)
+	jal	str_find
+	beqz	a0, cg_err
+	mv	s4, a0
+	lw	s7, SR_SIZE(s4)
+	lw	s5, SR_NFLD(s4)
+	# Check if child is NK_INDEX → compute dest with stride
+	lw	t0, N_FIRST_CHILD(s6)
+	lw	t1, N_KIND(t0)
+	li	t2, NK_INDEX
+	bne	t1, t2, gat_plain
+	# Index child: generate base and index
+	mv	s6, t0
+	lw	a0, N_FIRST_CHILD(s6)
+	jal	gen_expr
+	lw	t0, N_FIRST_CHILD(s6)
+	lw	a0, N_NEXT_SIB(t0)
+	jal	gen_expr
+	# Pop index into t1, base into t0
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	# Emit: li t2, sizeof; mul t1, t1, t2; add t1, t0, t1
+	li	a0, R_T2
+	mv	a1, s7
+	jal	em_li
+	li	a0, 1
+	li	a1, R_T1
+	li	a2, R_T2
+	li	a3, 0
+	li	a4, R_T1
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 0
+	li	a4, R_T1
+	jal	em_rtype
+	# Push dest addr (t1)
+	li	a0, R_T1
+	jal	em_push
+	j	gat_copy
+gat_plain:
+	# Non-index: evaluate child as dest address
+	lw	a0, N_FIRST_CHILD(s6)
+	jal	gen_expr
+gat_copy:
+	# Stack: [RHS_ptr, dest_addr]
+	# Pop dest into t1, RHS (src ptr) into t0
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	# Emit copy loop: for i in 0..nfld-1: lw t2, i*4(t0); sw t2, i*4(t1)
+	li	s6, 0
+gat_floop:
+	beq	s6, s5, gat_done
+	slli	a0, s6, 2
+	li	a1, R_T0
+	li	a2, 2
+	li	a3, R_T2
+	li	a4, 0x03
+	jal	em_itype
+	slli	a0, s6, 2
+	li	a1, R_T2
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	addi	s6, s6, 1
+	j	gat_floop
+gat_done:
+	# Push dest as result
+	li	a0, R_T1
 	jal	em_push
 	j	ge_done
 
