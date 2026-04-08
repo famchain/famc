@@ -6699,16 +6699,20 @@ asm_assemble:
 	prologue s3 s4 s5 s6 s7 x0
 	mv	s3, a0
 	add	s4, a0, a1
-	# Allocate local label table (max 64 labels)
+	# Allocate local label table: 8 header + 64*12 = 776
 	li	a0, 776
 	jal	alloc
 	mv	s5, a0
 	sw	x0, 0(s5)
-	# Allocate fixup table (max 128 fixups)
-	li	a0, 2052
+	li	t0, 64
+	sw	t0, 4(s5)
+	# Allocate fixup table: 8 header + 128*16 = 2056
+	li	a0, 2056
 	jal	alloc
 	mv	s6, a0
 	sw	x0, 0(s6)
+	li	t0, 128
+	sw	t0, 4(s6)
 	li	a0, 400
 	jal	alloc
 	mv	s7, a0
@@ -6771,16 +6775,45 @@ aa_nls:
 	j	aa_line
 aa_named:
 	lw	t0, 0(s5)
-	li	t1, 64
+	lw	t1, 4(s5)
 	blt	t0, t1, aa_ll_ok
-	mv	a0, s3
-	lla	a1, em_overflow
-	j	err_at
+	# Grow local label table: double capacity
+	slli	t1, t1, 1
+	slli	a0, t1, 2
+	slli	t2, t1, 3
+	add	a0, a0, t2
+	addi	a0, a0, 8
+	addi	sp, sp, -4
+	sw	t1, 0(sp)
+	jal	alloc
+	lw	t1, 0(sp)
+	addi	sp, sp, 4
+	mv	t2, a0
+	lw	t0, 0(s5)
+	sw	t0, 0(t2)
+	sw	t1, 4(t2)
+	slli	t0, t0, 2
+	lw	t1, 0(s5)
+	slli	t1, t1, 3
+	add	t0, t0, t1
+	addi	t1, s5, 8
+	addi	t3, t2, 8
+al_copy:
+	beqz	t0, al_cpd
+	lw	t4, 0(t1)
+	sw	t4, 0(t3)
+	addi	t1, t1, 4
+	addi	t3, t3, 4
+	addi	t0, t0, -4
+	j	al_copy
+al_cpd:
+	mv	s5, t2
 aa_ll_ok:
+	lw	t0, 0(s5)
 	slli	t1, t0, 2
 	slli	t2, t0, 3
 	add	t1, t1, t2
-	addi	t1, t1, 4
+	addi	t1, t1, 8
 	add	t1, s5, t1
 	sw	t3, LL_OFF(t1)
 	sw	t4, LL_LEN(t1)
@@ -6985,10 +7018,12 @@ aa_br:
 	jal	asm_skip
 	jal	asm_tok
 	lw	t0, 0(s6)
-	li	t1, 128
-	bge	t0, t1, asm_fx_err
+	lw	t1, 4(s6)
+	blt	t0, t1, fx_ok1
+	jal	asm_fx_grow
+fx_ok1:
 	slli	t1, t0, 4
-	addi	t1, t1, 4
+	addi	t1, t1, 8
 	add	t1, s6, t1
 	sw	a0, FX_OFF(t1)
 	sw	a1, FX_LEN(t1)
@@ -7039,10 +7074,12 @@ aa_jal:
 	jal	asm_skip
 	jal	asm_tok
 	lw	t0, 0(s6)
-	li	t1, 128
-	bge	t0, t1, asm_fx_err
+	lw	t1, 4(s6)
+	blt	t0, t1, fx_ok2
+	jal	asm_fx_grow
+fx_ok2:
 	slli	t1, t0, 4
-	addi	t1, t1, 4
+	addi	t1, t1, 8
 	add	t1, s6, t1
 	sw	a0, FX_OFF(t1)
 	sw	a1, FX_LEN(t1)
@@ -7122,10 +7159,12 @@ aa_j:
 	jal	asm_skip
 	jal	asm_tok
 	lw	t0, 0(s6)
-	li	t1, 128
-	bge	t0, t1, asm_fx_err
+	lw	t1, 4(s6)
+	blt	t0, t1, fx_ok3
+	jal	asm_fx_grow
+fx_ok3:
 	slli	t1, t0, 4
-	addi	t1, t1, 4
+	addi	t1, t1, 8
 	add	t1, s6, t1
 	sw	a0, FX_OFF(t1)
 	sw	a1, FX_LEN(t1)
@@ -7329,7 +7368,7 @@ aa_fix:
 af_loop:
 	beq	t6, t5, aa_fdone
 	slli	t0, t6, 4
-	addi	t0, t0, 4
+	addi	t0, t0, 8
 	add	t0, s6, t0
 	lw	a0, FX_OFF(t0)
 	lw	a1, FX_LEN(t0)
@@ -7397,7 +7436,7 @@ af_lbl:
 	slli	t0, t4, 2
 	slli	a2, t4, 3
 	add	t0, t0, a2
-	addi	t0, t0, 4
+	addi	t0, t0, 8
 	add	t0, s5, t0
 	lw	a2, LL_LEN(t0)
 	bne	a1, a2, af_lnext
@@ -7807,10 +7846,37 @@ mf_done:
 	ret
 
 # --- Asm error ---
-asm_fx_err:
-	mv	a0, s3
-	lla	a1, em_overflow
-	j	err_at
+asm_fx_grow:
+	# Grow fixup table: double capacity. Preserves t0 (count).
+	lw	t1, 4(s6)
+	slli	t1, t1, 1
+	slli	a0, t1, 4
+	addi	a0, a0, 8
+	addi	sp, sp, -8
+	sw	t0, 0(sp)
+	sw	t1, 4(sp)
+	jal	alloc
+	lw	t0, 0(sp)
+	lw	t1, 4(sp)
+	addi	sp, sp, 8
+	mv	t2, a0
+	sw	t0, 0(t2)
+	sw	t1, 4(t2)
+	# Copy entries: count * 16 bytes
+	slli	t3, t0, 4
+	addi	t4, s6, 8
+	addi	t5, t2, 8
+fx_gcopy:
+	beqz	t3, fx_gdon
+	lw	t6, 0(t4)
+	sw	t6, 0(t5)
+	addi	t4, t4, 4
+	addi	t5, t5, 4
+	addi	t3, t3, -4
+	j	fx_gcopy
+fx_gdon:
+	mv	s6, t2
+	ret
 asm_err:
 	mv	a0, s3
 	lla	a1, em_asm
