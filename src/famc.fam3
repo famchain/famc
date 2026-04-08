@@ -3110,7 +3110,7 @@ ge_ident:
 	beq	a0, t0, sf_fail
 	mv	s5, a0
 	# Check if outer variable (inside closure and index < boundary)
-	beqz	s11, gi_local
+	blt	s11, x0, gi_local
 	bge	a1, s11, gi_local
 	# Outer variable: record capture scope boundary
 	sw	s11, ST_CAPS(s1)
@@ -3657,7 +3657,7 @@ ga_ident:
 ga_chk_out:
 	# Check if outer variable. s7 = 1 if outer, 0 if local.
 	li	s7, 0
-	beqz	s11, ga_reassign
+	blt	s11, x0, ga_reassign
 	bge	a1, s11, ga_reassign
 	li	s7, 1
 	j	ga_reassign
@@ -4079,6 +4079,8 @@ gl_bdone:
 
 # --- Break ---
 ge_break:
+	# Error if not inside a loop
+	beqz	s10, cg_err
 	# Check for break value (first child)
 	lw	s5, N_FIRST_CHILD(s3)
 	beqz	s5, gb_noval
@@ -4138,6 +4140,8 @@ gb_fx_ok:
 
 # --- Continue ---
 ge_cont:
+	# Error if not inside a loop
+	beqz	s10, cg_err
 	# Emit: lw sp, slot(s0) — restore sp to loop start
 	lw	a0, 12(s10)
 	li	a1, R_SP
@@ -4377,7 +4381,7 @@ gc_sf_done:
 	j	ge_done
 gc_cl_chk:
 	# If inside closure body (s11>0), check if callee has captures
-	beqz	s11, gc_cl_ok
+	blt	s11, x0, gc_cl_ok
 	slli	t0, a1, 4
 	addi	t0, t0, ST_DATA
 	add	t0, s1, t0
@@ -4397,7 +4401,7 @@ gc_cl_chk:
 gc_cl_ok:
 	# Load code pointer (check outer variable like ge_ident)
 	mv	s5, a0
-	beqz	s11, gc_ld_loc
+	blt	s11, x0, gc_ld_loc
 	bge	a1, s11, gc_ld_loc
 	# Outer: lw t0, slot(s1)
 	mv	a0, s5
@@ -4525,6 +4529,8 @@ ga_no_lbl:
 
 # --- Return ---
 ge_return:
+	# Error if not inside a closure
+	blt	s11, x0, cg_err
 	lw	s5, N_FIRST_CHILD(s3)
 	beqz	s5, gr_void
 	mv	a0, s5
@@ -4538,14 +4544,8 @@ gr_void:
 	li	a1, 0
 	jal	em_li
 gr_emit:
-	# TODO: emit epilogue (restore fp, ra, ret)
-	# For now just emit ret (jalr x0, ra, 0)
-	li	a0, 0
-	li	a1, R_RA
-	li	a2, 0
-	li	a3, R_ZERO
-	li	a4, 0x67
-	jal	em_itype
+	# Emit full closure epilogue: mv sp,s0; lw s1,0(sp); lw s0,4(sp); lw ra,8(sp); addi sp,12; ret
+	jal	em_epilogue
 	# Push dummy value (unreachable but maintains invariant)
 	li	a0, R_T0
 	li	a1, 0
@@ -4570,7 +4570,7 @@ ge_postfix:
 	beq	a0, t0, sf_fail
 	mv	s7, a0
 	li	s3, 0
-	beqz	s11, gpo_ld
+	blt	s11, x0, gpo_ld
 	bge	a1, s11, gpo_ld
 	li	s3, 1
 	# Outer: lw t0, slot(s1)
@@ -5381,43 +5381,8 @@ gc_body:
 	# Pop result into a0 (return value)
 	li	a0, R_A0
 	jal	em_pop
-	# Emit epilogue: mv sp,s0; lw s1,0(sp); lw s0,4(sp); lw ra,8(sp); addi sp,12; ret
-	li	a0, 0
-	li	a1, R_S0
-	li	a2, 0
-	li	a3, R_SP
-	li	a4, 0x13
-	jal	em_itype
-	li	a0, 0
-	li	a1, R_SP
-	li	a2, 2
-	li	a3, R_S1
-	li	a4, 0x03
-	jal	em_itype
-	li	a0, 4
-	li	a1, R_SP
-	li	a2, 2
-	li	a3, R_S0
-	li	a4, 0x03
-	jal	em_itype
-	li	a0, 8
-	li	a1, R_SP
-	li	a2, 2
-	li	a3, 1
-	li	a4, 0x03
-	jal	em_itype
-	li	a0, 12
-	li	a1, R_SP
-	li	a2, 0
-	li	a3, R_SP
-	li	a4, 0x13
-	jal	em_itype
-	li	a0, 0
-	li	a1, 1
-	li	a2, 0
-	li	a3, R_ZERO
-	li	a4, 0x67
-	jal	em_itype
+	# Emit closure epilogue
+	jal	em_epilogue
 	# Restore compiler scope + s11
 	lw	t0, 4(sp)
 	sw	t0, ST_CNT(s1)
@@ -5463,7 +5428,7 @@ gp_preinc:
 	mv	s7, a0
 	# Check outer (save flag in s3, available since we dispatched)
 	li	s3, 0
-	beqz	s11, gpi_ld
+	blt	s11, x0, gpi_ld
 	bge	a1, s11, gpi_ld
 	li	s3, 1
 	mv	a0, s7
@@ -6338,6 +6303,54 @@ af_lnext:
 aa_fdone:
 	return
 
+# em_epilogue: emit closure/function epilogue
+#   mv sp,s0; lw s1,0(sp); lw s0,4(sp); lw ra,8(sp); addi sp,12; ret
+em_epilogue:
+	prologue x0
+	# mv sp, s0
+	li	a0, 0
+	li	a1, R_S0
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# lw s1, 0(sp)
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, R_S1
+	li	a4, 0x03
+	jal	em_itype
+	# lw s0, 4(sp)
+	li	a0, 4
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, R_S0
+	li	a4, 0x03
+	jal	em_itype
+	# lw ra, 8(sp)
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, 1
+	li	a4, 0x03
+	jal	em_itype
+	# addi sp, sp, 12
+	li	a0, 12
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# jalr x0, ra, 0 (ret)
+	li	a0, 0
+	li	a1, 1
+	li	a2, 0
+	li	a3, R_ZERO
+	li	a4, 0x67
+	jal	em_itype
+	return
+
 # em_mul_t0t1: emit inline multiply t0 * t1 → t0 (RV32I, no M extension)
 #   Uses t2, t3(x28) as scratch. Shift-and-add algorithm.
 em_mul_t0t1:
@@ -6643,8 +6656,8 @@ codegen:
 	jal	sym_init
 	mv	s1, a0
 
-	# No closure scope initially
-	li	s11, 0
+	# No closure scope initially (-1 = not in closure)
+	li	s11, -1
 
 	# Initialize asm label table (s9)
 	li	a0, 772

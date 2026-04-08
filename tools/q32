@@ -1,0 +1,27 @@
+#!/bin/sh
+
+# Check if a filename was provided
+if [ -z "$1" ]; then
+	echo "Usage: $0 <path/to/bin>"
+	exit 1
+fi
+
+if [ ! -e "$1" ]; then
+	echo "Usage: $0 <path/to/bin>"
+	exit 1
+fi
+
+MAGIC=$(head -c 4 "$1" | xxd -p)
+if [ "$MAGIC" != "13000000" ]; then
+	echo "Error: $1 is not a valid binary (bad magic)"
+	exit 1
+fi
+
+qemu-system-riscv32 \
+	-machine virt \
+	-cpu rv32i \
+	-nographic \
+	-bios none \
+	-device loader,file=$1,addr=0x80000000 \
+	-serial \
+	mon:stdio 2>/dev/null
