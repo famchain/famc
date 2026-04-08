@@ -4158,9 +4158,29 @@ ga_c_srl:
 	jal	em_rtype
 	j	ga_simple
 ga_c_mul:
+	# t0 *= t1: use em_mul_t0t1 (t0 * t1 → t0)
+	jal	em_mul_t0t1
+	j	ga_simple
 ga_c_div:
+	# t0 /= t1: emit divmod, mv t0, t2 (quotient)
+	jal	gbo_divmod
+	li	a0, 0
+	li	a1, R_T2
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	ga_simple
 ga_c_mod:
-	j	cg_err
+	# t0 %= t1: emit divmod, mv t0, t3/x28 (remainder)
+	jal	gbo_divmod
+	li	a0, 0
+	li	a1, 28
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	ga_simple
 ga_simple:
 	# store t0 at variable slot (s7=1 if outer)
 	beqz	s7, ga_s_local

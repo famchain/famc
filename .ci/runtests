@@ -223,6 +223,9 @@ test_runs    "compound |="              "x := 0xF0; x |= 0x0F; x"
 test_runs    "compound ^="              "x := 0xFF; x ^= 0x0F; x"
 test_runs    "compound <<="             "x := 1; x <<= 4; x"
 test_runs    "compound >>="             "x := 256; x >>= 4; x"
+test_runs    "compound *="              "x := 3; x *= 7; x"
+test_runs    "compound /="              "x := 100; x /= 7; x"
+test_runs    "compound %="              "x := 10; x %= 3; x"
 
 # ============================================================================
 echo "=== Blocks ==="
