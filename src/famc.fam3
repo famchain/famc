@@ -373,8 +373,7 @@ pd_done:
 .equ	ST_CAPS,	12
 .equ	ST_STRT,	16
 .equ	ST_STYP,	20
-.equ	ST_ESTK,	24
-.equ	ST_DATA,	28
+.equ	ST_DATA,	24
 
 # ============================================================================
 # Memory helpers
@@ -2917,11 +2916,11 @@ pc_done:
 #   Returns a0 = symbol table pointer
 sym_init:
 	prologue s3 s4 x0
-	# 28 header + 256 * 16 entries = 4124
-	li	a0, 4124
+	# 24 header + 256 * 16 entries = 4120
+	li	a0, 4120
 	jal	alloc
 	mv	s3, a0
-	li	a1, 4124
+	li	a1, 4120
 	jal	memzero
 	li	t0, 256
 	sw	t0, ST_CAP(s3)
@@ -2967,8 +2966,6 @@ sym_def:
 	sw	t0, ST_STRT(t3)
 	lw	t0, ST_STYP(s1)
 	sw	t0, ST_STYP(t3)
-	lw	t0, ST_ESTK(s1)
-	sw	t0, ST_ESTK(t3)
 	# Copy entries (count * 16 bytes)
 	lw	t0, ST_CNT(s1)
 	slli	t0, t0, 4
@@ -3292,18 +3289,50 @@ ge_binop:
 	beq	s5, t0, ge_land
 	li	t0, NK_PIPE_PIPE
 	beq	s5, t0, ge_lor
-	# Generate LHS
+	# Generate LHS, save to frame slot
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	lw	s6, ST_NEXT(s1)
+	addi	s6, s6, -4
+	sw	s6, ST_NEXT(s1)
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	mv	a0, s6
+	li	a1, R_T0
+	jal	em_var_store
 	# Generate RHS
 	lw	t0, N_FIRST_CHILD(s3)
 	lw	a0, N_NEXT_SIB(t0)
 	jal	gen_expr
-	# Pop RHS into t1, LHS into t0
+	# Pop RHS into t1, load LHS from frame slot into t0
 	li	a0, R_T1
 	jal	em_pop
-	li	a0, R_T0
-	jal	em_pop
+	mv	a0, s6
+	li	a1, R_T0
+	jal	em_var_load
+	# Reclaim frame slot (restore ST_NEXT, emit addi sp, sp, 4)
+	addi	s6, s6, 4
+	sw	s6, ST_NEXT(s1)
+	li	a0, 4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
 	# Dispatch on operator kind
 	li	t0, NK_PLUS
 	beq	s5, t0, gbo_add
@@ -4772,10 +4801,6 @@ ge_tern:
 ge_call:
 	# first child = callee (ident), rest = args
 	lw	s5, N_FIRST_CHILD(s3)
-	# Check for self() → use simple push/pop (no frame slots)
-	lw	t0, N_KIND(s5)
-	li	t1, NK_SELF
-	beq	t0, t1, gc_self
 	# Generate args into frame slots, then load into a-regs
 	# Each arg's slot offset is saved on the compiler stack (LIFO)
 	lw	s6, N_NEXT_SIB(s5)
@@ -4839,6 +4864,24 @@ gc_pop_args:
 	addi	sp, sp, 4
 	j	gc_pop_args
 gc_call:
+	# Check for self() call first
+	lw	t0, N_KIND(s5)
+	li	t1, NK_SELF
+	bne	t0, t1, gc_asm_lk
+	# self call: load entry addr from hidden slot (-4), jalr
+	li	a0, -4
+	li	a1, R_T0
+	jal	em_var_load
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, 0
+	li	a3, R_RA
+	li	a4, 0x67
+	jal	em_itype
+	li	a0, R_A0
+	jal	em_push
+	j	ge_done
+gc_asm_lk:
 	# Look up callee in asm label table (s9)
 	lw	a0, N_LOC_OFF(s5)
 	lw	a1, N_LOC_LEN(s5)
@@ -4882,43 +4925,6 @@ gc_found:
 	jal	em_push
 	j	ge_done
 
-gc_self:
-	# self() call: use simple push/pop for args (no frame slots)
-	lw	s6, N_NEXT_SIB(s5)
-	li	s7, 0
-gc_s_args:
-	beqz	s6, gc_s_emit
-	mv	a0, s6
-	jal	gen_expr
-	addi	s7, s7, 1
-	lw	s6, N_NEXT_SIB(s6)
-	j	gc_s_args
-gc_s_emit:
-	mv	t2, s7
-gc_s_pop:
-	beqz	t2, gc_s_call
-	addi	t2, t2, -1
-	addi	a0, t2, R_A0
-	addi	sp, sp, -4
-	sw	t2, 0(sp)
-	jal	em_pop
-	lw	t2, 0(sp)
-	addi	sp, sp, 4
-	j	gc_s_pop
-gc_s_call:
-	# Load self entry addr and call
-	li	a0, -4
-	li	a1, R_T0
-	jal	em_var_load
-	li	a0, 0
-	li	a1, R_T0
-	li	a2, 0
-	li	a3, R_RA
-	li	a4, 0x67
-	jal	em_itype
-	li	a0, R_A0
-	jal	em_push
-	j	ge_done
 gc_closure:
 gc_cl_sym:
 	# Not in asm label table — try symbol table (closure variable)
