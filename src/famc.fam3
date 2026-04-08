@@ -6409,6 +6409,33 @@ cg_err:
 # asm_reg: parse register name from token
 #   a0 = token ptr, a1 = token length
 #   Returns a0 = register number (0-31)
+# try_asm_reg: same but returns -1 if not a valid register
+#   Valid register tokens: a0-a7, t0-t6, s0-s11, sp, gp, tp, ra, zero, fp
+#   Max valid length: 4 (zero). Length 1-2: most regs. 3: s10,s11. 4: only zero.
+try_asm_reg:
+	li	t0, 3
+	blt	a1, t0, tar_go
+	beq	a1, t0, tar_3
+	# Length 4: only "zero" is valid
+	li	t0, 4
+	bne	a1, t0, tar_no
+	lbu	t0, 0(a0)
+	li	t1, 'z'
+	beq	t0, t1, tar_go
+	j	tar_no
+tar_3:
+	# Length 3: s10, s11, but also sp→no(2), gp→no(2)
+	lbu	t0, 0(a0)
+	li	t1, 's'
+	beq	t0, t1, tar_go
+	li	t1, 'x'
+	beq	t0, t1, tar_go
+	j	tar_no
+tar_go:
+	j	asm_reg
+tar_no:
+	li	a0, -1
+	ret
 asm_reg:
 	lbu	t0, 0(a0)
 	li	t1, 'x'
@@ -7154,76 +7181,67 @@ aa_bind:
 	jal	asm_tok			# RHS token
 	mv	t5, a0
 	mv	t6, a1
-	# Determine direction: check if RHS first char is a register prefix
-	lbu	t0, 0(t5)
-	li	t1, 'a'
-	beq	t0, t1, ab_varreg
-	li	t1, 'f'
-	beq	t0, t1, ab_varreg
-	li	t1, 'g'
-	beq	t0, t1, ab_varreg
-	li	t1, 'r'
-	beq	t0, t1, ab_varreg
-	li	t1, 's'
-	beq	t0, t1, ab_varreg
-	li	t1, 't'
-	beq	t0, t1, ab_varreg
-	li	t1, 'x'
-	beq	t0, t1, ab_varreg
-	li	t1, 'z'
-	beq	t0, t1, ab_varreg
-	j	ab_regvar
-ab_varreg:
-	# (var=reg): RHS is register, LHS is variable
-	mv	a0, t5
-	mv	a1, t6
-	jal	asm_reg
-	addi	sp, sp, -24
-	sw	a0, 0(sp)
-	sub	t3, t3, s2
-	sw	t3, 4(sp)
-	sw	t4, 8(sp)
-	sw	s3, 12(sp)
-	sw	s4, 16(sp)
-	sw	s5, 20(sp)
-	mv	a0, t3
+	# Determine direction: try LHS as variable (sym_try).
+	# If found → (var=reg): store. If not → (reg=var): load.
+	addi	sp, sp, -16
+	sw	t3, 0(sp)
+	sw	t4, 4(sp)
+	sw	t5, 8(sp)
+	sw	t6, 12(sp)
+	sub	a0, t3, s2
 	mv	a1, t4
 	jal	sym_try
+	lw	t3, 0(sp)
+	lw	t4, 4(sp)
+	lw	t5, 8(sp)
+	lw	t6, 12(sp)
+	addi	sp, sp, 16
 	li	t0, -1
-	beq	a0, t0, sf_fail
-	andi	a0, a0, -2
-	lw	a1, 0(sp)
+	bne	a0, t0, ab_varreg
+	j	ab_regvar
+ab_varreg:
+	# (var=reg): LHS is variable (a0=slot from sym_try), RHS is register
+	andi	a0, a0, -2		# mask mutability bit
+	addi	sp, sp, -16
+	sw	a0, 0(sp)		# save slot
+	sw	s3, 4(sp)
+	sw	s4, 8(sp)
+	sw	s5, 12(sp)
+	mv	a0, t5
+	mv	a1, t6
+	jal	asm_reg			# parse RHS as register
+	mv	a1, a0			# a1 = reg number
+	lw	a0, 0(sp)		# a0 = slot
 	jal	em_var_store
-	lw	s3, 12(sp)
-	lw	s4, 16(sp)
-	lw	s5, 20(sp)
-	addi	sp, sp, 24
+	lw	s3, 4(sp)
+	lw	s4, 8(sp)
+	lw	s5, 12(sp)
+	addi	sp, sp, 16
 	j	ab_done
 ab_regvar:
 	# (reg=var): LHS is register, RHS is variable
+	addi	sp, sp, -16
+	sw	s3, 0(sp)
+	sw	s4, 4(sp)
+	sw	s5, 8(sp)
+	# Parse LHS as register
 	mv	a0, t3
 	mv	a1, t4
 	jal	asm_reg
-	addi	sp, sp, -24
-	sw	a0, 0(sp)
-	sub	t5, t5, s2
-	sw	t5, 4(sp)
-	sw	t6, 8(sp)
-	sw	s3, 12(sp)
-	sw	s4, 16(sp)
-	sw	s5, 20(sp)
-	mv	a0, t5
+	sw	a0, 12(sp)		# save reg number
+	# Look up RHS as variable
+	sub	a0, t5, s2
 	mv	a1, t6
 	jal	sym_try
 	li	t0, -1
 	beq	a0, t0, sf_fail
-	andi	a0, a0, -2
-	lw	a1, 0(sp)
+	andi	a0, a0, -2		# slot
+	lw	a1, 12(sp)		# reg number
 	jal	em_var_load
-	lw	s3, 12(sp)
-	lw	s4, 16(sp)
-	lw	s5, 20(sp)
-	addi	sp, sp, 24
+	lw	s3, 0(sp)
+	lw	s4, 4(sp)
+	lw	s5, 8(sp)
+	addi	sp, sp, 16
 ab_done:
 	# Skip ')'
 	jal	asm_skip
