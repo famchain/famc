@@ -6671,6 +6671,11 @@ asm_assemble:
 	jal	alloc
 	mv	s6, a0
 	sw	x0, 0(s6)
+	li	a0, 400
+	jal	alloc
+	mv	s7, a0
+	li	a1, 400
+	jal	memzero
 
 aa_line:
 	bgeu	s3, s4, aa_fix
@@ -6704,6 +6709,29 @@ aa_instr:
 	bne	t0, t1, aa_mnem
 	# Label definition: record address
 	addi	s3, s3, 1
+	# Check for numeric label (1-2 digit, 0-99)
+	li	t0, 3
+	bge	t4, t0, aa_named
+	lbu	t0, 0(t3)
+	addi	t0, t0, -48
+	li	t1, 10
+	bgeu	t0, t1, aa_named
+	li	t1, 2
+	bne	t4, t1, aa_nls
+	lbu	t1, 1(t3)
+	addi	t1, t1, -48
+	li	t2, 10
+	bgeu	t1, t2, aa_named
+	slli	t2, t0, 3
+	slli	t0, t0, 1
+	add	t0, t0, t2
+	add	t0, t0, t1
+aa_nls:
+	slli	t0, t0, 2
+	add	t0, s7, t0
+	sw	s0, 0(t0)
+	j	aa_line
+aa_named:
 	lw	t0, 0(s5)
 	li	t1, 64
 	blt	t0, t1, aa_ll_ok
@@ -7269,7 +7297,61 @@ af_loop:
 	lw	a1, FX_LEN(t0)
 	lw	t1, FX_ADDR(t0)
 	lw	t2, FX_TYPE(t0)
-	# Look up label in local label table
+	# Check for numeric label ref: all chars are digits except last which is b/f
+	# Must be 2-3 chars: digit(s) + b/f
+	li	t3, 2
+	blt	a1, t3, af_named
+	li	t3, 4
+	bge	a1, t3, af_named
+	# Check last char is b or f
+	addi	t3, a1, -1
+	add	t3, a0, t3
+	lbu	t3, 0(t3)
+	li	t4, 'b'
+	beq	t3, t4, af_nck
+	li	t4, 'f'
+	bne	t3, t4, af_named
+af_nck:
+	# Check all preceding chars are digits
+	lbu	t3, 0(a0)
+	addi	t3, t3, -48
+	li	t4, 10
+	bgeu	t3, t4, af_named
+	li	t4, 3
+	bne	a1, t4, af_nref
+	# 3 chars: check second char is digit too
+	lbu	t3, 1(a0)
+	addi	t3, t3, -48
+	li	t4, 10
+	bgeu	t3, t4, af_named
+af_nref:
+	# Save t6 (fixup loop index) — t5 is reloaded later
+	addi	sp, sp, -4
+	sw	t6, 0(sp)
+	mv	t4, a0
+	addi	a1, a1, -1
+	li	t3, 0
+af_nrd:
+	beqz	a1, af_nrlk
+	lbu	a2, 0(t4)
+	addi	a2, a2, -48
+	slli	a3, t3, 3
+	slli	t3, t3, 1
+	add	t3, t3, a3
+	add	t3, t3, a2
+	addi	t4, t4, 1
+	addi	a1, a1, -1
+	j	af_nrd
+af_nrlk:
+	lw	t6, 0(sp)
+	addi	sp, sp, 4
+	slli	t3, t3, 2
+	add	t3, s7, t3
+	lw	a3, 0(t3)
+	beqz	a3, asm_err
+	j	af_npat
+af_named:
+	# Look up label in named local label table
 	lw	t3, 0(s5)
 	li	t4, 0
 af_lbl:
@@ -7295,6 +7377,7 @@ af_lcmp:
 	j	af_lcmp
 af_lmatch:
 	lw	a3, LL_ADDR(t0)
+af_npat:
 	sub	a0, a3, t1
 	# Patch based on type: 0=B, 1=J
 	bnez	t2, af_jtype

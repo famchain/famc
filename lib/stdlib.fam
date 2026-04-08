@@ -1,122 +1,120 @@
 // Standard library for famc
-// Named asm blocks: always compiled, called by name
-// Macros: only compiled when used, inlined at call site
+// All functions are macros — zero cost if unused, inlined at call site.
+// Numeric labels (1:, 1b, 1f) allow multiple expansions without collision.
 
-// --- I/O (named asm — have internal labels, can't be macros) ---
-
-asm putchar {
-	lui t0, 0x10000
-	sb a0, 0(t0)
-	ret
+macro putchar(ch) {
+	asm {
+		(a0=ch)
+		lui t0, 0x10000
+		sb a0, 0(t0)
+	};
+	0
 };
 
-asm putstr {
-	lui t0, 0x10000
-ps_loop:
-	lbu t1, 0(a0)
-	beq t1, zero, ps_done
-	sb t1, 0(t0)
-	addi a0, a0, 1
-	j ps_loop
-ps_done:
-	ret
+macro putstr(ptr) {
+	asm {
+		(a0=ptr)
+		lui t0, 0x10000
+	1:
+		lbu t1, 0(a0)
+		beq t1, zero, 2f
+		sb t1, 0(t0)
+		addi a0, a0, 1
+		j 1b
+	2:
+	};
+	0
 };
 
-asm puthex {
-	lui t0, 0x10000
-	mv t2, a0
-	li t3, 28
-	li t1, 48
-	sb t1, 0(t0)
-	li t1, 120
-	sb t1, 0(t0)
-ph_digit:
-	srl t1, t2, t3
-	andi t1, t1, 0xF
-	li t4, 10
-	blt t1, t4, ph_dec
-	addi t1, t1, 55
-	j ph_emit
-ph_dec:
-	addi t1, t1, 48
-ph_emit:
-	sb t1, 0(t0)
-	addi t3, t3, -4
-	bge t3, zero, ph_digit
-	ret
+macro puthex(val) {
+	asm {
+		(a0=val)
+		lui t0, 0x10000
+		mv t2, a0
+		li t3, 28
+		li t1, 48
+		sb t1, 0(t0)
+		li t1, 120
+		sb t1, 0(t0)
+	1:
+		srl t1, t2, t3
+		andi t1, t1, 0xF
+		li t4, 10
+		blt t1, t4, 2f
+		addi t1, t1, 55
+		j 3f
+	2:
+		addi t1, t1, 48
+	3:
+		sb t1, 0(t0)
+		addi t3, t3, -4
+		bge t3, zero, 1b
+	};
+	0
 };
 
-asm putnum {
-	lui t0, 0x10000
-	mv t2, a0
-	li t3, 1
-	addi sp, sp, -40
-	li t4, 1000000000
-	sw t4, 0(sp)
-	li t4, 100000000
-	sw t4, 4(sp)
-	li t4, 10000000
-	sw t4, 8(sp)
-	li t4, 1000000
-	sw t4, 12(sp)
-	li t4, 100000
-	sw t4, 16(sp)
-	li t4, 10000
-	sw t4, 20(sp)
-	li t4, 1000
-	sw t4, 24(sp)
-	li t4, 100
-	sw t4, 28(sp)
-	li t4, 10
-	sw t4, 32(sp)
-	li t4, 1
-	sw t4, 36(sp)
-	mv t5, sp
-	addi t6, sp, 40
-pn_loop:
-	beq t5, t6, pn_done
-	lw t4, 0(t5)
-	li t1, 0
-pn_sub:
-	bltu t2, t4, pn_emit
-	sub t2, t2, t4
-	addi t1, t1, 1
-	j pn_sub
-pn_emit:
-	addi a0, t5, 4
-	beq a0, t6, pn_print
-	beq t1, zero, pn_skip
-	li t3, 0
-	j pn_print
-pn_skip:
-	bne t3, zero, pn_next
-pn_print:
-	addi t1, t1, 48
-	sb t1, 0(t0)
-pn_next:
-	addi t5, t5, 4
-	j pn_loop
-pn_done:
-	addi sp, sp, 40
-	ret
+macro putnum(val) {
+	asm {
+		(a0=val)
+		lui t0, 0x10000
+		mv t2, a0
+		li t3, 1
+		addi sp, sp, -40
+		li t4, 1000000000
+		sw t4, 0(sp)
+		li t4, 100000000
+		sw t4, 4(sp)
+		li t4, 10000000
+		sw t4, 8(sp)
+		li t4, 1000000
+		sw t4, 12(sp)
+		li t4, 100000
+		sw t4, 16(sp)
+		li t4, 10000
+		sw t4, 20(sp)
+		li t4, 1000
+		sw t4, 24(sp)
+		li t4, 100
+		sw t4, 28(sp)
+		li t4, 10
+		sw t4, 32(sp)
+		li t4, 1
+		sw t4, 36(sp)
+		mv t5, sp
+		addi t6, sp, 40
+	1:
+		beq t5, t6, 4f
+		lw t4, 0(t5)
+		li t1, 0
+	2:
+		bltu t2, t4, 3f
+		sub t2, t2, t4
+		addi t1, t1, 1
+		j 2b
+	3:
+		addi a0, t5, 4
+		beq a0, t6, 5f
+		beq t1, zero, 6f
+		li t3, 0
+		j 5f
+	6:
+		bne t3, zero, 7f
+	5:
+		addi t1, t1, 48
+		sb t1, 0(t0)
+	7:
+		addi t5, t5, 4
+		j 1b
+	4:
+		addi sp, sp, 40
+	};
+	0
 };
 
-asm exit {
-	lui t0, 0x100
-	lui t1, 5
-	addi t1, t1, 0x555
-	sw t1, 0(t0)
-halt:
-	wfi
-	j halt
-};
-
-// --- Macros (inlined, zero cost if unused) ---
-
-macro ALLOC(n) {
+macro alloc(nbytes) {
 	__val := 0;
 	asm {
-		(a0=n)
+		(a0=nbytes)
 		mv t0, gp
 		add gp, gp, a0
 		addi gp, gp, 15
@@ -126,11 +124,15 @@ macro ALLOC(n) {
 	__val
 };
 
-macro PUTCHAR(ch) {
+macro exit() {
 	asm {
-		(a0=ch)
-		lui t0, 0x10000
-		sb a0, 0(t0)
+		lui t0, 0x100
+		lui t1, 5
+		addi t1, t1, 0x555
+		sw t1, 0(t0)
+	1:
+		wfi
+		j 1b
 	};
 	0
 };
