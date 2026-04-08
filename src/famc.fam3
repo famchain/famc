@@ -228,6 +228,10 @@ pd_done:
 .equ	NK_INDEX,	72
 .equ	NK_SELF,	73
 .equ	NK_TYPED,	74
+.equ	NK_LTU,		75
+.equ	NK_GTU,		76
+.equ	NK_LTEU,	77
+.equ	NK_GTEU,	78
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -235,11 +239,11 @@ pd_done:
 .equ	P_TERNARY,	4
 .equ	P_OR,		6
 .equ	P_AND,		8
-.equ	P_BIT_OR,	10
-.equ	P_BIT_XOR,	12
-.equ	P_BIT_AND,	14
-.equ	P_EQUAL,	16
-.equ	P_COMPARE,	18
+.equ	P_EQUAL,	10
+.equ	P_COMPARE,	12
+.equ	P_BIT_OR,	14
+.equ	P_BIT_XOR,	16
+.equ	P_BIT_AND,	18
 .equ	P_SHIFT,	20
 .equ	P_ADD,		22
 .equ	P_MUL,		24
@@ -338,18 +342,19 @@ pd_done:
 .equ	FX_TYPE,	12
 .equ	FX_SZ,	16
 
-# Struct type table entry (max 8 fields per struct)
-# Each field: 8 bytes (name_off + name_len)
+# Struct type table entry (20 bytes)
+# Fields stored in separate alloc'd array (8 bytes each: name_off + name_len)
 .equ	SR_NOFF,	0
 .equ	SR_NLEN,	4
 .equ	SR_NFLD,	8
 .equ	SR_SIZE,	12
-.equ	SR_FLDS,	16
-.equ	SR_ENTRY,	80
+.equ	SR_FPTR,	16
+.equ	SR_ENTRY,	20
 
 # Struct type table header
 .equ	SRT_CNT,	0
-.equ	SRT_DATA,	4
+.equ	SRT_CAP,	4
+.equ	SRT_DATA,	8
 
 # Symbol table entry (16 bytes, power of 2 for easy indexing)
 .equ	SY_OFF,	0
@@ -552,6 +557,30 @@ lexer_init:
 	li	a2, 2
 	li	a3, NK_GTE
 	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_ltu
+	li	a2, 2
+	li	a3, NK_LTU
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_gtu
+	li	a2, 2
+	li	a3, NK_GTU
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_lteu
+	li	a2, 3
+	li	a3, NK_LTEU
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_gteu
+	li	a2, 3
+	li	a3, NK_GTEU
+	li	a4, 1
 	jal	lex_register
 	mv	a0, s0
 	lla	a1, tok_amp_amp
@@ -1366,6 +1395,14 @@ get_prec:
 	li	t0, NK_LTE
 	beq	a0, t0, gp_cmp
 	li	t0, NK_GTE
+	beq	a0, t0, gp_cmp
+	li	t0, NK_LTU
+	beq	a0, t0, gp_cmp
+	li	t0, NK_GTU
+	beq	a0, t0, gp_cmp
+	li	t0, NK_LTEU
+	beq	a0, t0, gp_cmp
+	li	t0, NK_GTEU
 	beq	a0, t0, gp_cmp
 	# Shift
 	li	t0, NK_LSHIFT
@@ -2783,12 +2820,14 @@ sym_init:
 	jal	memzero
 	li	t0, 256
 	sw	t0, ST_CAP(s3)
-	# Allocate struct type table: 4 + 32*80 = 2564
-	li	a0, 2564
+	# Allocate struct type table: 8 + 32*20 = 648
+	li	a0, 648
 	jal	alloc
 	mv	s4, a0
-	li	a1, 2564
+	li	a1, 648
 	jal	memzero
+	li	t0, 32
+	sw	t0, SRT_CAP(s4)
 	sw	s4, ST_STRT(s3)
 	mv	a0, s3
 	return
@@ -3137,6 +3176,11 @@ ge_binop:
 	# Dot access handled separately (RHS is a name, not a value)
 	li	t0, NK_DOT
 	beq	s5, t0, ge_dot
+	# Short-circuit && and ||
+	li	t0, NK_AMP_AMP
+	beq	s5, t0, ge_land
+	li	t0, NK_PIPE_PIPE
+	beq	s5, t0, ge_lor
 	# Generate LHS
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
@@ -3172,6 +3216,14 @@ ge_binop:
 	beq	s5, t0, gbo_lte
 	li	t0, NK_GTE
 	beq	s5, t0, gbo_gte
+	li	t0, NK_LTU
+	beq	s5, t0, gbo_sltu
+	li	t0, NK_GTU
+	beq	s5, t0, gbo_gtu
+	li	t0, NK_LTEU
+	beq	s5, t0, gbo_lteu
+	li	t0, NK_GTEU
+	beq	s5, t0, gbo_gteu
 	li	t0, NK_DBL_EQUAL
 	beq	s5, t0, gbo_eq
 	li	t0, NK_NE
@@ -3183,6 +3235,104 @@ ge_binop:
 	li	t0, NK_PERCENT
 	beq	s5, t0, gbo_mod
 	j	cg_err
+
+# --- Short-circuit && ---
+# a && b: if a==0, result=0; else result = (b != 0)
+ge_land:
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	# if a != 0, skip to eval b
+	li	a0, 8
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 1
+	jal	em_btype
+	mv	s6, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# b-path: evaluate b, normalize to 0/1
+	lw	t0, N_FIRST_CHILD(s3)
+	lw	a0, N_NEXT_SIB(t0)
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 3
+	li	a4, R_T0
+	jal	em_rtype
+	# j merge (skip short path)
+	mv	s7, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# short path: backpatch jal, set t0 = 0
+	sub	a1, s0, s6
+	mv	a0, s6
+	jal	patch_jal
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	# merge: backpatch j, push result
+	sub	a1, s0, s7
+	mv	a0, s7
+	jal	patch_jal
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Short-circuit || ---
+# a || b: if a!=0, result=1; else result = (b != 0)
+ge_lor:
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	# if a == 0, skip to eval b
+	li	a0, 8
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 0
+	jal	em_btype
+	mv	s6, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# b-path: evaluate b, normalize to 0/1
+	lw	t0, N_FIRST_CHILD(s3)
+	lw	a0, N_NEXT_SIB(t0)
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 3
+	li	a4, R_T0
+	jal	em_rtype
+	# j merge (skip short path)
+	mv	s7, s0
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# short path: backpatch jal, set t0 = 1
+	sub	a1, s0, s6
+	mv	a0, s6
+	jal	patch_jal
+	li	a0, R_T0
+	li	a1, 1
+	jal	em_li
+	# merge: backpatch j, push result
+	sub	a1, s0, s7
+	mv	a0, s7
+	jal	patch_jal
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
 
 gbo_add:
 	li	a0, 0
@@ -3241,7 +3391,55 @@ gbo_srl:
 	jal	em_rtype
 	j	gbo_push
 gbo_slt:
-	# a < b (unsigned): sltu t0, t0, t1
+	# a < b (signed): slt t0, t0, t1
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_gt:
+	# a > b (signed): slt t0, t1, t0
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	j	gbo_push
+gbo_lte:
+	# a <= b (signed): not(a > b) → slt t0, t1, t0; xori t0, t0, 1
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 4
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+gbo_gte:
+	# a >= b (signed): not(a < b) → slt t0, t0, t1; xori t0, t0, 1
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 2
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 4
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	j	gbo_push
+gbo_sltu:
+	# a <u b (unsigned): sltu t0, t0, t1
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3249,8 +3447,8 @@ gbo_slt:
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
-gbo_gt:
-	# a > b (unsigned): sltu t0, t1, t0
+gbo_gtu:
+	# a >u b (unsigned): sltu t0, t1, t0
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
@@ -3258,8 +3456,8 @@ gbo_gt:
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
-gbo_lte:
-	# a <= b (unsigned): not(a > b) → sltu t0, t1, t0; xori t0, t0, 1
+gbo_lteu:
+	# a <=u b (unsigned): not(a >u b)
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
@@ -3273,8 +3471,8 @@ gbo_lte:
 	li	a4, 0x13
 	jal	em_itype
 	j	gbo_push
-gbo_gte:
-	# a >= b (unsigned): not(a < b) → sltu t0, t0, t1; xori t0, t0, 1
+gbo_gteu:
+	# a >=u b (unsigned): not(a <u b)
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
@@ -4619,64 +4817,102 @@ gpo_sloc:
 
 # --- Struct definition ---
 ge_struct:
-	# N_DATA = name offset, N_LOC_LINE = name length (repurposed)
-	lw	s5, ST_STRT(s1)
-	lw	t0, SRT_CNT(s5)
-	li	t1, 32
-	blt	t0, t1, gs_ok
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 's'
-	jal	write_byte
-	li	a0, 't'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
-gs_ok:
-	slli	t1, t0, 6
-	slli	t2, t0, 4
-	add	t1, t1, t2
-	addi	t1, t1, SRT_DATA
-	add	s6, s5, t1
-	lw	t0, N_DATA(s3)
-	sw	t0, SR_NOFF(s6)
-	lw	t0, N_LOC_LINE(s3)
-	sw	t0, SR_NLEN(s6)
+	# Count fields first
 	lw	s7, N_FIRST_CHILD(s3)
 	li	s5, 0
+gs_count:
+	beqz	s7, gs_alloc
+	addi	s5, s5, 1
+	lw	s7, N_NEXT_SIB(s7)
+	j	gs_count
+gs_alloc:
+	# Allocate field array: nfld * 8 bytes
+	slli	a0, s5, 3
+	jal	alloc
+	mv	s6, a0
+	# Fill field entries
+	lw	s7, N_FIRST_CHILD(s3)
+	li	t3, 0
 gs_floop:
 	beqz	s7, gs_fdone
-	li	t0, 8
-	blt	s5, t0, gs_fok
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 's'
-	jal	write_byte
-	li	a0, 'f'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
-gs_fok:
-	slli	t0, s5, 3
-	addi	t0, t0, SR_FLDS
+	slli	t0, t3, 3
 	add	t0, s6, t0
 	lw	t1, N_LOC_OFF(s7)
 	sw	t1, 0(t0)
 	lw	t1, N_LOC_LEN(s7)
 	sw	t1, 4(t0)
-	addi	s5, s5, 1
+	addi	t3, t3, 1
 	lw	s7, N_NEXT_SIB(s7)
 	j	gs_floop
 gs_fdone:
-	sw	s5, SR_NFLD(s6)
+	# Check if struct table needs growth
+	lw	s7, ST_STRT(s1)
+	lw	t0, SRT_CNT(s7)
+	lw	t1, SRT_CAP(s7)
+	blt	t0, t1, gs_ok
+	# Grow: double capacity
+	slli	t1, t1, 1
+	addi	sp, sp, -8
+	sw	s5, 0(sp)
+	sw	s6, 4(sp)
+	# Allocate new table: 8 + new_cap * 20
+	mv	t2, t1
+	slli	a0, t2, 4
+	slli	t3, t2, 2
+	add	a0, a0, t3
+	addi	a0, a0, SRT_DATA
+	addi	sp, sp, -4
+	sw	t2, 0(sp)
+	jal	alloc
+	lw	t2, 0(sp)
+	addi	sp, sp, 4
+	mv	t3, a0
+	# Copy header + entries from old
+	lw	t0, SRT_CNT(s7)
+	sw	t0, SRT_CNT(t3)
+	sw	t2, SRT_CAP(t3)
+	# Copy entries: cnt * 20 bytes
+	slli	t0, t0, 4
+	lw	t4, SRT_CNT(s7)
+	slli	t4, t4, 2
+	add	t0, t0, t4
+	addi	t1, s7, SRT_DATA
+	addi	t2, t3, SRT_DATA
+gs_copy:
+	beqz	t0, gs_copied
+	lw	t4, 0(t1)
+	sw	t4, 0(t2)
+	addi	t1, t1, 4
+	addi	t2, t2, 4
+	addi	t0, t0, -4
+	j	gs_copy
+gs_copied:
+	mv	s7, t3
+	sw	s7, ST_STRT(s1)
+	lw	s5, 0(sp)
+	lw	s6, 4(sp)
+	addi	sp, sp, 8
+gs_ok:
+	# Compute entry address: cnt * 20 + SRT_DATA
+	lw	t0, SRT_CNT(s7)
+	slli	t1, t0, 4
+	slli	t2, t0, 2
+	add	t1, t1, t2
+	addi	t1, t1, SRT_DATA
+	add	t1, s7, t1
+	# Fill entry
+	lw	t0, N_DATA(s3)
+	sw	t0, SR_NOFF(t1)
+	lw	t0, N_LOC_LINE(s3)
+	sw	t0, SR_NLEN(t1)
+	sw	s5, SR_NFLD(t1)
 	slli	t0, s5, 2
-	sw	t0, SR_SIZE(s6)
-	lw	s5, ST_STRT(s1)
-	lw	t0, SRT_CNT(s5)
+	sw	t0, SR_SIZE(t1)
+	sw	s6, SR_FPTR(t1)
+	# Increment count
+	lw	t0, SRT_CNT(s7)
 	addi	t0, t0, 1
-	sw	t0, SRT_CNT(s5)
+	sw	t0, SRT_CNT(s7)
 	li	a0, R_T0
 	li	a1, 0
 	jal	em_li
@@ -6432,8 +6668,8 @@ str_find:
 	li	t1, 0
 stf_loop:
 	beq	t1, t0, stf_fail
-	slli	t2, t1, 6
-	slli	t3, t1, 4
+	slli	t2, t1, 4
+	slli	t3, t1, 2
 	add	t2, t2, t3
 	addi	t2, t2, SRT_DATA
 	add	t2, s5, t2
@@ -6485,8 +6721,8 @@ fld_find:
 	li	t1, 0
 ff_sloop:
 	beq	t1, t0, ff_fail
-	slli	t2, t1, 6
-	slli	t3, t1, 4
+	slli	t2, t1, 4
+	slli	t3, t1, 2
 	add	t2, t2, t3
 	addi	t2, t2, SRT_DATA
 	add	s6, s5, t2
@@ -6494,9 +6730,9 @@ ff_sloop:
 	li	t3, 0
 ff_floop:
 	beq	t3, t2, ff_fnext
-	slli	t4, t3, 3
-	addi	t4, t4, SR_FLDS
-	add	t4, s6, t4
+	lw	t4, SR_FPTR(s6)
+	slli	t5, t3, 3
+	add	t4, t4, t5
 	lw	t5, 4(t4)
 	bne	s4, t5, ff_fnxt2
 	lw	t5, 0(t4)
@@ -6582,9 +6818,9 @@ fr_typed:
 	li	t3, 0
 fr_floop:
 	beq	t3, s6, cg_err
-	slli	t4, t3, 3
-	addi	t4, t4, SR_FLDS
-	add	t4, s3, t4
+	lw	t4, SR_FPTR(s3)
+	slli	t5, t3, 3
+	add	t4, t4, t5
 	lw	t5, 4(t4)
 	bne	s5, t5, fr_fnxt
 	lw	t5, 0(t4)
@@ -6970,6 +7206,14 @@ tok_lte:
 	.ascii	"<="
 tok_gte:
 	.ascii	">="
+tok_ltu:
+	.ascii	"<u"
+tok_gtu:
+	.ascii	">u"
+tok_lteu:
+	.ascii	"<=u"
+tok_gteu:
+	.ascii	">=u"
 tok_amp_amp:
 	.ascii	"&&"
 tok_pipe_pipe:
