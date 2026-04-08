@@ -3233,7 +3233,7 @@ ge_ident:
 	jal	sym_try
 	li	t0, -1
 	beq	a0, t0, sf_fail
-	mv	s5, a0
+	andi	s5, a0, -2
 	# Check if outer variable (inside closure and index < boundary)
 	blt	s11, x0, gi_local
 	bge	a1, s11, gi_local
@@ -3951,6 +3951,18 @@ ga_newvar:
 	lw	a1, N_LOC_LEN(s6)
 	jal	sym_def
 	mv	s5, a0
+	# Set mutability: := makes mutable (bit 0 of SY_SLOT)
+	li	t0, NK_ASSIGN_MUT
+	bne	s4, t0, ga_nm_imm
+	lw	t1, ST_CNT(s1)
+	addi	t1, t1, -1
+	slli	t1, t1, 4
+	addi	t1, t1, ST_DATA
+	add	t1, s1, t1
+	lw	t0, SY_SLOT(t1)
+	ori	t0, t0, 1
+	sw	t0, SY_SLOT(t1)
+ga_nm_imm:
 	# Mark variable: struct type (>0), capturing closure (-1), or plain (0)
 	lw	t0, ST_STYP(s1)
 	bnez	t0, ga_nm_set
@@ -3993,6 +4005,23 @@ ga_nm_set:
 	jal	em_push
 	j	ge_done
 ga_reassign:
+	# Check mutability: bit 0 of slot must be set (mutable)
+	andi	t0, a0, 1
+	bnez	t0, ga_ra_mut
+	li	a0, 'E'
+	jal	write_byte
+	li	a0, 'm'
+	jal	write_byte
+	li	a0, 'u'
+	jal	write_byte
+	li	a0, 't'
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+ga_ra_mut:
+	# Clear mutability bit for actual slot offset
+	andi	a0, a0, -2
 	# Check: closure with captures escaping scope?
 	# ST_CAPS = capture boundary (s11 value from closure). If > 0,
 	# the closure has captures. If target var index < ST_CAPS,
@@ -4339,6 +4368,15 @@ ge_for:
 	lw	a1, N_LOC_LEN(s5)
 	jal	sym_def
 	mv	s6, a0
+	# Mark loop variable as mutable (set bit 0 of SY_SLOT)
+	lw	t1, ST_CNT(s1)
+	addi	t1, t1, -1
+	slli	t1, t1, 4
+	addi	t1, t1, ST_DATA
+	add	t1, s1, t1
+	lw	t0, SY_SLOT(t1)
+	ori	t0, t0, 1
+	sw	t0, SY_SLOT(t1)
 	li	a0, -4
 	li	a1, R_SP
 	li	a2, 0
@@ -5052,7 +5090,10 @@ ge_postfix:
 	jal	sym_try
 	li	t0, -1
 	beq	a0, t0, sf_fail
-	mv	s7, a0
+	# Check mutability
+	andi	t0, a0, 1
+	beqz	t0, cg_err
+	andi	s7, a0, -2
 	li	s3, 0
 	blt	s11, x0, gpo_ld
 	bge	a1, s11, gpo_ld
@@ -5947,7 +5988,10 @@ gp_preinc:
 	jal	sym_try
 	li	t0, -1
 	beq	a0, t0, sf_fail
-	mv	s7, a0
+	# Check mutability
+	andi	t0, a0, 1
+	beqz	t0, cg_err
+	andi	s7, a0, -2
 	# Check outer (save flag in s3, available since we dispatched)
 	li	s3, 0
 	blt	s11, x0, gpi_ld
