@@ -1,0 +1,174 @@
+nl = || putchar('\n');
+print = |x| { putnum(x); nl() };
+
+// ============================================================================
+// 1. ge_binop LHS frame slot reclaim — complex nested expressions
+// ============================================================================
+
+putstr("=== Binop stress ==="); nl();
+
+// Deeply nested binops — each LHS gets a frame slot, reclaimed after
+print((1 + 2) + (3 + 4) + (5 + 6) + (7 + 8));  // 36
+
+// Binop with function calls on both sides
+add = |a, b| a + b;
+print(add(1, 2) + add(3, 4));  // 10
+print(add(add(1, 2), add(3, 4)) + add(add(5, 6), add(7, 8)));  // 36
+
+// Binop inside a tight loop (frame slot leak = stack overflow)
+s := 0;
+for i in 0..10000 {
+    s = s + (i * 2 + 1);  // multiple binops per iteration
+};
+print(s);  // sum of first 10000 odd numbers = 10000^2 = 100000000
+
+// Nested struct field access in binop (chained dot + index)
+struct Point { x; y }
+a = Point(10, 20);
+b = Point(30, 40);
+print(a.x + b.y + a.y + b.x);  // 10+40+20+30 = 100
+
+// Recursive function result in binop
+fib = |n| n <= 1 ? n : self(n-1) + self(n-2);
+print(fib(15));  // 610
+
+// Typed placement in binop
+arr = alloc(sizeof(Point) * 3);
+Point@arr[0] = Point(100, 200);
+Point@arr[1] = Point(300, 400);
+x = Point@arr[0].x + Point@arr[1].y;
+print(x);  // 500
+
+// Macro result in binop
+macro DOUBLE(x) x + x;
+macro SQUARE(x) x * x;
+print(DOUBLE(5) + SQUARE(3));  // 10 + 9 = 19
+
+// ============================================================================
+// 2. Closure captures in nested scopes
+// ============================================================================
+
+putstr("=== Closure captures ==="); nl();
+
+// Capture in nested block
+outer := 42;
+result = {
+    inner = || outer + 1;
+    inner()
+};
+print(result);  // 43
+
+// Capture variable modified before closure call
+val := 10;
+get_val = || val;
+val = 20;
+print(get_val());  // 20 (by-reference capture)
+
+// Closure capturing loop variable (careful: loop var is scoped)
+fns = alloc(20);  // 5 word slots for closure pointers
+base := 100;
+for i in 0..5 {
+    base = 100 + i;
+};
+print(base);  // 104 (last iteration)
+
+// Closure with immediate nested call (no dangling)
+apply = |f, x| f(x);
+double = |x| x * 2;
+print(apply(double, 7));  // 14
+
+// Capture in ternary branches
+flag := 1;
+captured := 99;
+r = flag ? captured : 0;
+print(r);  // 99
+
+// ============================================================================
+// 3. For loop break with value + scoping
+// ============================================================================
+
+putstr("=== For loop scoping ==="); nl();
+
+// Break with value from for loop
+found := 0;
+for i in 0..100 {
+    i == 42 ? { found = i; break };
+};
+print(found);  // 42
+
+// Nested for loops with break
+r2 := 0;
+for i in 0..10 {
+    for j in 0..10 {
+        (i * 10 + j == 37) ? {
+            r2 = i * 100 + j;
+            break
+        };
+    };
+};
+print(r2);  // 307 (i=3, j=7)
+
+// For loop variable doesn't leak to outer scope
+before = 999;
+for zzzz in 0..5 { };
+// zzzz should not be accessible — but we can't test that without an error
+// Instead verify the frame is clean by allocating after
+after = 888;
+print(before + after);  // 1887
+
+// Break from deeply nested expression inside for
+sum2 := 0;
+for i in 0..1000 {
+    (i > 10) ? break;
+    sum2 = sum2 + i;
+};
+print(sum2);  // 0+1+...+10 = 55
+
+// For loop with complex body (binops + calls + macros)
+macro ABS(x) x < 0 ? 0 - x : x;
+total := 0;
+for i in 0..10 {
+    total = total + ABS(5 - i);
+};
+print(total);  // |5|+|4|+|3|+|2|+|1|+|0|+|1|+|2|+|3|+|4| = 25
+
+// Nested for with struct placement
+struct Pair { a; b }
+buf = alloc(sizeof(Pair) * 9);
+for i in 0..3 {
+    for j in 0..3 {
+        Pair@buf[i * 3 + j] = Pair(i, j);
+    };
+};
+// Read back diagonal
+diag := 0;
+for k in 0..3 {
+    diag = diag + Pair@buf[k * 3 + k].a + Pair@buf[k * 3 + k].b;
+};
+print(diag);  // (0+0) + (1+1) + (2+2) = 6
+
+// ============================================================================
+// 4. Combination stress test
+// ============================================================================
+
+putstr("=== Combined ==="); nl();
+
+// Recursive function + struct + typed placement + for loop + macro
+struct Node { val; left; right }
+
+// Build a simple sum tree recursively
+tree_sum = |nodes, lo, hi| {
+    lo >= hi ? return 0;
+    hi - lo == 1 ? return Node@nodes[lo].val;
+    mid = lo + (hi - lo) / 2;
+    self(nodes, lo, mid) + self(nodes, mid, hi)
+};
+
+data = alloc(sizeof(Node) * 8);
+for i in 0..8 {
+    Node@data[i] = Node(i + 1, 0, 0);
+};
+print(tree_sum(data, 0, 8));  // 1+2+...+8 = 36
+
+putstr("=== All stress tests passed ==="); nl();
+exit();
