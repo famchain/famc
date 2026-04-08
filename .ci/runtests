@@ -410,6 +410,13 @@ test_runs    "self recursion"           "f = |n| { n <= 1 ? return 1; n * self(n
 test_runs    "self fibonacci"           "fib = |n| { n <= 1 ? return n; self(n-1) + self(n-2) }; fib(10)"
 test_error   "self outside closure"     "self" "Ecg"
 
+echo "=== Macros ==="
+test_runs    "macro basic"              "macro DBL(x) x + x; DBL(21)"
+test_runs    "macro two params"         "macro MAX(a, b) a > b ? a : b; MAX(10, 20)"
+test_runs    "macro nested"             "macro MAX(a, b) a > b ? a : b; macro MIN(a, b) a < b ? a : b; macro CLAMP(x, lo, hi) MIN(MAX(x, lo), hi); CLAMP(150, 0, 100)"
+test_runs    "macro zero params"        "macro ANSWER() 42; ANSWER()"
+test_runs    "macro hygienic"           "x := 99; macro DBL(x) x + x; DBL(5)"
+
 # ============================================================================
 echo "=== Error detection (runtime) ==="
 

@@ -236,6 +236,7 @@ pd_done:
 .equ	NK_IN,		80
 .equ	NK_DOTDOT,	81
 .equ	NK_DOTDOTEQ,	82
+.equ	NK_MACRO,	83
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -373,7 +374,19 @@ pd_done:
 .equ	ST_CAPS,	12
 .equ	ST_STRT,	16
 .equ	ST_STYP,	20
-.equ	ST_DATA,	24
+.equ	ST_MCRT,	24
+.equ	ST_DATA,	28
+
+# Macro table entry (12 bytes)
+.equ	MR_NOFF,	0
+.equ	MR_NLEN,	4
+.equ	MR_AST,		8
+.equ	MR_ENTRY,	12
+
+# Macro table header
+.equ	MRT_CNT,	0
+.equ	MRT_CAP,	4
+.equ	MRT_DATA,	8
 
 # ============================================================================
 # Memory helpers
@@ -876,6 +889,12 @@ lexer_init:
 	lla	a1, kw_self
 	li	a2, 4
 	li	a3, NK_SELF
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_macro
+	li	a2, 5
+	li	a3, NK_MACRO
 	li	a4, 1
 	jal	lex_register
 
@@ -1596,6 +1615,8 @@ parse_expr:
 	beq	s3, t0, px_closure
 	li	t0, NK_PIPE_PIPE
 	beq	s3, t0, px_closure0
+	li	t0, NK_MACRO
+	beq	s3, t0, px_macro
 
 	# Unknown prefix — error
 	li	a0, 'E'
@@ -1740,6 +1761,60 @@ pf_end:
 	mv	a1, a0
 	mv	a0, s4
 	jal	append_child		# child 3: body
+	j	px_infix
+
+	# --- Prefix: macro NAME(params) body ---
+px_macro:
+	jal	advance			# consume 'macro'
+	# Save macro name
+	lw	s6, N_LOC_OFF(s1)
+	lw	s7, N_LOC_LEN(s1)
+	jal	advance			# consume name
+	# Create closure-like AST node (params + body)
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_MACRO
+	sw	t0, N_KIND(s4)
+	# Check for params
+	lw	t0, N_KIND(s1)
+	li	t1, NK_LPAREN
+	bne	t0, t1, pm_body
+	jal	advance			# consume '('
+pm_params:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_RPAREN
+	beq	t0, t1, pm_pend
+	# Add param ident as child
+	jal	alloc_node
+	mv	a1, a0
+	lw	t0, N_KIND(s1)
+	sw	t0, N_KIND(a1)
+	mv	a0, s1
+	addi	sp, sp, -4
+	sw	a1, 0(sp)
+	jal	copy_loc
+	lw	a1, 0(sp)
+	addi	sp, sp, 4
+	mv	a0, s4
+	jal	append_child
+	jal	advance			# consume param
+	lw	t0, N_KIND(s1)
+	li	t1, NK_COMMA
+	bne	t0, t1, pm_params
+	jal	advance			# consume comma
+	j	pm_params
+pm_pend:
+	jal	advance			# consume ')'
+pm_body:
+	# Parse body expression
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	# Store name in the macro node for codegen
+	sw	s6, N_LOC_OFF(s4)
+	sw	s7, N_LOC_COL(s4)
 	j	px_infix
 
 	# --- Prefix: self ---
@@ -2916,11 +2991,11 @@ pc_done:
 #   Returns a0 = symbol table pointer
 sym_init:
 	prologue s3 s4 x0
-	# 24 header + 256 * 16 entries = 4120
-	li	a0, 4120
+	# 28 header + 256 * 16 entries = 4124
+	li	a0, 4124
 	jal	alloc
 	mv	s3, a0
-	li	a1, 4120
+	li	a1, 4124
 	jal	memzero
 	li	t0, 256
 	sw	t0, ST_CAP(s3)
@@ -2933,6 +3008,15 @@ sym_init:
 	li	t0, 32
 	sw	t0, SRT_CAP(s4)
 	sw	s4, ST_STRT(s3)
+	# Allocate macro table: 8 + 32*12 = 392
+	li	a0, 392
+	jal	alloc
+	mv	s4, a0
+	li	a1, 392
+	jal	memzero
+	li	t0, 32
+	sw	t0, MRT_CAP(s4)
+	sw	s4, ST_MCRT(s3)
 	mv	a0, s3
 	return
 
@@ -2966,6 +3050,8 @@ sym_def:
 	sw	t0, ST_STRT(t3)
 	lw	t0, ST_STYP(s1)
 	sw	t0, ST_STYP(t3)
+	lw	t0, ST_MCRT(s1)
+	sw	t0, ST_MCRT(t3)
 	# Copy entries (count * 16 bytes)
 	lw	t0, ST_CNT(s1)
 	slli	t0, t0, 4
@@ -3148,6 +3234,8 @@ gen_expr:
 	beq	s4, t0, ge_typed
 	li	t0, NK_SELF
 	beq	s4, t0, ge_self
+	li	t0, NK_MACRO
+	beq	s4, t0, ge_macro
 	j	cg_err
 
 # --- Number literal ---
@@ -4216,7 +4304,26 @@ ga_c_mul:
 	jal	em_mul_t0t1
 	j	ga_simple
 ga_c_div:
-	# t0 /= t1: emit divmod, mv t0, t2 (quotient)
+	# old(t1) / rhs(t0): swap to t0=old, t1=rhs for divmod
+	# Emit: xor t0,t0,t1; xor t1,t0,t1; xor t0,t0,t1
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 4
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 4
+	li	a4, R_T1
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 4
+	li	a4, R_T0
+	jal	em_rtype
 	jal	gbo_divmod
 	li	a0, 0
 	li	a1, R_T2
@@ -4226,7 +4333,25 @@ ga_c_div:
 	jal	em_itype
 	j	ga_simple
 ga_c_mod:
-	# t0 %= t1: emit divmod, mv t0, t3/x28 (remainder)
+	# old(t1) % rhs(t0): swap to t0=old, t1=rhs for divmod
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 4
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 4
+	li	a4, R_T1
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 4
+	li	a4, R_T0
+	jal	em_rtype
 	jal	gbo_divmod
 	li	a0, 0
 	li	a1, 28
@@ -4937,8 +5062,17 @@ gc_cl_sym:
 	lw	a0, N_LOC_OFF(s5)
 	lw	a1, N_LOC_LEN(s5)
 	jal	str_find
-	beqz	a0, sf_fail
+	beqz	a0, gc_ck_macro
 	# Struct constructor! a0 = entry ptr. Stack-allocated via ST_NEXT.
+	j	gc_struct
+gc_ck_macro:
+	# Not in struct table — try macro table
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	mac_find
+	beqz	a0, sf_fail
+	j	gc_macro
+gc_struct:
 	mv	s6, a0
 	lw	s5, SR_NFLD(s6)
 	lw	s7, SR_SIZE(s6)
@@ -4994,6 +5128,81 @@ gc_sf_done:
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
+gc_macro:
+	# a0 = macro AST. Args already loaded into a-regs by gc_pop_args.
+	# Save scope
+	mv	s6, a0
+	lw	t0, ST_CNT(s1)
+	lw	t1, ST_NEXT(s1)
+	addi	sp, sp, -8
+	sw	t0, 0(sp)
+	sw	t1, 4(sp)
+	# Walk param children (all but last = body)
+	lw	s5, N_FIRST_CHILD(s6)
+	mv	s7, s5
+	# Find last child (body)
+gm_last:
+	lw	t0, N_NEXT_SIB(s7)
+	beqz	t0, gm_bind
+	mv	s7, t0
+	j	gm_last
+gm_bind:
+	# s7 = body. Bind params from s5 to s7.
+	li	s3, 0
+gm_bloop:
+	beq	s5, s7, gm_body
+	# Define param as temp variable
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	addi	sp, sp, -4
+	sw	s3, 0(sp)
+	jal	sym_def
+	mv	s4, a0
+	# Mark as mutable (macros may assign to params)
+	lw	t1, ST_CNT(s1)
+	addi	t1, t1, -1
+	slli	t1, t1, 4
+	addi	t1, t1, ST_DATA
+	add	t1, s1, t1
+	lw	t0, SY_SLOT(t1)
+	ori	t0, t0, 1
+	sw	t0, SY_SLOT(t1)
+	# Allocate runtime slot + store a_n
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	mv	a0, s4
+	lw	t0, 0(sp)
+	addi	a1, t0, R_A0
+	jal	em_var_store
+	lw	s3, 0(sp)
+	addi	sp, sp, 4
+	addi	s3, s3, 1
+	lw	s5, N_NEXT_SIB(s5)
+	j	gm_bloop
+gm_body:
+	# Compile macro body
+	mv	a0, s7
+	jal	gen_expr
+	# Restore scope
+	lw	t0, 0(sp)
+	sw	t0, ST_CNT(s1)
+	lw	t0, 4(sp)
+	sw	t0, ST_NEXT(s1)
+	addi	sp, sp, 8
+	j	ge_done
+
 gc_cl_chk:
 	# If inside closure body (s11>0), check if callee has captures
 	blt	s11, x0, gc_cl_ok
@@ -5917,6 +6126,36 @@ gat_floop:
 gat_done:
 	# Push dest as result
 	li	a0, R_T1
+	jal	em_push
+	j	ge_done
+
+# --- Macro definition ---
+ge_macro:
+	# Store in macro table. s3 = NK_MACRO node.
+	# N_LOC_OFF = name offset, N_LOC_COL = name length
+	lw	s5, ST_MCRT(s1)
+	lw	t0, MRT_CNT(s5)
+	lw	t1, MRT_CAP(s5)
+	blt	t0, t1, gm_ok
+	j	cg_err
+gm_ok:
+	slli	t1, t0, 3
+	slli	t2, t0, 2
+	add	t1, t1, t2
+	addi	t1, t1, MRT_DATA
+	add	t1, s5, t1
+	lw	t2, N_LOC_OFF(s3)
+	sw	t2, MR_NOFF(t1)
+	lw	t2, N_LOC_COL(s3)
+	sw	t2, MR_NLEN(t1)
+	sw	s3, MR_AST(t1)
+	addi	t0, t0, 1
+	sw	t0, MRT_CNT(s5)
+	# Macro def produces no runtime value — push dummy 0
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
 	jal	em_push
 	j	ge_done
 
@@ -7312,6 +7551,58 @@ fr_done:
 	addi	sp, sp, 20
 	ret
 
+# mac_find: search macro table by name
+#   a0=name offset, a1=name length, s1=symtab, s2=input base
+#   Returns a0 = AST pointer, or 0 if not found
+mac_find:
+	addi	sp, sp, -16
+	sw	ra, 12(sp)
+	sw	s3, 0(sp)
+	sw	s4, 4(sp)
+	sw	s5, 8(sp)
+	mv	s3, a0
+	mv	s4, a1
+	lw	s5, ST_MCRT(s1)
+	lw	t0, MRT_CNT(s5)
+	li	t1, 0
+mf_loop:
+	beq	t1, t0, mf_fail
+	slli	t2, t1, 3
+	slli	t3, t1, 2
+	add	t2, t2, t3
+	addi	t2, t2, MRT_DATA
+	add	t2, s5, t2
+	lw	t3, MR_NLEN(t2)
+	bne	s4, t3, mf_next
+	lw	t3, MR_NOFF(t2)
+	add	t3, s2, t3
+	add	t4, s2, s3
+	mv	t5, s4
+mf_cmp:
+	beqz	t5, mf_found
+	lbu	t6, 0(t3)
+	lbu	a2, 0(t4)
+	bne	t6, a2, mf_next
+	addi	t3, t3, 1
+	addi	t4, t4, 1
+	addi	t5, t5, -1
+	j	mf_cmp
+mf_found:
+	lw	a0, MR_AST(t2)
+	j	mf_done
+mf_next:
+	addi	t1, t1, 1
+	j	mf_loop
+mf_fail:
+	li	a0, 0
+mf_done:
+	lw	s3, 0(sp)
+	lw	s4, 4(sp)
+	lw	s5, 8(sp)
+	lw	ra, 12(sp)
+	addi	sp, sp, 16
+	ret
+
 # --- Asm error ---
 asm_fx_err:
 	li	a0, 'E'
@@ -7771,6 +8062,8 @@ kw_in:
 	.ascii	"in"
 kw_self:
 	.ascii	"self"
+kw_macro:
+	.ascii	"macro"
 tok_dotdoteq:
 	.ascii	"..="
 tok_dotdot:

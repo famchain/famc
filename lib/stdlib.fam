@@ -113,3 +113,5 @@ halt:
 	wfi
 	j halt
 };
+
+macro MAX(a, b) a > b ? a : b;
