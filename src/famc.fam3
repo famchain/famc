@@ -237,6 +237,7 @@ pd_done:
 .equ	NK_DOTDOT,	81
 .equ	NK_DOTDOTEQ,	82
 .equ	NK_MACRO,	83
+.equ	NK_STKALLOC,	84
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -939,6 +940,12 @@ lexer_init:
 	li	a3, NK_MACRO
 	li	a4, 1
 	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_stkalloc
+	li	a2, 10
+	li	a3, NK_STKALLOC
+	li	a4, 1
+	jal	lex_register
 
 	mv	a0, s0			# return lexer ptr
 	return
@@ -1632,6 +1639,8 @@ parse_expr:
 	beq	s3, t0, px_struct
 	li	t0, NK_SIZEOF
 	beq	s3, t0, px_sizeof
+	li	t0, NK_STKALLOC
+	beq	s3, t0, px_stkalloc
 	li	t0, NK_PIPE
 	beq	s3, t0, px_closure
 	li	t0, NK_PIPE_PIPE
@@ -2099,6 +2108,27 @@ px_sizeof:
 	mv	a1, s4
 	jal	copy_loc
 	jal	advance			# consume 'sizeof'
+	li	a0, NK_LPAREN
+	jal	expect
+	li	a0, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child
+	li	a0, NK_RPAREN
+	jal	expect
+	j	px_infix
+
+	# --- Prefix: stackalloc(size) ---
+px_stkalloc:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_STKALLOC
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance
 	li	a0, NK_LPAREN
 	jal	expect
 	li	a0, P_NONE
@@ -3235,6 +3265,8 @@ gen_expr:
 	beq	s4, t0, ge_self
 	li	t0, NK_MACRO
 	beq	s4, t0, ge_macro
+	li	t0, NK_STKALLOC
+	beq	s4, t0, ge_stkalloc
 	j	cg_err
 
 # --- Number literal ---
@@ -4398,12 +4430,46 @@ ga_do_st:
 	beq	t1, s5, ga_ok_st
 	j	cg_err
 ga_ok_st:
+	# Save RHS to frame slot to protect from binop spill overlap
+	li	a0, R_T0
+	jal	em_pop
+	lw	s7, ST_NEXT(s1)
+	addi	s7, s7, -4
+	sw	s7, ST_NEXT(s1)
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	mv	a0, s7
+	li	a1, R_T0
+	jal	em_var_store
+	# Generate address (binop spill can't overwrite RHS now)
 	lw	a0, N_FIRST_CHILD(s6)
 	jal	gen_expr
 	li	a0, R_T1
 	jal	em_pop
-	li	a0, R_T0
-	jal	em_pop
+	# Load saved RHS and reclaim frame slot
+	mv	a0, s7
+	li	a1, R_T0
+	jal	em_var_load
+	addi	s7, s7, 4
+	sw	s7, ST_NEXT(s1)
+	li	a0, 4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
 	# sw/sh/sb: funct3=2 for *, 1 for #, 0 for @
 	li	t0, NK_STAR
 	beq	s5, t0, ga_sw
@@ -5251,6 +5317,19 @@ gc_ld_done:
 	li	a3, R_T0
 	li	a4, 0x13
 	jal	em_itype
+	# Save s1 (outer frame) before clobbering
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	li	a1, R_S1
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
 	# Emit: mv s1, s0 (pass outer frame to closure)
 	li	a0, 0
 	li	a1, R_S0
@@ -5264,6 +5343,19 @@ gc_ld_done:
 	li	a2, 0
 	li	a3, 1
 	li	a4, 0x67
+	jal	em_itype
+	# Restore s1 (outer frame)
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 2
+	li	a3, R_S1
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, 4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
 	jal	em_itype
 	# Push return value (a0)
 	li	a0, R_A0
@@ -6166,6 +6258,97 @@ gm_ok:
 	li	a0, R_T0
 	li	a1, 0
 	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Stack allocation: stackalloc(size) ---
+# For constant size: allocate via ST_NEXT, emit addi sp, return s0+offset pointer.
+# For dynamic size: evaluate, negate, add to sp, return sp.
+ge_stkalloc:
+	lw	s5, N_FIRST_CHILD(s3)
+	# Check if constant (number literal)
+	lw	t0, N_KIND(s5)
+	li	t1, NK_NUMBER
+	bne	t0, t1, gs_dyn
+	# Constant path: use ST_NEXT for stable s0-relative pointer
+	lw	a0, N_LOC_OFF(s5)
+	add	a0, s2, a0
+	lw	a1, N_LOC_LEN(s5)
+	jal	parse_int
+	mv	s5, a0
+	# Align to 4 bytes
+	addi	s5, s5, 3
+	andi	s5, s5, -4
+	# Update ST_NEXT
+	lw	t0, ST_NEXT(s1)
+	sub	t0, t0, s5
+	sw	t0, ST_NEXT(s1)
+	mv	s6, t0
+	# Emit: addi sp, sp, -size
+	neg	a0, s5
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	# Emit: sp >= tp check
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Result = s0 + offset (stable pointer)
+	li	a0, R_T0
+	mv	a1, s6
+	jal	em_li
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_S0
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gs_dyn:
+	# Dynamic path: evaluate size, use sp directly
+	mv	a0, s5
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	# Emit: neg t0; add sp, sp, t0
+	li	a0, 0x20
+	li	a1, R_T0
+	li	a2, R_ZERO
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, R_T0
+	li	a3, 0
+	li	a4, R_SP
+	jal	em_rtype
+	# Emit: sp >= tp check
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Result = sp
+	li	a0, 0
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
 	li	a0, R_T0
 	jal	em_push
 	j	ge_done
@@ -8545,6 +8728,8 @@ kw_self:
 	.ascii	"self"
 kw_macro:
 	.ascii	"macro"
+kw_stkalloc:
+	.ascii	"stackalloc"
 tok_dotdoteq:
 	.ascii	"..="
 tok_dotdot:
