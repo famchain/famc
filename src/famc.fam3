@@ -238,6 +238,7 @@ pd_done:
 .equ	NK_DOTDOTEQ,	82
 .equ	NK_MACRO,	83
 .equ	NK_STKALLOC,	84
+.equ	NK_MACRO_CALL,	85
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -2204,10 +2205,10 @@ px_infix:
 	# Check for ident@ → typed placement expression
 	lw	t0, N_KIND(s1)
 	li	t1, NK_AT
-	bne	t0, t1, px_ix_norm
+	bne	t0, t1, px_ix_ck_bang
 	lw	t0, N_KIND(s4)
 	li	t1, NK_IDENT
-	bne	t0, t1, px_ix_norm
+	bne	t0, t1, px_ix_ck_bang
 	# ident@ detected: create NK_TYPED node
 	jal	advance			# consume @
 	jal	alloc_node
@@ -2227,6 +2228,29 @@ px_infix:
 	jal	append_child
 	mv	s4, s6
 	j	px_infix
+	# Check for macro call syntax: ident!(args)
+px_ix_ck_bang:
+	lw	t0, N_KIND(s1)
+	li	t1, NK_BANG
+	bne	t0, t1, px_ix_norm
+	lw	t0, N_KIND(s4)
+	li	t1, NK_IDENT
+	bne	t0, t1, px_ix_norm	# only ident!() is macro call
+	jal	advance			# consume !
+	li	a0, NK_LPAREN
+	jal	expect			# consume (
+	jal	alloc_node
+	mv	s6, a0
+	li	t1, NK_MACRO_CALL
+	sw	t1, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s6
+	mv	a1, s4
+	jal	append_child		# callee
+	mv	s4, s6
+	j	call_args		# reuse arg parsing + call_end
 px_ix_norm:
 	# Peek at next token kind (already in s1 from advance/expect)
 	lw	a0, N_KIND(s1)
@@ -3238,6 +3262,8 @@ gen_expr:
 	li	t0, NK_TERNARY
 	beq	s4, t0, ge_tern
 	li	t0, NK_CALL
+	beq	s4, t0, ge_call
+	li	t0, NK_MACRO_CALL
 	beq	s4, t0, ge_call
 	li	t0, NK_RETURN
 	beq	s4, t0, ge_return
@@ -5044,6 +5070,10 @@ gc_pop_args:
 	addi	sp, sp, 4
 	j	gc_pop_args
 gc_call:
+	# If NK_MACRO_CALL, skip directly to macro lookup
+	lw	t0, N_KIND(s3)
+	li	t1, NK_MACRO_CALL
+	beq	t0, t1, gc_ck_macro
 	# Check for self() call first
 	lw	t0, N_KIND(s5)
 	li	t1, NK_SELF
@@ -5121,12 +5151,27 @@ gc_cl_sym:
 	# Struct constructor! a0 = entry ptr. Stack-allocated via ST_NEXT.
 	j	gc_struct
 gc_ck_macro:
-	# Not in struct table — try macro table
+	# Try macro table
 	lw	a0, N_LOC_OFF(s5)
 	lw	a1, N_LOC_LEN(s5)
 	jal	mac_find
-	beqz	a0, sf_fail
-	j	gc_macro
+	beqz	a0, gc_mac_nf
+	# Found in macro table — check if called with !
+	lw	t0, N_KIND(s3)
+	li	t1, NK_MACRO_CALL
+	beq	t0, t1, gc_macro
+	# Regular call() on a macro — error: use macro!() syntax
+	mv	a0, s3
+	lla	a1, em_use_bang
+	j	err_at
+gc_mac_nf:
+	# Not found — if NK_MACRO_CALL, that's an error
+	lw	t0, N_KIND(s3)
+	li	t1, NK_MACRO_CALL
+	bne	t0, t1, sf_fail
+	mv	a0, s3
+	lla	a1, em_not_macro
+	j	err_at
 gc_struct:
 	mv	s6, a0
 	lw	s5, SR_NFLD(s6)
@@ -8774,6 +8819,12 @@ em_too_many:
 	.byte	0
 em_type_mis:
 	.ascii	"type mismatch"
+	.byte	0
+em_use_bang:
+	.ascii	"use macro!() syntax"
+	.byte	0
+em_not_macro:
+	.ascii	"not a macro"
 	.byte	0
 em_jump_ovf:
 	.ascii	"jump offset overflow"
