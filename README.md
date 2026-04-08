@@ -32,7 +32,7 @@ q32 source.bin           # runs on QEMU rv32i virt machine
 
 ## Language Overview
 
-Everything is an expression. All values are 32-bit words. No type system -- structs provide named field access and stride information, but every variable is just a word.
+Everything is an expression. All values are 32-bit words. No type system — structs provide named field access and stride information, but every variable is just a word.
 
 ### Variables
 
@@ -40,7 +40,9 @@ Everything is an expression. All values are 32-bit words. No type system -- stru
 x = 42;          // immutable
 y := 0;          // mutable (can be reassigned)
 y = 10;          // ok
-y += 5;          // compound assignment: += -= *= /= %= &= |= ^= <<= >>=
+y += 5;          // compound: += -= *= /= %= &= |= ^= <<= >>=
+y++;              // postfix increment/decrement
+++y;              // prefix increment/decrement
 ```
 
 ### Arithmetic & Bitwise
@@ -62,7 +64,7 @@ a <u b   a >u b   a <=u b   a >=u b
 
 Bitwise operators bind tighter than comparisons (unlike C):
 ```
-flags & MASK == 0    // parsed as (flags & MASK) == 0, not flags & (MASK == 0)
+flags & MASK == 0    // parsed as (flags & MASK) == 0
 ```
 
 ### Logical Operators (Short-Circuit)
@@ -176,28 +178,68 @@ MAX(expensive(), 0)     // expensive() called only once
 ### Inline Assembly
 
 ```
-asm putchar {
-    lui t0, 0x10000
-    sb a0, 0(t0)
-    ret
+// Named asm blocks — called by name
+asm double { add a0, a0, a0; ret };
+double(21)              // returns 42
+
+// Anonymous inline asm — executes in place
+val := 0;
+asm {
+    li t0, 42
+    (val=t0)         // store register to variable
 };
 
-asm double { add a0, a0, a0; ret };
-
-putchar(65);            // prints 'A'
-double(21)              // returns 42
+// Variable bindings bridge asm and the language
+asm {
+    (t0=val)         // load variable to register
+    (result=t0)      // store register to variable
+};
 ```
 
 Standard RISC-V calling convention: arguments in a0-a7, return in a0.
 
+### Numeric Local Labels
+
+Numeric labels (`0:`-`99:`) can be reused across macro expansions. Reference with `Nb` (backward) or `Nf` (forward):
+
+```
+macro COUNT(n) {
+    result := 0;
+    asm {
+        (a0=n)
+        li t0, 0
+    1:
+        addi t0, t0, 1
+        bne t0, a0, 1b       // jump back to 1:
+        (result=t0)
+    };
+    result
+};
+```
+
+## Standard Library
+
+`lib/stdlib.fam` is fully macro-based — zero cost if unused:
+
+| Macro | Description |
+|-------|-------------|
+| `putchar(ch)` | Write byte to UART |
+| `putstr(ptr)` | Write null-terminated string |
+| `putnum(val)` | Print decimal number |
+| `puthex(val)` | Print hex with 0x prefix |
+| `alloc(n)` | Bump-allocate n bytes (16-byte aligned) |
+| `exit()` | Halt the machine |
+
+All stdlib functions inline at the call site. A minimal program (`putchar('x'); exit()`) compiles to ~600 bytes.
+
 ## Safety Properties
 
 - **Stack guard**: every stack growth checks `sp >= tp`. Set `tp` to control stack limits per hart.
-- **No heap in generated code**: `gp` is never touched by compiler output. User controls heap via stdlib `alloc`.
+- **No heap in generated code**: `gp` is never touched by compiler output. User controls heap via `alloc`.
 - **Immutability**: `=` creates immutable bindings. Reassignment is a compile error.
 - **Typed field validation**: accessing a field not in the variable's struct type is a compile error.
 - **Placement type check**: `A@arr[0] = B(1,2)` errors if A and B are different structs.
-- **Scope checks**: `return` outside closure, `break`/`continue` outside loop -> compile error.
+- **Scope checks**: `return` outside closure, `break`/`continue` outside loop → compile error.
 - **Arg limits**: max 8 arguments per call (a0-a7), checked at compile time.
 - **Table overflow checks**: all compiler tables are bounds-checked or dynamically grown.
 - **Branch safety**: asm B-type branches use trampoline pattern (unlimited range).
@@ -221,17 +263,13 @@ Format: `error:line:col message`. One error, then exit.
 - **Position independent**: all jumps PC-relative, data s0-relative
 - **Multi-hart ready**: no global state, per-hart sp/tp/gp
 
-## Standard Library
-
-`lib/stdlib.fam` provides: `putchar`, `putstr`, `putnum`, `puthex`, `alloc`, `exit`. These are asm blocks prepended to every program by the `famc` wrapper script.
-
 ## Tools
 
-- `famc` -- compiler wrapper (prepends stdlib, compiles, checks output)
-- `q32` -- QEMU runner (checks binary magic before execution)
-- `tools/fmt_fam.py` -- source formatter (tab indentation, blank line collapsing)
-- `tools/fmt_asm.py` -- assembly formatter (for .fam3 files)
-- `.ci/runtests` -- test suite (177 tests)
+- `famc` — compiler wrapper (prepends stdlib, compiles, checks output)
+- `q32` — QEMU runner (checks binary magic before execution)
+- `tools/fmt_fam.py` — source formatter (tab indentation, blank line collapsing)
+- `tools/fmt_asm.py` — assembly formatter (for .fam3 files)
+- `.ci/runtests` — test suite (177 tests)
 
 ## Tests
 
