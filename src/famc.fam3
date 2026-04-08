@@ -415,6 +415,41 @@ mz_loop:
 mz_done:
 	ret
 
+# write_str: print null-terminated string at a0
+write_str:
+	prologue s0 x0
+	mv	s0, a0
+wst_loop:
+	lbu	a0, 0(s0)
+	beqz	a0, wst_done
+	jal	write_byte
+	addi	s0, s0, 1
+	j	wst_loop
+wst_done:
+	return
+
+# err_at: print error with location and message, then exit
+#   a0 = AST/token node (for line:col), a1 = message string (null-terminated)
+err_at:
+	prologue s0 s1 x0
+	mv	s0, a0
+	mv	s1, a1
+	lla	a0, msg_error
+	jal	write_str
+	lw	a0, N_LOC_LINE(s0)
+	jal	print_dec
+	li	a0, ':'
+	jal	write_byte
+	lw	a0, N_LOC_COL(s0)
+	jal	print_dec
+	li	a0, ' '
+	jal	write_byte
+	mv	a0, s1
+	jal	write_str
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
 # ============================================================================
 # Lexer
 # ============================================================================
@@ -1365,30 +1400,9 @@ expect:
 	jal	advance			# consume the expected token
 	j	exp_ok
 exp_fail:
-	# Error: unexpected token
-	li	a0, 'E'
-	jal	write_byte
-	lw	a0, N_LOC_LINE(s1)
-	jal	print_dec
-	li	a0, ':'
-	jal	write_byte
-	lw	a0, N_LOC_COL(s1)
-	jal	print_dec
-	li	a0, 32
-	jal	write_byte
-	li	a0, 'e'
-	jal	write_byte
-	li	a0, 'x'
-	jal	write_byte
-	li	a0, 'p'
-	jal	write_byte
-	li	a0, 32
-	jal	write_byte
-	mv	a0, s3
-	jal	print_dec
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s1
+	lla	a1, em_expected
+	j	err_at
 exp_ok:
 	return
 
@@ -1619,23 +1633,9 @@ parse_expr:
 	beq	s3, t0, px_macro
 
 	# Unknown prefix — error
-	li	a0, 'E'
-	jal	write_byte
-	lw	a0, N_LOC_LINE(s1)
-	jal	print_dec
-	li	a0, ':'
-	jal	write_byte
-	lw	a0, N_LOC_COL(s1)
-	jal	print_dec
-	li	a0, 32
-	jal	write_byte
-	li	a0, 'p'
-	jal	write_byte
-	li	a0, 'x'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s1
+	lla	a1, em_unexpected
+	j	err_at
 
 	# --- Prefix: atom (leaf node) ---
 px_atom:
@@ -2939,13 +2939,9 @@ pi_done:
 	mv	a0, s6
 	return
 pi_ovf:
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'i'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_int_ovf
+	j	err_at
 
 # parse_char: parse character literal from source text
 #   a0 = pointer to first char (including quotes), a1 = length
@@ -3123,13 +3119,9 @@ sf_next:
 	addi	s5, s5, -1
 	j	sf_loop
 sf_fail:
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'v'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_undefined
+	j	err_at
 
 # sym_try: like sym_find but returns -1 if not found
 #   a0=name offset, a1=name length, s1=symtab, s2=input base
@@ -4150,17 +4142,9 @@ ga_reassign:
 	# Check mutability: bit 0 of slot must be set (mutable)
 	andi	t0, a0, 1
 	bnez	t0, ga_ra_mut
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'm'
-	jal	write_byte
-	li	a0, 'u'
-	jal	write_byte
-	li	a0, 't'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_immutable
+	j	err_at
 ga_ra_mut:
 	# Clear mutability bit for actual slot offset
 	andi	a0, a0, -2
@@ -4174,15 +4158,9 @@ ga_ra_mut:
 	beqz	t0, ga_ra_ok
 	bge	s6, t0, ga_ra_ok
 	# Error: closure captures escaping scope
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'c'
-	jal	write_byte
-	li	a0, 'e'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_escape
+	j	err_at
 ga_ra_ok:
 	# Mark variable: struct type (>0), capturing closure (-1), or plain (0)
 	lw	t0, ST_STYP(s1)
@@ -4801,7 +4779,7 @@ gl_bdone:
 # --- Break ---
 ge_break:
 	# Error if not inside a loop
-	beqz	s10, cg_err
+	beqz	s10, cg_no_loop
 	# Check for break value (first child)
 	lw	s5, N_FIRST_CHILD(s3)
 	beqz	s5, gb_noval
@@ -4862,7 +4840,7 @@ gb_fx_ok:
 # --- Continue ---
 ge_cont:
 	# Error if not inside a loop
-	beqz	s10, cg_err
+	beqz	s10, cg_no_loop
 	# Emit: lw sp, slot(s0) — restore sp to loop start
 	lw	a0, 12(s10)
 	li	a1, R_SP
@@ -5213,15 +5191,9 @@ gc_cl_chk:
 	li	t2, -1
 	bne	t1, t2, gc_cl_ok
 	# Error: calling capturing closure from inside closure body
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'c'
-	jal	write_byte
-	li	a0, 'p'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_cap_call
+	j	err_at
 gc_cl_ok:
 	# Load code pointer (check outer variable like ge_ident)
 	mv	s5, a0
@@ -5311,15 +5283,9 @@ ga_body:
 	lw	t0, AT_CNT(s9)
 	li	t1, 64
 	blt	t0, t1, ga_al_ok
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'a'
-	jal	write_byte
-	li	a0, 'l'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_overflow
+	j	err_at
 ga_al_ok:
 	slli	t1, t0, 2
 	slli	t2, t0, 3
@@ -5354,7 +5320,7 @@ ga_no_lbl:
 # --- Return ---
 ge_return:
 	# Error if not inside a closure
-	blt	s11, x0, cg_err
+	blt	s11, x0, cg_no_clos
 	lw	s5, N_FIRST_CHILD(s3)
 	beqz	s5, gr_void
 	mv	a0, s5
@@ -6416,25 +6382,23 @@ ge_done:
 
 # --- Jump offset overflow error ---
 ej_err:
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'j'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_jump_ovf
+	j	err_at
 
 # --- Codegen error ---
+cg_no_loop:
+	mv	a0, s3
+	lla	a1, em_no_loop
+	j	err_at
+cg_no_clos:
+	mv	a0, s3
+	lla	a1, em_no_closure
+	j	err_at
 cg_err:
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'c'
-	jal	write_byte
-	li	a0, 'g'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_not_impl
+	j	err_at
 
 # ============================================================================
 # Asm block assembler
@@ -6708,15 +6672,9 @@ aa_instr:
 	lw	t0, 0(s5)
 	li	t1, 64
 	blt	t0, t1, aa_ll_ok
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'a'
-	jal	write_byte
-	li	a0, 'L'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_overflow
+	j	err_at
 aa_ll_ok:
 	slli	t1, t0, 2
 	slli	t2, t0, 3
@@ -7605,23 +7563,13 @@ mf_done:
 
 # --- Asm error ---
 asm_fx_err:
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'a'
-	jal	write_byte
-	li	a0, 'f'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_overflow
+	j	err_at
 asm_err:
-	li	a0, 'E'
-	jal	write_byte
-	li	a0, 'a'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
-	j	exit
+	mv	a0, s3
+	lla	a1, em_asm
+	j	err_at
 
 # ============================================================================
 # Codegen: top-level entry point
@@ -8068,6 +8016,56 @@ tok_dotdoteq:
 	.ascii	"..="
 tok_dotdot:
 	.ascii	".."
+
+# Error message strings
+msg_error:
+	.ascii	"error:"
+	.byte	0
+em_unexpected:
+	.ascii	"unexpected token"
+	.byte	0
+em_expected:
+	.ascii	"expected token"
+	.byte	0
+em_undefined:
+	.ascii	"undefined name"
+	.byte	0
+em_immutable:
+	.ascii	"immutable variable"
+	.byte	0
+em_escape:
+	.ascii	"captures escape scope"
+	.byte	0
+em_cap_call:
+	.ascii	"capture call in closure"
+	.byte	0
+em_not_impl:
+	.ascii	"not implemented"
+	.byte	0
+em_overflow:
+	.ascii	"table overflow"
+	.byte	0
+em_no_closure:
+	.ascii	"return outside closure"
+	.byte	0
+em_no_loop:
+	.ascii	"break/continue outside loop"
+	.byte	0
+em_too_many:
+	.ascii	"too many arguments"
+	.byte	0
+em_type_mis:
+	.ascii	"type mismatch"
+	.byte	0
+em_jump_ovf:
+	.ascii	"jump offset overflow"
+	.byte	0
+em_asm:
+	.ascii	"asm error"
+	.byte	0
+em_int_ovf:
+	.ascii	"integer overflow"
+	.byte	0
 
 # Asm mnemonic table: 8-byte name + class, funct3, funct7, pad = 12 bytes each
 asm_mnem_tbl:
