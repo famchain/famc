@@ -2969,6 +2969,8 @@ gen_expr:
 	beq	s4, t0, ge_struct
 	li	t0, NK_SIZEOF
 	beq	s4, t0, ge_sizeof
+	li	t0, NK_INDEX
+	beq	s4, t0, ge_index
 	j	cg_err
 
 # --- Number literal ---
@@ -3476,6 +3478,28 @@ ge_prefix:
 	beq	s5, t0, gp_preinc
 	li	t0, NK_DBL_HYPHEN
 	beq	s5, t0, gp_preinc
+	# Check for @expr[i] / #expr[i] → byte/hw array access
+	li	t0, NK_AT
+	beq	s5, t0, gp_ck_idx
+	li	t0, NK_HASH
+	beq	s5, t0, gp_ck_idx
+	j	gp_eval
+gp_ck_idx:
+	lw	t0, N_FIRST_CHILD(s3)
+	lw	t1, N_KIND(t0)
+	li	t2, NK_INDEX
+	bne	t1, t2, gp_eval
+	# Byte/hw index: set stride in s7, delegate to ge_index internals
+	li	s7, 1
+	li	t0, NK_AT
+	beq	s5, t0, gp_idx_go
+	li	s7, 2
+gp_idx_go:
+	lw	s3, N_FIRST_CHILD(s3)
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	s6, N_NEXT_SIB(s5)
+	j	gi_base
+gp_eval:
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
 	li	t0, NK_STAR
@@ -3587,6 +3611,8 @@ ge_assign:
 	beq	t0, t1, ga_deref
 	li	t1, NK_BINOP
 	beq	t0, t1, ga_dot_ck
+	li	t1, NK_INDEX
+	beq	t0, t1, ga_index
 	j	cg_err
 ga_ident:
 	# Try to find existing variable first
@@ -3812,14 +3838,37 @@ ga_s_push:
 ga_deref:
 	# *addr, @addr, or #addr = val: RHS on stack, generate address
 	lw	s5, N_DATA(s6)
-	li	t1, NK_STAR
-	beq	t1, s5, ga_do_st
+	# Check for @/# with index child → byte/hw array write
 	li	t1, NK_AT
-	beq	t1, s5, ga_do_st
+	beq	t1, s5, gad_ck_ix
 	li	t1, NK_HASH
-	beq	t1, s5, ga_do_st
-	j	cg_err
+	beq	t1, s5, gad_ck_ix
+	j	ga_do_st
+gad_ck_ix:
+	lw	t0, N_FIRST_CHILD(s6)
+	lw	t1, N_KIND(t0)
+	li	t2, NK_INDEX
+	bne	t1, t2, ga_do_st
+	# Delegate to ga_index with byte/hw stride
+	mv	s6, t0
+	li	s4, 1
+	li	t1, NK_AT
+	beq	s5, t1, gad_ix_go
+	li	s4, 2
+gad_ix_go:
+	# s6 = NK_INDEX, s4 = stride. Set up s5/s7 for gai_gen.
+	lw	s5, N_FIRST_CHILD(s6)
+	lw	s7, N_NEXT_SIB(s5)
+	j	gai_gen
 ga_do_st:
+	li	t1, NK_STAR
+	beq	t1, s5, ga_ok_st
+	li	t1, NK_AT
+	beq	t1, s5, ga_ok_st
+	li	t1, NK_HASH
+	beq	t1, s5, ga_ok_st
+	j	cg_err
+ga_ok_st:
 	lw	a0, N_FIRST_CHILD(s6)
 	jal	gen_expr
 	li	a0, R_T1
@@ -4686,6 +4735,212 @@ gaw_gen:
 	li	a1, R_T0
 	li	a2, R_T1
 	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Array index read: base[index] ---
+ge_index:
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	s6, N_NEXT_SIB(s5)
+	li	s7, 4
+	lw	t0, N_KIND(s5)
+	li	t1, NK_PREFIX
+	bne	t0, t1, gi_ck_st
+	lw	t0, N_DATA(s5)
+	li	t1, NK_AT
+	bne	t0, t1, gi_ck_hw
+	li	s7, 1
+	j	gi_gen
+gi_ck_hw:
+	li	t1, NK_HASH
+	bne	t0, t1, gi_gen
+	li	s7, 2
+	j	gi_gen
+gi_ck_st:
+	li	t1, NK_IDENT
+	bne	t0, t1, gi_gen
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	var_stype
+	beqz	a0, gi_gen
+	lw	s7, SR_SIZE(a0)
+gi_gen:
+	li	t0, 4
+	beq	s7, t0, gi_base
+	li	t0, NK_PREFIX
+	lw	t1, N_KIND(s5)
+	bne	t0, t1, gi_base
+	lw	s5, N_FIRST_CHILD(s5)
+gi_base:
+	mv	a0, s5
+	jal	gen_expr
+	mv	a0, s6
+	jal	gen_expr
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	li	t0, 1
+	beq	s7, t0, gi_add
+	li	t0, 2
+	beq	s7, t0, gi_s1
+	li	t0, 4
+	beq	s7, t0, gi_s2
+	li	a0, R_T2
+	mv	a1, s7
+	jal	em_li
+	li	a0, 1
+	li	a1, R_T1
+	li	a2, R_T2
+	li	a3, 0
+	li	a4, R_T1
+	jal	em_rtype
+	j	gi_add
+gi_s1:
+	li	a0, 1
+	li	a1, R_T1
+	li	a2, 1
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
+	j	gi_add
+gi_s2:
+	li	a0, 2
+	li	a1, R_T1
+	li	a2, 1
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
+gi_add:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 0
+	li	a4, R_T0
+	jal	em_rtype
+	li	t0, 1
+	beq	s7, t0, gi_load
+	li	t0, 2
+	beq	s7, t0, gi_load
+	li	t0, 4
+	beq	s7, t0, gi_load
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+gi_load:
+	li	a2, 2
+	li	t0, 4
+	beq	s7, t0, gi_ld
+	li	a2, 5
+	li	t0, 2
+	beq	s7, t0, gi_ld
+	li	a2, 4
+gi_ld:
+	li	a0, 0
+	li	a1, R_T0
+	li	a3, R_T0
+	li	a4, 0x03
+	jal	em_itype
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
+# --- Array index write: base[index] = val ---
+ga_index:
+	lw	s5, N_FIRST_CHILD(s6)
+	lw	s7, N_NEXT_SIB(s5)
+	li	s4, 4
+	lw	t0, N_KIND(s5)
+	li	t1, NK_PREFIX
+	bne	t0, t1, gai_ckst
+	lw	t0, N_DATA(s5)
+	li	t1, NK_AT
+	bne	t0, t1, gai_ckh
+	li	s4, 1
+	j	gai_gen
+gai_ckh:
+	li	t1, NK_HASH
+	bne	t0, t1, gai_gen
+	li	s4, 2
+	j	gai_gen
+gai_ckst:
+	li	t1, NK_IDENT
+	bne	t0, t1, gai_gen
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	var_stype
+	beqz	a0, gai_gen
+	lw	s4, SR_SIZE(a0)
+gai_gen:
+	li	t0, 4
+	beq	s4, t0, gai_base
+	li	t0, NK_PREFIX
+	lw	t1, N_KIND(s5)
+	bne	t0, t1, gai_base
+	lw	s5, N_FIRST_CHILD(s5)
+gai_base:
+	mv	a0, s5
+	jal	gen_expr
+	mv	a0, s7
+	jal	gen_expr
+	li	a0, R_T2
+	jal	em_pop
+	li	a0, R_T1
+	jal	em_pop
+	li	t0, 1
+	beq	s4, t0, gai_add
+	li	t0, 2
+	beq	s4, t0, gai_s1
+	li	t0, 4
+	beq	s4, t0, gai_s2
+	li	a0, 28
+	mv	a1, s4
+	jal	em_li
+	li	a0, 1
+	li	a1, R_T2
+	li	a2, 28
+	li	a3, 0
+	li	a4, R_T2
+	jal	em_rtype
+	j	gai_add
+gai_s1:
+	li	a0, 1
+	li	a1, R_T2
+	li	a2, 1
+	li	a3, R_T2
+	li	a4, 0x13
+	jal	em_itype
+	j	gai_add
+gai_s2:
+	li	a0, 2
+	li	a1, R_T2
+	li	a2, 1
+	li	a3, R_T2
+	li	a4, 0x13
+	jal	em_itype
+gai_add:
+	li	a0, 0
+	li	a1, R_T1
+	li	a2, R_T2
+	li	a3, 0
+	li	a4, R_T1
+	jal	em_rtype
+	li	a0, R_T0
+	jal	em_pop
+	li	a3, 2
+	li	t0, 4
+	beq	s4, t0, gai_st
+	li	a3, 1
+	li	t0, 2
+	beq	s4, t0, gai_st
+	li	a3, 0
+gai_st:
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, R_T1
 	li	a4, 0x23
 	jal	em_stype
 	li	a0, R_T0

@@ -331,6 +331,18 @@ struct P { x; y }; struct L { s; e }; l = L(P(65,66),P(67,68)); pc(l.e.y)' "D"
 test_error   "bad field read"          "struct P { x; y }; struct R { a; b }; r = R(1,2); r.x" "Ecg"
 test_error   "bad field write"         "struct P { x; y }; struct R { a; b }; r = R(1,2); r.x = 5" "Ecg"
 
+echo "=== Arrays ==="
+test_runs    "word index write/read"  "a = 0x80100000; a[0] = 42; a[0]"
+test_runs    "word index offset"      "a = 0x80100000; a[0] = 10; a[1] = 20; a[2] = 30; a[0] + a[1] + a[2]"
+test_output  "byte index write/read"  'asm pc { lui t0, 0x10000
+sb a0, 0(t0)
+ret };
+a = 0x80100000; @a[0] = 65; @a[1] = 66; pc(@a[0]); pc(@a[1])' "AB"
+test_output  "halfword index"         'asm pc { lui t0, 0x10000
+sb a0, 0(t0)
+ret };
+a = 0x80100000; a[0] = 65; pc(@a[0])' "A"
+
 echo "=== Error detection (compile-time) ==="
 test_error   "hex overflow"             "0x1FFFFFFFF"               "Ei"
 test_error   "decimal overflow"         "4294967296"                "Ei"
