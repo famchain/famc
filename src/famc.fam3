@@ -1966,8 +1966,8 @@ px_infix:
 	sw	t0, N_DATA(s6)
 	lw	t0, N_LOC_LEN(s4)
 	sw	t0, N_LOC_LINE(s6)
-	# Parse the operand (above P_ASSIGN so = doesn't bind, below P_CALL so [] and . do)
-	li	a0, P_TERNARY
+	# Parse the operand (above P_MUL so +*= don't bind, below P_CALL so [] and . do)
+	li	a0, P_POSTFIX
 	jal	parse_expr
 	mv	a1, a0
 	mv	a0, s6
