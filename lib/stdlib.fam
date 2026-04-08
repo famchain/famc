@@ -6,13 +6,13 @@ asm putchar {
 
 asm putstr {
 	lui t0, 0x10000
-ps_loop:
+	ps_loop:
 	lbu t1, 0(a0)
 	beq t1, zero, ps_done
 	sb t1, 0(t0)
 	addi a0, a0, 1
 	j ps_loop
-ps_done:
+	ps_done:
 	ret
 };
 
@@ -24,16 +24,16 @@ asm puthex {
 	sb t1, 0(t0)
 	li t1, 120
 	sb t1, 0(t0)
-ph_digit:
+	ph_digit:
 	srl t1, t2, t3
 	andi t1, t1, 0xF
 	li t4, 10
 	blt t1, t4, ph_dec
 	addi t1, t1, 55
 	j ph_emit
-ph_dec:
+	ph_dec:
 	addi t1, t1, 48
-ph_emit:
+	ph_emit:
 	sb t1, 0(t0)
 	addi t3, t3, -4
 	bge t3, zero, ph_digit
@@ -67,30 +67,30 @@ asm putnum {
 	sw t4, 36(sp)
 	mv t5, sp
 	addi t6, sp, 40
-pn_loop:
+	pn_loop:
 	beq t5, t6, pn_done
 	lw t4, 0(t5)
 	li t1, 0
-pn_sub:
+	pn_sub:
 	bltu t2, t4, pn_emit
 	sub t2, t2, t4
 	addi t1, t1, 1
 	j pn_sub
-pn_emit:
+	pn_emit:
 	addi a0, t5, 4
 	beq a0, t6, pn_print
 	beq t1, zero, pn_skip
 	li t3, 0
 	j pn_print
-pn_skip:
+	pn_skip:
 	bne t3, zero, pn_next
-pn_print:
+	pn_print:
 	addi t1, t1, 48
 	sb t1, 0(t0)
-pn_next:
+	pn_next:
 	addi t5, t5, 4
 	j pn_loop
-pn_done:
+	pn_done:
 	addi sp, sp, 40
 	ret
 };
@@ -104,14 +104,25 @@ asm alloc {
 	ret
 };
 
+macro ALLOC(b) {
+	__value := 0;
+	asm {
+		(a0=b)
+		mv t0, gp
+		add gp, gp, a0
+		addi gp, gp, 15
+		andi gp, gp, -16
+		(__value=t0)
+	};
+	__value
+};
+
 asm exit {
 	lui t0, 0x100
 	lui t1, 5
 	addi t1, t1, 0x555
 	sw t1, 0(t0)
-halt:
+	halt:
 	wfi
 	j halt
 };
-
-macro MAX(a, b) a > b ? a : b;

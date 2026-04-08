@@ -5273,13 +5273,13 @@ ge_asm:
 ga_nobody:
 	li	s6, 0
 ga_body:
-	# Emit j past_asm (placeholder)
+	# If named: emit j past_asm (placeholder). If anonymous: inline.
+	beqz	s6, ga_no_lbl
 	mv	s7, s0
 	li	a0, 0
 	li	a1, R_ZERO
 	jal	em_jtype
-	# Register asm label if present
-	beqz	s6, ga_no_lbl
+	# Register asm label
 	lw	t0, AT_CNT(s9)
 	li	t1, 64
 	blt	t0, t1, ga_al_ok
@@ -5305,10 +5305,12 @@ ga_no_lbl:
 	add	a0, s2, t0
 	lw	a1, N_LOC_LEN(s5)
 	jal	asm_assemble
-	# Backpatch j past_asm
+	# Backpatch j past_asm (only for named blocks)
+	beqz	s6, ga_asm_val
 	sub	a1, s0, s7
 	mv	a0, s7
 	jal	patch_jal
+ga_asm_val:
 	# Asm block evaluates to 0
 	li	a0, R_T0
 	li	a1, 0
@@ -6527,6 +6529,8 @@ at_loop:
 	beq	t0, t1, at_done
 	li	t1, ')'
 	beq	t0, t1, at_done
+	li	t1, '='
+	beq	t0, t1, at_done
 	li	t1, ':'
 	beq	t0, t1, at_done
 	li	t1, '\n'
@@ -6658,6 +6662,10 @@ aa_line:
 	li	t2, '/'
 	beq	t1, t2, aa_cmt
 aa_instr:
+	# Check for (var=reg) or (reg=var) binding
+	lbu	t0, 0(s3)
+	li	t1, '('
+	beq	t0, t1, aa_bind
 	# Read mnemonic/label token
 	jal	asm_tok
 	# a0=ptr, a1=len. Check if followed by ':'
@@ -7124,6 +7132,104 @@ a2r_seqz:
 	j	aa_line
 
 aa_nl:
+	addi	s3, s3, 1
+	j	aa_line
+
+# --- Variable binding: (var=reg) or (reg=var) ---
+# Detect form by trying RHS as register (check first char).
+# If RHS starts with reg letter → (var=reg): store reg to var
+# Else → (reg=var): load var to reg
+aa_bind:
+	addi	s3, s3, 1		# skip '('
+	jal	asm_skip
+	jal	asm_tok			# LHS token
+	mv	t3, a0
+	mv	t4, a1
+	jal	asm_skip
+	lbu	t0, 0(s3)
+	li	t1, '='
+	bne	t0, t1, asm_err
+	addi	s3, s3, 1
+	jal	asm_skip
+	jal	asm_tok			# RHS token
+	mv	t5, a0
+	mv	t6, a1
+	# Determine direction: check if RHS first char is a register prefix
+	lbu	t0, 0(t5)
+	li	t1, 'a'
+	beq	t0, t1, ab_varreg
+	li	t1, 'f'
+	beq	t0, t1, ab_varreg
+	li	t1, 'g'
+	beq	t0, t1, ab_varreg
+	li	t1, 'r'
+	beq	t0, t1, ab_varreg
+	li	t1, 's'
+	beq	t0, t1, ab_varreg
+	li	t1, 't'
+	beq	t0, t1, ab_varreg
+	li	t1, 'x'
+	beq	t0, t1, ab_varreg
+	li	t1, 'z'
+	beq	t0, t1, ab_varreg
+	j	ab_regvar
+ab_varreg:
+	# (var=reg): RHS is register, LHS is variable
+	mv	a0, t5
+	mv	a1, t6
+	jal	asm_reg
+	addi	sp, sp, -24
+	sw	a0, 0(sp)
+	sub	t3, t3, s2
+	sw	t3, 4(sp)
+	sw	t4, 8(sp)
+	sw	s3, 12(sp)
+	sw	s4, 16(sp)
+	sw	s5, 20(sp)
+	mv	a0, t3
+	mv	a1, t4
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, sf_fail
+	andi	a0, a0, -2
+	lw	a1, 0(sp)
+	jal	em_var_store
+	lw	s3, 12(sp)
+	lw	s4, 16(sp)
+	lw	s5, 20(sp)
+	addi	sp, sp, 24
+	j	ab_done
+ab_regvar:
+	# (reg=var): LHS is register, RHS is variable
+	mv	a0, t3
+	mv	a1, t4
+	jal	asm_reg
+	addi	sp, sp, -24
+	sw	a0, 0(sp)
+	sub	t5, t5, s2
+	sw	t5, 4(sp)
+	sw	t6, 8(sp)
+	sw	s3, 12(sp)
+	sw	s4, 16(sp)
+	sw	s5, 20(sp)
+	mv	a0, t5
+	mv	a1, t6
+	jal	sym_try
+	li	t0, -1
+	beq	a0, t0, sf_fail
+	andi	a0, a0, -2
+	lw	a1, 0(sp)
+	jal	em_var_load
+	lw	s3, 12(sp)
+	lw	s4, 16(sp)
+	lw	s5, 20(sp)
+	addi	sp, sp, 24
+ab_done:
+	# Skip ')'
+	jal	asm_skip
+	lbu	t0, 0(s3)
+	li	t1, ')'
+	bne	t0, t1, asm_err
 	addi	s3, s3, 1
 	j	aa_line
 
