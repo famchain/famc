@@ -4542,9 +4542,17 @@ gbl_child:
 	mv	a0, s7
 	jal	gen_expr
 	beq	s7, s6, gbl_end
+	# Asm blocks: rewind dummy li+push (20 bytes) instead of pop
+	lw	t0, N_KIND(s7)
+	li	t1, NK_ASM
+	bne	t0, t1, gbl_pop
+	addi	s0, s0, -20
+	j	gbl_next
+gbl_pop:
 	# pop intermediate value
 	li	a0, R_T0
 	jal	em_pop
+gbl_next:
 	lw	s7, N_NEXT_SIB(s7)
 	j	gbl_child
 gbl_end:
@@ -8465,9 +8473,17 @@ cg_top_loop:
 	jal	gen_expr
 	lw	s6, N_NEXT_SIB(s5)
 	beqz	s6, cg_top_last
+	# Asm blocks: rewind dummy li+push instead of pop
+	lw	t0, N_KIND(s5)
+	li	t1, NK_ASM
+	bne	t0, t1, cg_top_pop
+	addi	s0, s0, -20
+	j	cg_top_next
+cg_top_pop:
 	# Pop intermediate result
 	li	a0, R_T0
 	jal	em_pop
+cg_top_next:
 	mv	s5, s6
 	j	cg_top_loop
 cg_top_last:
