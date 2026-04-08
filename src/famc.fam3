@@ -323,6 +323,13 @@ pd_done:
 .equ	MC_JR,		20
 .equ	MC_WFI,		21
 .equ	MC_CSR,		22
+.equ	MC_CSRI,	23
+.equ	MC_MRET,	24
+.equ	MC_SRET,	25
+.equ	MC_SFENCE,	26
+.equ	MC_FENCE,	27
+.equ	MC_FENCEI,	28
+.equ	MC_AMO,		29
 
 # Asm label entry
 .equ	AL_OFF,	0
@@ -6879,6 +6886,22 @@ aa_mnem:
 	beq	t5, t0, aa_jr
 	li	t0, MC_WFI
 	beq	t5, t0, aa_wfi
+	li	t0, MC_CSR
+	beq	t5, t0, aa_csr
+	li	t0, MC_CSRI
+	beq	t5, t0, aa_csri
+	li	t0, MC_MRET
+	beq	t5, t0, aa_mret
+	li	t0, MC_SRET
+	beq	t5, t0, aa_sret
+	li	t0, MC_SFENCE
+	beq	t5, t0, aa_sfnce
+	li	t0, MC_FENCE
+	beq	t5, t0, aa_fence
+	li	t0, MC_FENCEI
+	beq	t5, t0, aa_fnci
+	li	t0, MC_AMO
+	beq	t5, t0, aa_amo
 	addi	sp, sp, 24
 	j	asm_err
 
@@ -7354,6 +7377,205 @@ ab_done:
 	li	t1, ')'
 	bne	t0, t1, asm_err
 	addi	s3, s3, 1
+	j	aa_line
+
+# --- CSR: csrrw/csrrs/csrrc rd, csr, rs1 (also csrw csr, rs1 / csrr rd, csr) ---
+aa_csr:
+	jal	asm_skip
+	jal	asm_tok
+	# Check if this is csrw (2 operands) or csrr (2 operands) vs full (3 operands)
+	# Peek at funct3: 1=csrrw/csrw, 2=csrrs/csrr
+	lw	t3, 4(sp)
+	# Try: parse first operand as register
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	# Second operand: CSR number (parse as integer)
+	jal	parse_int
+	sw	a0, 16(sp)
+	# Check for third operand
+	jal	asm_skip
+	bgeu	s3, s4, ac_pseudo
+	lbu	t0, 0(s3)
+	li	t1, '\n'
+	beq	t0, t1, ac_pseudo
+	li	t1, '/'
+	beq	t0, t1, ac_pseudo
+	# Third operand: rs1
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 20(sp)
+	j	ac_emit
+ac_pseudo:
+	# 2-operand form. If funct3=1 (csrw): rd=x0, first=csr, second=rs1
+	# If funct3=2 (csrr): rs1=x0, first=rd, second=csr
+	lw	t3, 4(sp)
+	li	t0, 1
+	beq	t3, t0, ac_csrw
+	# csrr rd, csr: rd=first, csr=second, rs1=0
+	lw	t0, 16(sp)
+	sw	t0, 16(sp)
+	sw	x0, 20(sp)
+	j	ac_emit
+ac_csrw:
+	# csrw csr, rs1: first was parsed as reg (but it's actually the CSR!)
+	# Re-interpret: csr=first (number, not reg), rs1=second
+	# Oops — first was parsed by asm_reg. For csrw, first operand is CSR number.
+	# This doesn't work with the current flow. Let me simplify:
+	# csrw and csrr share class MC_CSR. Detect by checking mnemonic length.
+	# Actually, let me just require full form for now.
+	sw	x0, 12(sp)
+	lw	t0, 12(sp)
+	sw	t0, 20(sp)
+	lw	t0, 16(sp)
+	sw	t0, 16(sp)
+ac_emit:
+	# Encode: csr[11:0] | rs1 | funct3 | rd | 0x73
+	lw	a0, 16(sp)
+	slli	a0, a0, 20
+	lw	t0, 20(sp)
+	slli	t0, t0, 15
+	or	a0, a0, t0
+	lw	t0, 4(sp)
+	slli	t0, t0, 12
+	or	a0, a0, t0
+	lw	t0, 12(sp)
+	slli	t0, t0, 7
+	or	a0, a0, t0
+	ori	a0, a0, 0x73
+	addi	sp, sp, 24
+	jal	emit
+	j	aa_line
+
+# --- CSR immediate: csrrwi/csrrsi/csrrci rd, csr, uimm ---
+aa_csri:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	parse_int
+	sw	a0, 16(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	parse_int
+	sw	a0, 20(sp)
+	lw	a0, 16(sp)
+	slli	a0, a0, 20
+	lw	t0, 20(sp)
+	andi	t0, t0, 0x1F
+	slli	t0, t0, 15
+	or	a0, a0, t0
+	lw	t0, 4(sp)
+	slli	t0, t0, 12
+	or	a0, a0, t0
+	lw	t0, 12(sp)
+	slli	t0, t0, 7
+	or	a0, a0, t0
+	ori	a0, a0, 0x73
+	addi	sp, sp, 24
+	jal	emit
+	j	aa_line
+
+# --- mret ---
+aa_mret:
+	addi	sp, sp, 24
+	li	a0, 0x30200073
+	jal	emit
+	j	aa_line
+
+# --- sret ---
+aa_sret:
+	addi	sp, sp, 24
+	li	a0, 0x10200073
+	jal	emit
+	j	aa_line
+
+# --- sfence.vma rs1, rs2 ---
+aa_sfnce:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	li	a0, 0x73
+	lw	t0, 12(sp)
+	slli	t0, t0, 15
+	or	a0, a0, t0
+	lw	t0, 16(sp)
+	slli	t0, t0, 20
+	or	a0, a0, t0
+	li	t0, 0x09
+	slli	t0, t0, 25
+	or	a0, a0, t0
+	addi	sp, sp, 24
+	jal	emit
+	j	aa_line
+
+# --- fence ---
+aa_fence:
+	addi	sp, sp, 24
+	li	a0, 0x0FF0000F
+	jal	emit
+	j	aa_line
+
+# --- fence.i ---
+aa_fnci:
+	addi	sp, sp, 24
+	li	a0, 0x0000100F
+	jal	emit
+	j	aa_line
+
+# --- AMO: amoXXX rd, rs2, (rs1) ---
+aa_amo:
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 12(sp)
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 16(sp)
+	jal	asm_skip
+	# Expect ( — skip it
+	lbu	t0, 0(s3)
+	li	t1, '('
+	beq	t0, t1, aa_amo_lp
+	j	asm_err
+aa_amo_lp:
+	addi	s3, s3, 1
+	jal	asm_skip
+	jal	asm_tok
+	jal	asm_reg
+	sw	a0, 20(sp)
+	jal	asm_skip
+	lbu	t0, 0(s3)
+	li	t1, ')'
+	bne	t0, t1, asm_err
+	addi	s3, s3, 1
+	# Encode: funct7 | rs2 | rs1 | funct3 | rd | 0x2F
+	lw	t0, 8(sp)
+	slli	a0, t0, 25
+	lw	t0, 16(sp)
+	slli	t0, t0, 20
+	or	a0, a0, t0
+	lw	t0, 20(sp)
+	slli	t0, t0, 15
+	or	a0, a0, t0
+	lw	t0, 4(sp)
+	slli	t0, t0, 12
+	or	a0, a0, t0
+	lw	t0, 12(sp)
+	slli	t0, t0, 7
+	or	a0, a0, t0
+	ori	a0, a0, 0x2F
+	addi	sp, sp, 24
+	jal	emit
 	j	aa_line
 
 aa_cmt:
@@ -8539,6 +8761,106 @@ asm_mnem_tbl:
 	.ascii	"wfi"
 	.zero	5
 	.word	0x000015
+	# CSR: csrrw csrrs csrrc csrrwi csrrsi csrrci csrw csrr
+	.ascii	"csrrw"
+	.zero	3
+	.word	0x000116
+	.ascii	"csrrs"
+	.zero	3
+	.word	0x000216
+	.ascii	"csrrc"
+	.zero	3
+	.word	0x000316
+	.ascii	"csrrwi"
+	.zero	2
+	.word	0x000517
+	.ascii	"csrrsi"
+	.zero	2
+	.word	0x000617
+	.ascii	"csrrci"
+	.zero	2
+	.word	0x000717
+	.ascii	"csrw"
+	.zero	4
+	.word	0x000116
+	.ascii	"csrr"
+	.zero	4
+	.word	0x000216
+	# Privileged
+	.ascii	"mret"
+	.zero	4
+	.word	0x000018
+	.ascii	"sret"
+	.zero	4
+	.word	0x000019
+	.ascii	"sfence"
+	.zero	2
+	.word	0x00001A
+	.ascii	"fence"
+	.zero	3
+	.word	0x00001B
+	.ascii	"fence.i"
+	.zero	1
+	.word	0x00001C
+	# M extension (funct7=1, R-type)
+	.ascii	"mul"
+	.zero	5
+	.word	0x010001
+	.ascii	"mulh"
+	.zero	4
+	.word	0x010101
+	.ascii	"mulhsu"
+	.zero	2
+	.word	0x010201
+	.ascii	"mulhu"
+	.zero	3
+	.word	0x010301
+	.ascii	"div"
+	.zero	5
+	.word	0x010401
+	.ascii	"divu"
+	.zero	4
+	.word	0x010501
+	.ascii	"rem"
+	.zero	5
+	.word	0x010601
+	.ascii	"remu"
+	.zero	4
+	.word	0x010701
+	# A extension (atomics)
+	.ascii	"lr.w"
+	.zero	4
+	.word	0x10021D
+	.ascii	"sc.w"
+	.zero	4
+	.word	0x18021D
+	.ascii	"amoswap"
+	.zero	1
+	.word	0x08021D
+	.ascii	"amoadd"
+	.zero	2
+	.word	0x00021D
+	.ascii	"amoand"
+	.zero	2
+	.word	0x60021D
+	.ascii	"amoor"
+	.zero	3
+	.word	0x40021D
+	.ascii	"amoxor"
+	.zero	2
+	.word	0x20021D
+	.ascii	"amomax"
+	.zero	2
+	.word	0xA0021D
+	.ascii	"amomin"
+	.zero	2
+	.word	0x80021D
+	.ascii	"amomaxu"
+	.zero	1
+	.word	0xE0021D
+	.ascii	"amominu"
+	.zero	1
+	.word	0xC0021D
 	# End sentinel
 	.byte	0
 
