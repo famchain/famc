@@ -232,6 +232,10 @@ pd_done:
 .equ	NK_GTU,		76
 .equ	NK_LTEU,	77
 .equ	NK_GTEU,	78
+.equ	NK_FOR,		79
+.equ	NK_IN,		80
+.equ	NK_DOTDOT,	81
+.equ	NK_DOTDOTEQ,	82
 
 # Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
 .equ	P_NONE,		0
@@ -843,6 +847,30 @@ lexer_init:
 	li	a2, 6
 	li	a3, NK_SIZEOF
 	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_for
+	li	a2, 3
+	li	a3, NK_FOR
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_in
+	li	a2, 2
+	li	a3, NK_IN
+	li	a4, 1
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_dotdoteq
+	li	a2, 3
+	li	a3, NK_DOTDOTEQ
+	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, tok_dotdot
+	li	a2, 2
+	li	a3, NK_DOTDOT
+	li	a4, 0
 	jal	lex_register
 
 	mv	a0, s0			# return lexer ptr
@@ -1540,6 +1568,8 @@ parse_expr:
 	# Keywords
 	li	t0, NK_LOOP
 	beq	s3, t0, px_loop
+	li	t0, NK_FOR
+	beq	s3, t0, px_for
 	li	t0, NK_BREAK
 	beq	s3, t0, px_break
 	li	t0, NK_CONTINUE
@@ -1648,6 +1678,60 @@ blk_semi:
 blk_end:
 	li	a0, NK_RBRACE
 	jal	expect
+	j	px_infix
+
+	# --- Prefix: for ident in start..end { body } ---
+px_for:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_FOR
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance			# consume 'for'
+	# Parse loop variable (must be ident)
+	jal	alloc_node
+	mv	s6, a0
+	lw	t0, N_KIND(s1)
+	sw	t0, N_KIND(s6)
+	mv	a0, s1
+	mv	a1, s6
+	jal	copy_loc
+	mv	a0, s4
+	mv	a1, s6
+	jal	append_child		# child 0: ident
+	jal	advance			# consume ident
+	li	a0, NK_IN
+	jal	expect			# consume 'in'
+	li	a0, P_ADD
+	jal	parse_expr		# start expr (above .. prec)
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child		# child 1: start
+	# Check for .. (exclusive) or ..= (inclusive)
+	lw	t0, N_KIND(s1)
+	li	t1, NK_DOTDOTEQ
+	beq	t0, t1, pf_incl
+	li	a0, NK_DOTDOT
+	jal	expect			# consume '..'
+	sw	x0, N_DATA(s4)		# 0 = exclusive
+	j	pf_end
+pf_incl:
+	jal	advance			# consume '..='
+	li	t0, 1
+	sw	t0, N_DATA(s4)		# 1 = inclusive
+pf_end:
+	li	a0, P_ADD
+	jal	parse_expr		# end expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child		# child 2: end
+	li	a0, P_NONE
+	jal	parse_expr		# body (block)
+	mv	a1, a0
+	mv	a0, s4
+	jal	append_child		# child 3: body
 	j	px_infix
 
 	# --- Prefix: loop { ... } ---
@@ -3014,6 +3098,8 @@ gen_expr:
 	beq	s4, t0, ge_block
 	li	t0, NK_LOOP
 	beq	s4, t0, ge_loop
+	li	t0, NK_FOR
+	beq	s4, t0, ge_for
 	li	t0, NK_TERNARY
 	beq	s4, t0, ge_tern
 	li	t0, NK_CALL
@@ -4203,6 +4289,206 @@ gbl_empty:
 #   0: old s10   4: old s11
 #   8: loop_start (emit addr)  12: sp-save slot offset
 #   16: break count  20: break array ptr
+# --- For loop: for ident in start..end { body } ---
+ge_for:
+	# Save scope (for loop variable)
+	lw	t0, ST_CNT(s1)
+	lw	t1, ST_NEXT(s1)
+	addi	sp, sp, -8
+	sw	t0, 0(sp)
+	sw	t1, 4(sp)
+	# Children: ident, start, end, body
+	lw	s5, N_FIRST_CHILD(s3)
+	lw	s6, N_NEXT_SIB(s5)
+	lw	s7, N_NEXT_SIB(s6)
+	lw	t0, N_NEXT_SIB(s7)
+	addi	sp, sp, -4
+	sw	t0, 0(sp)
+	# Generate end expr first, store in a frame slot (evaluated once)
+	mv	a0, s7
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	lw	t0, ST_NEXT(s1)
+	addi	t0, t0, -4
+	sw	t0, ST_NEXT(s1)
+	mv	s7, t0
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	mv	a0, s7
+	li	a1, R_T0
+	jal	em_var_store
+	# Generate start expr, define loop variable
+	mv	a0, s6
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	lw	a0, N_LOC_OFF(s5)
+	lw	a1, N_LOC_LEN(s5)
+	jal	sym_def
+	mv	s6, a0
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	mv	a0, s6
+	li	a1, R_T0
+	jal	em_var_store
+	# Set up loop context (reuse ge_loop infrastructure)
+	li	a0, 24
+	jal	alloc
+	sw	s10, 0(a0)
+	sw	s11, 4(a0)
+	mv	s10, a0
+	li	a0, 256
+	jal	alloc
+	sw	a0, 20(s10)
+	sw	x0, 16(s10)
+	# Hidden sp-save slot
+	lw	t0, ST_NEXT(s1)
+	addi	t0, t0, -4
+	sw	t0, ST_NEXT(s1)
+	sw	t0, 12(s10)
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# loop_start: save sp
+	sw	s0, 8(s10)
+	lw	a0, 12(s10)
+	li	a1, R_SP
+	jal	em_var_store
+	# Condition: if (var >= end) break
+	# Load var into t0
+	mv	a0, s6
+	li	a1, R_T0
+	jal	em_var_load
+	# Load end into t1
+	mv	a0, s7
+	li	a1, R_T1
+	jal	em_var_load
+	# Check exclusive vs inclusive (N_DATA: 0=exclusive, 1=inclusive)
+	lw	t0, N_DATA(s3)
+	bnez	t0, gf_incl
+	# Exclusive: blt var, end, +8 (if var < end, skip exit)
+	li	a0, 8
+	li	a1, R_T0
+	li	a2, R_T1
+	li	a3, 4
+	jal	em_btype
+	j	gf_cond_done
+gf_incl:
+	# Inclusive: bge end, var, +8 (if end >= var, skip exit)
+	li	a0, 8
+	li	a1, R_T1
+	li	a2, R_T0
+	li	a3, 5
+	jal	em_btype
+gf_cond_done:
+	# j loop_end (placeholder, backpatched via break mechanism)
+	lw	t0, 16(s10)
+	lw	t1, 20(s10)
+	slli	t2, t0, 2
+	add	t2, t1, t2
+	sw	s0, 0(t2)
+	addi	t0, t0, 1
+	sw	t0, 16(s10)
+	li	a0, 0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Generate body
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	jal	gen_expr
+	li	a0, R_T0
+	jal	em_pop
+	# Increment: var = var + 1
+	mv	a0, s6
+	li	a1, R_T0
+	jal	em_var_load
+	li	a0, 1
+	li	a1, R_T0
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	mv	a0, s6
+	li	a1, R_T0
+	jal	em_var_store
+	# j loop_start
+	lw	t0, 8(s10)
+	sub	a0, t0, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Backpatch breaks (same as ge_loop)
+	lw	t2, 16(s10)
+	lw	t3, 20(s10)
+gf_bpatch:
+	beqz	t2, gf_bdone
+	lw	a0, 0(t3)
+	sub	a1, s0, a0
+	addi	sp, sp, -8
+	sw	t2, 0(sp)
+	sw	t3, 4(sp)
+	jal	patch_jal
+	lw	t2, 0(sp)
+	lw	t3, 4(sp)
+	addi	sp, sp, 8
+	addi	t3, t3, 4
+	addi	t2, t2, -1
+	j	gf_bpatch
+gf_bdone:
+	# Restore loop context
+	lw	s11, 4(s10)
+	lw	s10, 0(s10)
+	# Restore scope (pop loop variable + end slot)
+	lw	t0, 0(sp)
+	sw	t0, ST_CNT(s1)
+	lw	t0, 4(sp)
+	sw	t0, ST_NEXT(s1)
+	addi	sp, sp, 8
+	# Emit: restore sp to scope start
+	# (sp was saved at loop_start, restored by break; for normal exit, sp is fine)
+	# Push result (0 for normal completion)
+	li	a0, R_T0
+	li	a1, 0
+	jal	em_li
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
 ge_loop:
 	# Allocate loop context
 	li	a0, 24
@@ -7304,6 +7590,14 @@ kw_struct:
 	.ascii	"struct"
 kw_sizeof:
 	.ascii	"sizeof"
+kw_for:
+	.ascii	"for"
+kw_in:
+	.ascii	"in"
+tok_dotdoteq:
+	.ascii	"..="
+tok_dotdot:
+	.ascii	".."
 
 # Asm mnemonic table: 8-byte name + class, funct3, funct7, pad = 12 bytes each
 asm_mnem_tbl:

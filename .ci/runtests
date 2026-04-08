@@ -312,6 +312,14 @@ skip:
 ret
 }; 42'
 
+echo "=== For loops ==="
+test_runs    "for basic"               "s = 0; for i in 0..5 { s = s + i }; s"
+test_runs    "for sum"                 "s = 0; for i in 1..11 { s = s + i }; s"
+test_runs    "for empty range"         "s = 99; for i in 5..5 { s = 0 }; s"
+test_runs    "for nested"              "s = 0; for i in 0..3 { for j in 0..4 { s = s + 1 } }; s"
+test_runs    "for with break"          "x = 0; for i in 0..100 { (i == 5) ? break; x = x + 1 }; x"
+test_runs    "for inclusive"           "s = 0; for i in 1..=10 { s = s + i }; s"
+
 # ============================================================================
 echo "=== Integration ==="
 test_output  "hello 7"                 'uart := 0x10000000; @uart = 72; @uart = 101; @uart = 108; @uart = 108; @uart = 111; @uart = 32; x := 3 + 4; @uart = x + 48; @uart = 33' "Hello 7!"
