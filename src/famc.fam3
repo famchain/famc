@@ -4240,6 +4240,10 @@ gc_args:
 	li	a1, R_T0
 	jal	em_var_store
 	addi	s7, s7, 1
+	li	t0, 9
+	blt	s7, t0, gc_a_ok
+	j	cg_err
+gc_a_ok:
 	lw	s6, N_NEXT_SIB(s6)
 	j	gc_args
 gc_emit:
@@ -5364,6 +5368,10 @@ gc_ploop:
 	lw	s7, 4(sp)
 	addi	sp, sp, 8
 	addi	s5, s5, 1
+	li	t0, 9
+	blt	s5, t0, gc_p_ok
+	j	cg_err
+gc_p_ok:
 	lw	s7, N_NEXT_SIB(s7)
 	j	gc_ploop
 gc_body:
