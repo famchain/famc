@@ -373,7 +373,8 @@ pd_done:
 .equ	ST_CAPS,	12
 .equ	ST_STRT,	16
 .equ	ST_STYP,	20
-.equ	ST_DATA,	24
+.equ	ST_ESTK,	24
+.equ	ST_DATA,	28
 
 # ============================================================================
 # Memory helpers
@@ -871,6 +872,12 @@ lexer_init:
 	li	a2, 2
 	li	a3, NK_DOTDOT
 	li	a4, 0
+	jal	lex_register
+	mv	a0, s0
+	lla	a1, kw_self
+	li	a2, 4
+	li	a3, NK_SELF
+	li	a4, 1
 	jal	lex_register
 
 	mv	a0, s0			# return lexer ptr
@@ -1570,6 +1577,8 @@ parse_expr:
 	beq	s3, t0, px_loop
 	li	t0, NK_FOR
 	beq	s3, t0, px_for
+	li	t0, NK_SELF
+	beq	s3, t0, px_self
 	li	t0, NK_BREAK
 	beq	s3, t0, px_break
 	li	t0, NK_CONTINUE
@@ -1732,6 +1741,18 @@ pf_end:
 	mv	a1, a0
 	mv	a0, s4
 	jal	append_child		# child 3: body
+	j	px_infix
+
+	# --- Prefix: self ---
+px_self:
+	jal	alloc_node
+	mv	s4, a0
+	li	t0, NK_SELF
+	sw	t0, N_KIND(s4)
+	mv	a0, s1
+	mv	a1, s4
+	jal	copy_loc
+	jal	advance
 	j	px_infix
 
 	# --- Prefix: loop { ... } ---
@@ -2896,11 +2917,11 @@ pc_done:
 #   Returns a0 = symbol table pointer
 sym_init:
 	prologue s3 s4 x0
-	# 24 header + 256 * 16 entries = 4120
-	li	a0, 4120
+	# 28 header + 256 * 16 entries = 4124
+	li	a0, 4124
 	jal	alloc
 	mv	s3, a0
-	li	a1, 4120
+	li	a1, 4124
 	jal	memzero
 	li	t0, 256
 	sw	t0, ST_CAP(s3)
@@ -2946,6 +2967,8 @@ sym_def:
 	sw	t0, ST_STRT(t3)
 	lw	t0, ST_STYP(s1)
 	sw	t0, ST_STYP(t3)
+	lw	t0, ST_ESTK(s1)
+	sw	t0, ST_ESTK(t3)
 	# Copy entries (count * 16 bytes)
 	lw	t0, ST_CNT(s1)
 	slli	t0, t0, 4
@@ -3126,6 +3149,8 @@ gen_expr:
 	beq	s4, t0, ge_index
 	li	t0, NK_TYPED
 	beq	s4, t0, ge_typed
+	li	t0, NK_SELF
+	beq	s4, t0, ge_self
 	j	cg_err
 
 # --- Number literal ---
@@ -4747,6 +4772,10 @@ ge_tern:
 ge_call:
 	# first child = callee (ident), rest = args
 	lw	s5, N_FIRST_CHILD(s3)
+	# Check for self() → use simple push/pop (no frame slots)
+	lw	t0, N_KIND(s5)
+	li	t1, NK_SELF
+	beq	t0, t1, gc_self
 	# Generate args into frame slots, then load into a-regs
 	# Each arg's slot offset is saved on the compiler stack (LIFO)
 	lw	s6, N_NEXT_SIB(s5)
@@ -4853,7 +4882,45 @@ gc_found:
 	jal	em_push
 	j	ge_done
 
+gc_self:
+	# self() call: use simple push/pop for args (no frame slots)
+	lw	s6, N_NEXT_SIB(s5)
+	li	s7, 0
+gc_s_args:
+	beqz	s6, gc_s_emit
+	mv	a0, s6
+	jal	gen_expr
+	addi	s7, s7, 1
+	lw	s6, N_NEXT_SIB(s6)
+	j	gc_s_args
+gc_s_emit:
+	mv	t2, s7
+gc_s_pop:
+	beqz	t2, gc_s_call
+	addi	t2, t2, -1
+	addi	a0, t2, R_A0
+	addi	sp, sp, -4
+	sw	t2, 0(sp)
+	jal	em_pop
+	lw	t2, 0(sp)
+	addi	sp, sp, 4
+	j	gc_s_pop
+gc_s_call:
+	# Load self entry addr and call
+	li	a0, -4
+	li	a1, R_T0
+	jal	em_var_load
+	li	a0, 0
+	li	a1, R_T0
+	li	a2, 0
+	li	a3, R_RA
+	li	a4, 0x67
+	jal	em_itype
+	li	a0, R_A0
+	jal	em_push
+	j	ge_done
 gc_closure:
+gc_cl_sym:
 	# Not in asm label table — try symbol table (closure variable)
 	lw	a0, N_LOC_OFF(s5)
 	lw	a1, N_LOC_LEN(s5)
@@ -5847,11 +5914,26 @@ gat_done:
 	jal	em_push
 	j	ge_done
 
+# --- Self reference (inside closure) ---
+ge_self:
+	# Error if not inside closure
+	blt	s11, x0, cg_err
+	# Load self slot from hidden frame variable
+	# self_slot is at 16(sp) in the closure's compiler stack frame
+	# But we can't access that directly — we need to find it.
+	# Use ST_NEXT at closure entry: self slot = first allocation = -4
+	li	a0, -4
+	li	a1, R_T0
+	jal	em_var_load
+	li	a0, R_T0
+	jal	em_push
+	j	ge_done
+
 # --- Closure |params| body ---
 ge_closure:
 	# Children: param idents..., body (last child)
-	# Stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT [12]=old_s11
-	addi	sp, sp, -16
+	# Stack: [0]=jal_patch [4]=ST_CNT [8]=ST_NEXT [12]=old_s11 [16]=self_slot
+	addi	sp, sp, -20
 	sw	s0, 0(sp)
 	sw	s11, 12(sp)
 	li	a0, 0
@@ -5903,6 +5985,29 @@ ge_closure:
 	lw	t0, ST_NEXT(s1)
 	sw	t0, 8(sp)
 	sw	x0, ST_NEXT(s1)
+	# Allocate hidden self slot: save t0 (entry addr) at frame
+	lw	t0, ST_NEXT(s1)
+	addi	t0, t0, -4
+	sw	t0, ST_NEXT(s1)
+	sw	t0, 16(sp)
+	li	a0, -4
+	li	a1, R_SP
+	li	a2, 0
+	li	a3, R_SP
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 8
+	li	a1, R_SP
+	li	a2, R_TP
+	li	a3, 7
+	jal	em_btype
+	sub	a0, s8, s0
+	li	a1, R_ZERO
+	jal	em_jtype
+	# Emit: sw t0, self_slot(s0)
+	lw	a0, 16(sp)
+	li	a1, R_T0
+	jal	em_var_store
 	# Find last child (body) and define param variables
 	lw	s5, N_FIRST_CHILD(s3)
 	mv	s6, s5
@@ -5980,7 +6085,7 @@ gc_body:
 	mv	s0, s5
 	jal	em_jtype
 	mv	s0, t3
-	addi	sp, sp, 16
+	addi	sp, sp, 20
 	# If closure has captures, tag code pointer (set bit 0)
 	lw	t0, ST_CAPS(s1)
 	beqz	t0, gc_no_tag
@@ -7658,6 +7763,8 @@ kw_for:
 	.ascii	"for"
 kw_in:
 	.ascii	"in"
+kw_self:
+	.ascii	"self"
 tok_dotdoteq:
 	.ascii	"..="
 tok_dotdot:

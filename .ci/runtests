@@ -406,6 +406,9 @@ test_runs    "early return value"       "f = |x| { return 99; 42 }; f(0)"
 test_runs    "conditional return"       "max = |a,b| { (a > b) ? return a; b }; max(30, 5)"
 test_runs    "multiple returns"         "cl = |x,lo,hi| { (x < lo) ? return lo; (x > hi) ? return hi; x }; cl(200, 0, 100)"
 test_runs    "return void"              "f = || { return }; f()"
+test_runs    "self recursion"           "f = |n| { n <= 1 ? return 1; n * self(n - 1) }; f(5)"
+test_runs    "self fibonacci"           "fib = |n| { n <= 1 ? return n; self(n-1) + self(n-2) }; fib(10)"
+test_error   "self outside closure"     "self" "Ecg"
 
 # ============================================================================
 echo "=== Error detection (runtime) ==="
