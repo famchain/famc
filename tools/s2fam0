@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Convert a RISC-V .S file to fam0 hex format.
+
+Assembles the .S with GNU as, combines objdump disassembly with source
+comments from the listing. Output format per instruction:
+
+    XX XX XX XX    # mnemonic ; source comment
+
+Usage: s2fam0 input.S [output.fam0]
+       If output is omitted, writes to stdout.
+"""
+
+import subprocess, sys, os, tempfile, re
+
+AS = "riscv64-linux-gnu-as"
+LD = "riscv64-linux-gnu-ld"
+OBJCOPY = "riscv64-linux-gnu-objcopy"
+OBJDUMP = "riscv64-linux-gnu-objdump"
+
+MARCH = "rv32i"
+MABI = "ilp32"
+LDEMU = "elf32lriscv"
+TEXT_ADDR = "0x80000000"
+
+# Listing line: "  60 0000 130BA000 		li	s6, 10		# comment"
+LISTING_RE = re.compile(
+    r"^\s*(\d+)"
+    r"\s+"
+    r"(?:([0-9a-fA-F]{4})"
+    r"\s+"
+    r"([0-9a-fA-F]{8}))?"
+    r"\s*(.*)"
+)
+
+
+def run(cmd):
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                        errors="replace")
+    if r.returncode != 0:
+        err = "\n".join(
+            l for l in r.stderr.splitlines()
+            if "cannot find entry symbol _start" not in l
+        ).strip()
+        if err:
+            print(f"Error running {cmd[0]}:\n{err}", file=sys.stderr)
+            sys.exit(1)
+    return r
+
+
+def build(src):
+    """Assemble .S → listing text, objdump text, raw binary."""
+    with tempfile.TemporaryDirectory() as tmp:
+        obj = os.path.join(tmp, "out.o")
+        elf = os.path.join(tmp, "out.elf")
+        raw = os.path.join(tmp, "out.bin")
+
+        # Listing
+        listing_r = run([AS, f"-march={MARCH}", f"-mabi={MABI}",
+                         "-al", src, "-o", obj])
+
+        # Link + binary
+        run([LD, "-m", LDEMU, f"-Ttext={TEXT_ADDR}", obj, "-o", elf])
+        run([OBJCOPY, "-O", "binary", elf, raw])
+
+        with open(raw, "rb") as f:
+            binary = f.read()
+
+        # Disassembly
+        disasm_r = run([OBJDUMP, "-d", "-M", "no-aliases", elf])
+
+        return listing_r.stdout, disasm_r.stdout, binary
+
+
+def parse_objdump(text):
+    """Parse objdump → {offset: disasm_text}."""
+    base = int(TEXT_ADDR, 16)
+    insns = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*([0-9a-f]+):\s+([0-9a-f ]+?)\s{2,}(.+)", line)
+        if m:
+            offset = int(m.group(1), 16) - base
+            dis = m.group(3).strip()
+            # Strip trailing annotations: "# 80001000 <shutdown+0xdd4>"
+            dis = re.sub(r"\s*#\s*[0-9a-f]+\s+<[^>]+>", "", dis)
+            # Replace inline branch targets: "80000028 <loop>" → "loop"
+            dis = re.sub(r"[0-9a-f]+\s+<(\w+)(?:\+0x[0-9a-f]+)?>", r"\1", dis)
+            insns[offset] = dis
+    return insns
+
+
+def parse_listing(text):
+    """Parse listing → list of (offset_or_None, source_text) tuples."""
+    entries = []
+    for line in text.splitlines():
+        if line.startswith("GAS LISTING") or line.strip() == "":
+            continue
+        m = LISTING_RE.match(line)
+        if not m:
+            continue
+        offset_hex = m.group(2)
+        insn_hex = m.group(3)
+        source = m.group(4)
+
+        if insn_hex:
+            offset = int(offset_hex, 16)
+            entries.append((offset, source))
+        else:
+            entries.append((None, source))
+    return entries
+
+
+def extract_source_comment(source_text):
+    """Extract inline comment from assembly source line.
+
+    The comment '#' must be preceded by whitespace to avoid matching
+    character literals like '#' inside instructions.
+    """
+    # Look for # preceded by whitespace (tab or space)
+    m = re.search(r"[\t ]#\s*(.*)", source_text)
+    if m:
+        comment = m.group(1).strip()
+        return comment if comment else None
+    return None
+
+
+def fmt(source_text):
+    """Normalize whitespace in source text."""
+    s = source_text.replace("\t", " ")
+    s = re.sub(r"  +", " ", s)
+    return s.strip()
+
+
+def hex_bytes(binary, offset):
+    """Format 4 bytes at offset as 'XX XX XX XX'."""
+    chunk = binary[offset:offset + 4]
+    return " ".join(f"{b:02X}" for b in chunk)
+
+
+def convert(listing_text, disasm_text, binary):
+    """Combine listing + objdump → fam0 hex output."""
+    insns = parse_objdump(disasm_text)
+    entries = parse_listing(listing_text)
+    out = []
+    seen_code = False
+
+    for offset, source in entries:
+        if offset is not None:
+            # Instruction line
+            seen_code = True
+            hx = hex_bytes(binary, offset)
+            dis = insns.get(offset, "")
+            src_comment = extract_source_comment(source)
+
+            if dis and src_comment:
+                out.append(f"{hx}\t# {dis} ; {src_comment}")
+            elif dis:
+                out.append(f"{hx}\t# {dis}")
+            elif src_comment:
+                out.append(f"{hx}\t# {src_comment}")
+            else:
+                out.append(hx)
+        else:
+            # Non-code line
+            src = fmt(source)
+            if not src:
+                if seen_code:
+                    out.append("")
+                continue
+
+            if not seen_code:
+                # Header — preserve original formatting, but ensure
+                # all lines are comments (fam0 only ignores # lines)
+                raw = source.rstrip()
+                if raw and not raw.lstrip().startswith("#"):
+                    raw = f"# {raw.lstrip()}"
+                out.append(raw)
+            elif src.endswith(":"):
+                if out and out[-1] != "":
+                    out.append("")
+                out.append(f"# {src}")
+            elif src.startswith("#"):
+                out.append(src)
+            else:
+                out.append(f"# {src}")
+
+    while out and out[-1] == "":
+        out.pop()
+
+    return "\n".join(out) + "\n"
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} input.S [output.fam0]", file=sys.stderr)
+        sys.exit(1)
+
+    src = sys.argv[1]
+    listing, disasm, binary = build(src)
+    output = convert(listing, disasm, binary)
+
+    if len(sys.argv) >= 3:
+        with open(sys.argv[2], "w") as f:
+            f.write(output)
+    else:
+        sys.stdout.write(output)
+
+
+if __name__ == "__main__":
+    main()

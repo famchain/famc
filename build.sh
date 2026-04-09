@@ -12,6 +12,7 @@ run() {
 		-serial mon:stdio 2>/dev/null
 }
 run fam0.seed src/fam0.fam0 > bin/fam0
-cmp ./bin/fam0 ./fam0.seed || { echo "binaries don't match!"; exit 1; }
+cmp ./bin/fam0 ./fam0.seed || { echo "fam0: binaries don't match!"; exit 1; }
+run bin/fam0 src/fam1.fam0 > bin/fam1
 
 echo "Success!";
