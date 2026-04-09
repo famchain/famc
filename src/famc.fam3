@@ -1820,11 +1820,9 @@ pm_params:
 	lw	t0, N_KIND(s1)
 	sw	t0, N_KIND(a1)
 	mv	a0, s1
-	addi	sp, sp, -4
-	sw	a1, 0(sp)
+	prologue a1 x0
 	jal	copy_loc
-	lw	a1, 0(sp)
-	addi	sp, sp, 4
+	epilogue
 	mv	a0, s4
 	jal	append_child
 	jal	advance			# consume param
@@ -3538,17 +3536,19 @@ ge_binop:
 	lw	t0, ST_RDEPTH(s1)
 	li	t1, 8
 	bge	t0, t1, gbo_frame
-	# Register path: LHS and RHS stay in s-registers
+	# Register path: LHS and RHS stay in s-registers, skip frame slot
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
 	lw	t0, N_FIRST_CHILD(s3)
 	lw	a0, N_NEXT_SIB(t0)
 	jal	gen_expr
-	# Pop into t1 (RHS) and t0 (LHS) for ALU dispatch
-	li	a0, R_T1
-	jal	em_pop
-	li	a0, R_T0
-	jal	em_pop
+	# Set s6=LHS reg, s7=RHS reg from depth, consume both operands
+	# depth=D+2, LHS at depth D (=R_S2+D), RHS at depth D+1 (=R_S2+D+1)
+	lw	t0, ST_RDEPTH(s1)
+	addi	t0, t0, -2
+	sw	t0, ST_RDEPTH(s1)
+	addi	s6, t0, R_S2
+	addi	s7, s6, 1
 	j	gbo_dispatch
 gbo_frame:
 	# Frame-slot path: LHS saved to stack while RHS is generated
@@ -3592,6 +3592,8 @@ gbo_frame:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+	li	s6, R_T0
+	li	s7, R_T1
 gbo_dispatch:
 	# Dispatch on operator kind
 	li	t0, NK_PLUS
@@ -3736,80 +3738,80 @@ ge_lor:
 
 gbo_add:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 0
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_sub:
 	li	a0, 0x20
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 0
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_and:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 7
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_or:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 6
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_xor:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 4
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_sll:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 1
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_srl:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 5
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_slt:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 2
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_gt:
 	li	a0, 0
-	li	a1, R_T0
-	li	a2, R_T1
+	mv	a1, s6
+	mv	a2, s7
 	li	a3, 2
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_lte:
 	li	a0, 0
-	li	a1, R_T0
-	li	a2, R_T1
+	mv	a1, s6
+	mv	a2, s7
 	li	a3, 2
 	li	a4, R_T0
 	jal	em_rtype
@@ -3822,8 +3824,8 @@ gbo_lte:
 	j	gbo_push
 gbo_gte:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 2
 	li	a4, R_T0
 	jal	em_rtype
@@ -3836,24 +3838,24 @@ gbo_gte:
 	j	gbo_push
 gbo_sltu:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_gtu:
 	li	a0, 0
-	li	a1, R_T0
-	li	a2, R_T1
+	mv	a1, s6
+	mv	a2, s7
 	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
 	j	gbo_push
 gbo_lteu:
 	li	a0, 0
-	li	a1, R_T0
-	li	a2, R_T1
+	mv	a1, s6
+	mv	a2, s7
 	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
@@ -3866,8 +3868,8 @@ gbo_lteu:
 	j	gbo_push
 gbo_gteu:
 	li	a0, 0
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 3
 	li	a4, R_T0
 	jal	em_rtype
@@ -3880,8 +3882,8 @@ gbo_gteu:
 	j	gbo_push
 gbo_eq:
 	li	a0, 0x20
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 0
 	li	a4, R_T0
 	jal	em_rtype
@@ -3894,8 +3896,8 @@ gbo_eq:
 	j	gbo_push
 gbo_ne:
 	li	a0, 0x20
-	li	a1, R_T1
-	li	a2, R_T0
+	mv	a1, s7
+	mv	a2, s6
 	li	a3, 0
 	li	a4, R_T0
 	jal	em_rtype
@@ -3907,8 +3909,21 @@ gbo_ne:
 	jal	em_rtype
 	j	gbo_push
 
-# --- Multiply: t0 * t1 → t0 (shift-and-add) ---
+# --- Multiply: s6 * s7 → t0 via t0/t1 (shift-and-add) ---
 gbo_mul:
+	# Move s6→t0, s7→t1 for the mul loop
+	li	a0, 0
+	mv	a1, s6
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	mv	a1, s7
+	li	a2, 0
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
 	# 9 instructions, 36 bytes inline. t3=x28 as scratch.
 	li	a0, R_T2
 	li	a1, 0
@@ -3970,6 +3985,7 @@ gbo_mul:
 # t0=dividend, t1=divisor → t2=quotient, t3(x28)=remainder
 # After: for /, mv t0,t2. For %, mv t0,t3.
 gbo_div:
+	jal	gbo_divpre
 	jal	gbo_divmod
 	# mv t0, t2 (quotient)
 	li	a0, 0
@@ -3980,6 +3996,7 @@ gbo_div:
 	jal	em_itype
 	j	gbo_push
 gbo_mod:
+	jal	gbo_divpre
 	jal	gbo_divmod
 	# mv t0, t3(x28) (remainder)
 	li	a0, 0
@@ -3989,6 +4006,23 @@ gbo_mod:
 	li	a4, 0x13
 	jal	em_itype
 	j	gbo_push
+
+# gbo_divpre: emit mv t0,s6; mv t1,s7 for div/mod operand setup
+gbo_divpre:
+	prologue x0
+	li	a0, 0
+	mv	a1, s6
+	li	a2, 0
+	li	a3, R_T0
+	li	a4, 0x13
+	jal	em_itype
+	li	a0, 0
+	mv	a1, s7
+	li	a2, 0
+	li	a3, R_T1
+	li	a4, 0x13
+	jal	em_itype
+	return
 
 # gbo_divmod: emit unsigned divmod (13 instructions, 52 bytes)
 #   t2=quotient, t3(x28)=remainder, t4(x29)=counter, t5(x30)=scratch
@@ -4774,8 +4808,8 @@ ge_for:
 	mv	a0, s6
 	li	a1, R_T0
 	jal	em_var_store
-	# Set up loop context (reuse ge_loop infrastructure)
-	li	a0, 24
+	# Set up loop context (reuse ge_loop infrastructure, 28 bytes)
+	li	a0, 28
 	jal	alloc
 	sw	s10, 0(a0)
 	sw	s11, 4(a0)
@@ -4803,8 +4837,10 @@ ge_for:
 	sub	a0, s8, s0
 	li	a1, R_ZERO
 	jal	em_jtype
-	# loop_start: save sp
+	# loop_start: save sp and register depth
 	sw	s0, 8(s10)
+	lw	t0, ST_RDEPTH(s1)
+	sw	t0, 24(s10)
 	lw	a0, 12(s10)
 	li	a1, R_SP
 	jal	em_var_store
@@ -4865,7 +4901,9 @@ gf_cond_done:
 	mv	a0, s6
 	li	a1, R_T0
 	jal	em_var_store
-	# j loop_start
+	# Restore depth and j loop_start
+	lw	t0, 24(s10)
+	sw	t0, ST_RDEPTH(s1)
 	lw	t0, 8(s10)
 	sub	a0, t0, s0
 	li	a1, R_ZERO
@@ -4877,13 +4915,9 @@ gf_bpatch:
 	beqz	t2, gf_bdone
 	lw	a0, 0(t3)
 	sub	a1, s0, a0
-	addi	sp, sp, -8
-	sw	t2, 0(sp)
-	sw	t3, 4(sp)
+	prologue t2 t3 x0
 	jal	patch_jal
-	lw	t2, 0(sp)
-	lw	t3, 4(sp)
-	addi	sp, sp, 8
+	epilogue
 	addi	t3, t3, 4
 	addi	t2, t2, -1
 	j	gf_bpatch
@@ -4908,8 +4942,8 @@ gf_bdone:
 	j	ge_done
 
 ge_loop:
-	# Allocate loop context
-	li	a0, 24
+	# Allocate loop context (28 bytes: +24=saved rdepth)
+	li	a0, 28
 	jal	alloc
 	sw	s10, 0(a0)
 	sw	s11, 4(a0)
@@ -4941,6 +4975,8 @@ ge_loop:
 	jal	em_jtype
 	# loop_start: emit sw sp, slot(s0)
 	sw	s0, 8(s10)
+	lw	t0, ST_RDEPTH(s1)
+	sw	t0, 24(s10)
 	lw	a0, 12(s10)
 	li	a1, R_SP
 	jal	em_var_store
@@ -4950,7 +4986,9 @@ ge_loop:
 	# Pop body result
 	li	a0, R_T0
 	jal	em_pop
-	# j loop_start
+	# Restore depth and j loop_start
+	lw	t0, 24(s10)
+	sw	t0, ST_RDEPTH(s1)
 	lw	t0, 8(s10)
 	sub	a0, t0, s0
 	li	a1, R_ZERO
@@ -4962,13 +5000,9 @@ gl_bpatch:
 	beqz	t2, gl_bdone
 	lw	a0, 0(t3)
 	sub	a1, s0, a0
-	addi	sp, sp, -8
-	sw	t2, 0(sp)
-	sw	t3, 4(sp)
+	prologue t2 t3 x0
 	jal	patch_jal
-	lw	t2, 0(sp)
-	lw	t3, 4(sp)
-	addi	sp, sp, 8
+	epilogue
 	addi	t3, t3, 4
 	addi	t2, t2, -1
 	j	gl_bpatch
@@ -4999,6 +5033,12 @@ gb_noval:
 	li	a1, 0
 	jal	em_li
 gb_restore:
+	# Save compile-time depth, set to loop start for generated code
+	lw	t0, ST_RDEPTH(s1)
+	addi	sp, sp, -4
+	sw	t0, 0(sp)
+	lw	t0, 24(s10)
+	sw	t0, ST_RDEPTH(s1)
 	# Restore sp from hidden slot
 	lw	a0, 12(s10)
 	li	a1, R_SP
@@ -5034,6 +5074,10 @@ gb_fx_ok:
 	li	a0, 0
 	li	a1, R_ZERO
 	jal	em_jtype
+	# Restore compile-time depth (code after break is unreachable)
+	lw	t0, 0(sp)
+	addi	sp, sp, 4
+	sw	t0, ST_RDEPTH(s1)
 	# Push dummy (unreachable, maintains stack invariant)
 	li	a0, R_T0
 	li	a1, 0
@@ -5046,6 +5090,12 @@ gb_fx_ok:
 ge_cont:
 	# Error if not inside a loop
 	beqz	s10, cg_no_loop
+	# Save compile-time depth, set to loop start for generated code
+	lw	t0, ST_RDEPTH(s1)
+	addi	sp, sp, -4
+	sw	t0, 0(sp)
+	lw	t0, 24(s10)
+	sw	t0, ST_RDEPTH(s1)
 	# Emit: lw sp, slot(s0) — restore sp to loop start
 	lw	a0, 12(s10)
 	li	a1, R_SP
@@ -5055,6 +5105,10 @@ ge_cont:
 	sub	a0, t0, s0
 	li	a1, R_ZERO
 	jal	em_jtype
+	# Restore compile-time depth (code after continue is unreachable)
+	lw	t0, 0(sp)
+	addi	sp, sp, 4
+	sw	t0, ST_RDEPTH(s1)
 	# Push dummy (unreachable)
 	li	a0, R_T0
 	li	a1, 0
@@ -5167,11 +5221,9 @@ gc_pop_args:
 	lw	a0, 0(sp)
 	addi	sp, sp, 4
 	addi	a1, t2, R_A0
-	addi	sp, sp, -4
-	sw	t2, 0(sp)
+	prologue t2 x0
 	jal	em_var_load
-	lw	t2, 0(sp)
-	addi	sp, sp, 4
+	epilogue
 	j	gc_pop_args
 gc_call:
 	# If NK_MACRO_CALL, skip directly to macro lookup
@@ -5710,11 +5762,9 @@ gs_fdone:
 	slli	t3, t2, 2
 	add	a0, a0, t3
 	addi	a0, a0, SRT_DATA
-	addi	sp, sp, -4
-	sw	t2, 0(sp)
+	prologue t2 x0
 	jal	alloc
-	lw	t2, 0(sp)
-	addi	sp, sp, 4
+	epilogue
 	mv	t3, a0
 	# Copy header + entries from old
 	lw	t0, SRT_CNT(s7)
@@ -6363,11 +6413,9 @@ ge_macro:
 	slli	t2, t1, 2
 	add	a0, a0, t2
 	addi	a0, a0, MRT_DATA
-	addi	sp, sp, -4
-	sw	t1, 0(sp)
+	prologue t1 x0
 	jal	alloc
-	lw	t1, 0(sp)
-	addi	sp, sp, 4
+	epilogue
 	mv	t3, a0
 	# Copy header + entries
 	lw	t0, MRT_CNT(s5)
@@ -7141,11 +7189,9 @@ aa_named:
 	slli	t2, t1, 3
 	add	a0, a0, t2
 	addi	a0, a0, 8
-	addi	sp, sp, -4
-	sw	t1, 0(sp)
+	prologue t1 x0
 	jal	alloc
-	lw	t1, 0(sp)
-	addi	sp, sp, 4
+	epilogue
 	mv	t2, a0
 	lw	t0, 0(s5)
 	sw	t0, 0(t2)
@@ -8384,11 +8430,7 @@ fr_done:
 #   a0=name offset, a1=name length, s1=symtab, s2=input base
 #   Returns a0 = AST pointer, or 0 if not found
 mac_find:
-	addi	sp, sp, -16
-	sw	ra, 12(sp)
-	sw	s3, 0(sp)
-	sw	s4, 4(sp)
-	sw	s5, 8(sp)
+	prologue s3 s4 s5 x0
 	mv	s3, a0
 	mv	s4, a1
 	lw	s5, ST_MCRT(s1)
@@ -8425,12 +8467,7 @@ mf_next:
 mf_fail:
 	li	a0, 0
 mf_done:
-	lw	s3, 0(sp)
-	lw	s4, 4(sp)
-	lw	s5, 8(sp)
-	lw	ra, 12(sp)
-	addi	sp, sp, 16
-	ret
+	return
 
 # --- Asm error ---
 asm_fx_grow:
@@ -8439,13 +8476,9 @@ asm_fx_grow:
 	slli	t1, t1, 1
 	slli	a0, t1, 4
 	addi	a0, a0, 8
-	addi	sp, sp, -8
-	sw	t0, 0(sp)
-	sw	t1, 4(sp)
+	prologue t0 t1 x0
 	jal	alloc
-	lw	t0, 0(sp)
-	lw	t1, 4(sp)
-	addi	sp, sp, 8
+	epilogue
 	mv	t2, a0
 	sw	t0, 0(t2)
 	sw	t1, 4(t2)
