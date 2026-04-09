@@ -79,6 +79,7 @@
 .equ	NK_IDENT,	80
 .equ	NK_NUMBER,	81
 .equ	NK_STRING,	82
+.equ	NK_CHAR,	83
 
 # ── Trie node struct (1036 bytes) ────────────────────────────────────
 .equ	T_KIND,		0
@@ -87,14 +88,15 @@
 .equ	T_CHILDREN,	12
 .equ	T_NODE_SZ,	1036
 
-# ── Lexer state struct (20 bytes + root trie node) ───────────────────
+# ── Lexer state struct (24 bytes + root trie node) ───────────────────
 .equ	L_IN,		0
 .equ	L_END,		4
 .equ	L_OFF,		8
 .equ	L_LINE,		12
-.equ	L_COL_START,	16
-.equ	L_ROOT,		20
-.equ	L_SZ,		1056
+.equ	L_LINE_OFF,	16
+.equ	L_COL_START,	20
+.equ	L_ROOT,		24
+.equ	L_SZ,		1060
 
 # ── Node struct (44 bytes) ───────────────────────────────────────────
 .equ	N_KIND,		0
@@ -301,8 +303,7 @@ lexer_init:
 	sw	s1, L_OFF(s0)
 	li	t0, 1
 	sw	t0, L_LINE(s0)
-	li	t0, 1
-	sw	t0, L_COL_START(s0)
+	sw	s1, L_LINE_OFF(s0)	# line starts at input start
 
 	# Register tokens from table
 	lla	s1, tok_table
@@ -335,6 +336,8 @@ lex_next:
 	lw	s4, L_OFF(s0)		# current offset
 	lw	s5, L_LINE(s0)		# save line for peek restore
 	sw	s4, N_DATA(s1)		# save original offset in node.data for peek
+	lw	t0, L_LINE_OFF(s0)
+	sw	t0, N_PARENT(s1)	# save line_off for peek restore
 
 	# ── Skip whitespace and comments ──
 ln_skip:
@@ -372,6 +375,7 @@ ln_lc_lp:
 	lw	t0, L_LINE(s0)
 	addi	t0, t0, 1
 	sw	t0, L_LINE(s0)
+	sw	s4, L_LINE_OFF(s0)
 	j	ln_skip
 
 	# ── /* */ nested block comment ──
@@ -387,6 +391,7 @@ ln_bc_lp:
 	lw	t0, L_LINE(s0)
 	addi	t0, t0, 1
 	sw	t0, L_LINE(s0)
+	sw	s4, L_LINE_OFF(s0)
 	j	ln_bc_lp
 ln_bc_not_nl:
 	li	t1, '/'
@@ -418,6 +423,7 @@ ln_newline:
 	lw	t0, L_LINE(s0)
 	addi	t0, t0, 1
 	sw	t0, L_LINE(s0)
+	sw	s4, L_LINE_OFF(s0)
 	j	ln_skip
 
 	# ── EOF ──
@@ -431,17 +437,24 @@ ln_eof:
 
 	# ── Start of token ──
 ln_start:
-	# Record token start position (s5 is saved_line for peek, use s2 area)
+	# Record token start position
 	sub	t0, s4, s2
 	sw	t0, N_LOC_OFF(s1)	# offset from input start
 	lw	t0, L_LINE(s0)
 	sw	t0, N_LOC_LINE(s1)
+	lw	t0, L_LINE_OFF(s0)	# compute column
+	sub	t0, s4, t0
+	sw	t0, N_LOC_COL(s1)
 
 	lbu	t0, 0(s4)
 
 	# ── String literal ──
 	li	t1, '"'
 	beq	t0, t1, ln_string
+
+	# ── Char literal ──
+	li	t1, '\''
+	beq	t0, t1, ln_char
 
 	# ── Number literal ──
 	li	t1, '0'
@@ -604,6 +617,43 @@ ln_str_end:
 	li	a0, NK_STRING
 	j	ln_ret
 
+	# ── Char literal: 'x' or '\x' ──
+ln_char:
+	addi	t3, s4, 1		# skip opening '\''
+ln_char_lp:
+	beq	t3, s3, ln_char_end	# unterminated
+	lbu	t0, 0(t3)
+	li	t1, '\\'
+	beq	t0, t1, ln_char_esc
+	li	t1, '\''
+	beq	t0, t1, ln_char_close
+	addi	t3, t3, 1
+	j	ln_char_lp
+ln_char_esc:
+	addi	t3, t3, 2		# skip backslash + next char
+	j	ln_char_lp
+ln_char_close:
+	addi	t3, t3, 1		# include closing '\''
+ln_char_end:
+	# Validate: len must be 3 ('x') or 4 ('\x')
+	sub	t0, t3, s4
+	li	t1, 3
+	beq	t0, t1, ln_char_ok
+	li	t1, 4
+	beq	t0, t1, ln_char_ok
+	li	t0, NK_ERROR
+	j	ln_char_set
+ln_char_ok:
+	li	t0, NK_CHAR
+ln_char_set:
+	sw	t0, N_KIND(s1)
+	sub	t0, t3, s4
+	sw	t0, N_LOC_LEN(s1)
+	mv	s4, t3
+	sw	s4, L_OFF(s0)
+	lw	a0, N_KIND(s1)		# return whatever was set (CHAR or ERROR)
+	j	ln_ret
+
 	# ── Unknown char ──
 ln_unknown:
 	li	t0, NK_ERROR
@@ -619,6 +669,8 @@ ln_ret:
 	lw	t0, N_DATA(s1)		# saved original offset
 	sw	t0, L_OFF(s0)
 	sw	s5, L_LINE(s0)		# saved original line
+	lw	t0, N_PARENT(s1)	# saved original line_off
+	sw	t0, L_LINE_OFF(s0)
 ln_done:
 	return
 
@@ -874,12 +926,14 @@ tok_table:
 
 # ══════════════════════════════════════════════════════════════════════
 #  compile: a0=input_start, a1=input_end
-#  For now: lex all tokens and print "kind:len\n" for each.
+#  Debug mode: lex all tokens and print:
+#    token='<text>',type=<kind>,<line>:<col>\n
 #  Returns a0=out_start, a1=out_end.
 # ══════════════════════════════════════════════════════════════════════
 compile:
-	prologue	s0 s1 s2 s3 s4 x0
-	mv	s2, a1			# s2 = output write cursor (after input)
+	prologue	s0 s1 s2 s3 s4 s5 x0
+	mv	s5, a0			# s5 = input start (for text extraction)
+	mv	s2, a1			# s2 = output write cursor
 	mv	s3, a1			# s3 = output start
 	sub	a1, a1, a0		# input len
 	jal	lexer_init
@@ -898,28 +952,109 @@ compile_loop:
 	jal	lex_next
 	lw	s4, N_KIND(s1)		# save kind
 
-	# Print kind as decimal
+	# "token='"
+	li	t0, 't'
+	sb	t0, 0(s2)
+	li	t0, 'o'
+	sb	t0, 1(s2)
+	li	t0, 'k'
+	sb	t0, 2(s2)
+	li	t0, 'e'
+	sb	t0, 3(s2)
+	li	t0, 'n'
+	sb	t0, 4(s2)
+	li	t0, '='
+	sb	t0, 5(s2)
+	li	t0, '\''
+	sb	t0, 6(s2)
+	addi	s2, s2, 7
+
+	# Copy token text from input + pad to 20 chars total (including quotes)
+	lw	t0, N_LOC_OFF(s1)	# offset
+	lw	t1, N_LOC_LEN(s1)	# length
+	add	t0, s5, t0		# ptr into input
+	mv	t3, t1			# save len for padding
+cp_tok:
+	beqz	t1, cp_tok_done
+	lbu	t2, 0(t0)
+	sb	t2, 0(s2)
+	addi	t0, t0, 1
+	addi	s2, s2, 1
+	addi	t1, t1, -1
+	j	cp_tok
+cp_tok_done:
+	# Close quote
+	li	t0, '\''
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+	# Pad with spaces: total field = 20 chars ("token='" = 7, text, "'", spaces)
+	# Already wrote 7 + len + 1 = 8 + len. Pad to 28.
+	addi	t3, t3, 8		# chars written so far
+	li	t4, 28			# target width
+cp_pad:
+	bge	t3, t4, cp_pad_done
+	li	t0, ' '
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+	addi	t3, t3, 1
+	j	cp_pad
+cp_pad_done:
+
+	# ",type="
+	li	t0, ','
+	sb	t0, 0(s2)
+	li	t0, 't'
+	sb	t0, 1(s2)
+	li	t0, 'y'
+	sb	t0, 2(s2)
+	li	t0, 'p'
+	sb	t0, 3(s2)
+	li	t0, 'e'
+	sb	t0, 4(s2)
+	li	t0, '='
+	sb	t0, 5(s2)
+	addi	s2, s2, 6
+
+	# Print kind as decimal (pad to 3 chars)
+	mv	t3, s2			# remember start
 	mv	a0, s4
 	jal	print_dec_inline
+	sub	t3, s2, t3		# chars written
+	li	t4, 3
+cp_type_pad:
+	bge	t3, t4, cp_type_done
+	li	t0, ' '
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+	addi	t3, t3, 1
+	j	cp_type_pad
+cp_type_done:
 
-	# Print ':'
-	li	a0, ':'
-	sb	a0, 0(s2)
+	# ","
+	li	t0, ','
+	sb	t0, 0(s2)
 	addi	s2, s2, 1
 
-	# Print length as decimal
-	lw	a0, N_LOC_LEN(s1)
+	# Print line number
+	lw	a0, N_LOC_LINE(s1)
 	jal	print_dec_inline
 
-	# Print newline
-	li	a0, '\n'
-	sb	a0, 0(s2)
+	# ":"
+	li	t0, ':'
+	sb	t0, 0(s2)
 	addi	s2, s2, 1
 
-	# Stop on NK_TERM or NK_ERROR
+	# Print column
+	lw	a0, N_LOC_COL(s1)
+	jal	print_dec_inline
+
+	# newline
+	li	t0, '\n'
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+
+	# Stop on NK_TERM
 	li	t0, NK_TERM
-	beq	s4, t0, compile_done
-	li	t0, NK_ERROR
 	beq	s4, t0, compile_done
 	j	compile_loop
 
