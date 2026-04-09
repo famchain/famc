@@ -536,18 +536,29 @@ ln_ident_done:
 	# ── Number literal ──
 ln_number:
 	mv	t3, s4
-	# Check for 0x prefix
+	# Check for 0x/0b/octal prefix
 	lbu	t0, 0(t3)
 	li	t1, '0'
 	bne	t0, t1, ln_num_dec
 	addi	t4, t3, 1
-	beq	t4, s3, ln_num_dec
+	beq	t4, s3, ln_num_dec	# just "0"
 	lbu	t0, 0(t4)
 	li	t1, 'x'
 	beq	t0, t1, ln_num_hex
 	li	t1, 'X'
 	beq	t0, t1, ln_num_hex
-	j	ln_num_dec
+	li	t1, 'b'
+	beq	t0, t1, ln_num_bin
+	li	t1, 'B'
+	beq	t0, t1, ln_num_bin
+	# Check if next char is octal digit (0-7) → octal
+	li	t1, '0'
+	blt	t0, t1, ln_num_dec
+	li	t1, '8'
+	blt	t0, t1, ln_num_oct
+	j	ln_num_dec		# 08, 09 etc → decimal
+
+	# ── Hex: 0x[0-9a-fA-F]+ ──
 ln_num_hex:
 	addi	t3, t4, 1		# skip "0x"
 ln_num_hex_lp:
@@ -571,6 +582,34 @@ ln_num_hex_uc:
 ln_num_hex_go:
 	addi	t3, t3, 1
 	j	ln_num_hex_lp
+
+	# ── Binary: 0b[01]+ ──
+ln_num_bin:
+	addi	t3, t4, 1		# skip "0b"
+ln_num_bin_lp:
+	beq	t3, s3, ln_num_done
+	lbu	t0, 0(t3)
+	li	t1, '0'
+	blt	t0, t1, ln_num_done
+	li	t1, '2'
+	bge	t0, t1, ln_num_done
+	addi	t3, t3, 1
+	j	ln_num_bin_lp
+
+	# ── Octal: 0[0-7]+ ──
+ln_num_oct:
+	mv	t3, t4			# start from digit after '0'
+ln_num_oct_lp:
+	beq	t3, s3, ln_num_done
+	lbu	t0, 0(t3)
+	li	t1, '0'
+	blt	t0, t1, ln_num_done
+	li	t1, '8'
+	bge	t0, t1, ln_num_done
+	addi	t3, t3, 1
+	j	ln_num_oct_lp
+
+	# ── Decimal: [0-9]+ ──
 ln_num_dec:
 	beq	t3, s3, ln_num_done
 	lbu	t0, 0(t3)
