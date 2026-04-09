@@ -56,6 +56,7 @@
 #   t4  = high nibble accumulator (across loop iterations)
 
 _start:
+	nop				# q32 magic
 	# ── Constants ──
 	li	s6, 10			# '\n' and hex limit
 	lui	s5, 0x10000		# UART base 0x10000000

@@ -54,6 +54,7 @@
 #   s10 = fixup table write ptr
 #   t4  = high nibble accumulator (across loop iterations)
 # _start:
+13 00 00 00	# addi	zero,zero,0 ; q32 magic
 # ── Constants ──
 13 0B A0 00	# addi	s6,zero,10 ; '\n' and hex limit
 B7 0A 00 10	# lui	s5,0x10000 ; UART base 0x10000000
