@@ -45,4 +45,12 @@ if [ ! -s "$OUT" ]; then
 	exit 1
 fi
 
+MAGIC=$(head -c 4 "$OUT" | xxd -p)
+if [ "$MAGIC" != "13000000" ]; then
+	# Not a valid binary — print the error output and clean up
+	cat "$OUT"
+	rm -f "$OUT"
+	exit 1
+fi
+
 echo "$OUT ($(wc -c < "$OUT") bytes)"
