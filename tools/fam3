@@ -9,7 +9,11 @@ if [ $# -lt 1 ]; then
 	exit 1
 fi
 
-ASM="./bin/fam3"
+SELF="$0"
+[ -L "$SELF" ] && SELF="$(readlink -f "$SELF")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+ASM="$ROOT_DIR/bin/fam3"
 SRC="$1"
 
 if [ ! -e "$ASM" ]; then
