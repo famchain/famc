@@ -113,6 +113,24 @@
 .equ	N_DATA,		40
 .equ	N_SZ,		44
 
+# Precedence levels (higher = tighter binding, gaps of 2 for Pratt +1)
+.equ	P_NONE,		0
+.equ	P_ASSIGN,	2
+.equ	P_TERNARY,	4
+.equ	P_OR,		6
+.equ	P_AND,		8
+.equ	P_EQUAL,	10
+.equ	P_COMPARE,	12
+.equ	P_BIT_OR,	14
+.equ	P_BIT_XOR,	16
+.equ	P_BIT_AND,	18
+.equ	P_SHIFT,	20
+.equ	P_ADD,		22
+.equ	P_MUL,		24
+.equ	P_UNARY,	26
+.equ	P_POSTFIX,	28
+.equ	P_CALL,		30
+
 _start:
 	j	main
 
@@ -764,208 +782,208 @@ iic_yes:
 # ══════════════════════════════════════════════════════════════════════
 tok_table:
 # Single-char punctuators
-.byte	NK_SEMI, 1
-.ascii	";"
-.zero	9
-.byte	NK_COMMA, 1
-.ascii	","
-.zero	9
-.byte	NK_COLON, 1
-.ascii	":"
-.zero	9
-.byte	NK_QMARK, 1
-.ascii	"?"
-.zero	9
-.byte	NK_LPAREN, 1
-.ascii	"("
-.zero	9
-.byte	NK_RPAREN, 1
-.ascii	")"
-.zero	9
-.byte	NK_LBRACE, 1
-.ascii	"{"
-.zero	9
-.byte	NK_RBRACE, 1
-.ascii	"}"
-.zero	9
-.byte	NK_LBRACKET, 1
-.ascii	"["
-.zero	9
-.byte	NK_RBRACKET, 1
-.ascii	"]"
-.zero	9
-.byte	NK_DOT, 1
-.ascii	"."
-.zero	9
-.byte	NK_AT, 1
-.ascii	"@"
-.zero	9
-.byte	NK_HASH, 1
-.ascii	"#"
-.zero	9
-.byte	NK_TILDE, 1
-.ascii	"~"
-.zero	9
+	.byte	NK_SEMI, 1
+	.ascii	";"
+	.zero	9
+	.byte	NK_COMMA, 1
+	.ascii	", "
+	.zero	9
+	.byte	NK_COLON, 1
+	.ascii	":"
+	.zero	9
+	.byte	NK_QMARK, 1
+	.ascii	"?"
+	.zero	9
+	.byte	NK_LPAREN, 1
+	.ascii	"("
+	.zero	9
+	.byte	NK_RPAREN, 1
+	.ascii	")"
+	.zero	9
+	.byte	NK_LBRACE, 1
+	.ascii	"{"
+	.zero	9
+	.byte	NK_RBRACE, 1
+	.ascii	"}"
+	.zero	9
+	.byte	NK_LBRACKET, 1
+	.ascii	"["
+	.zero	9
+	.byte	NK_RBRACKET, 1
+	.ascii	"]"
+	.zero	9
+	.byte	NK_DOT, 1
+	.ascii	"."
+	.zero	9
+	.byte	NK_AT, 1
+	.ascii	"@"
+	.zero	9
+	.byte	NK_HASH, 1
+	.ascii	"#"
+	.zero	9
+	.byte	NK_TILDE, 1
+	.ascii	"~"
+	.zero	9
 
 # Operators (1 char)
-.byte	NK_PLUS, 1
-.ascii	"+"
-.zero	9
-.byte	NK_MINUS, 1
-.ascii	"-"
-.zero	9
-.byte	NK_STAR, 1
-.ascii	"*"
-.zero	9
-.byte	NK_SLASH, 1
-.ascii	"/"
-.zero	9
-.byte	NK_PERCENT, 1
-.ascii	"%"
-.zero	9
-.byte	NK_AMP, 1
-.ascii	"&"
-.zero	9
-.byte	NK_PIPE, 1
-.ascii	"|"
-.zero	9
-.byte	NK_CARET, 1
-.ascii	"^"
-.zero	9
-.byte	NK_BANG, 1
-.ascii	"!"
-.zero	9
-.byte	NK_ASSIGN, 1
-.ascii	"="
-.zero	9
-.byte	NK_LT, 1
-.ascii	"<"
-.zero	9
-.byte	NK_GT, 1
-.ascii	">"
-.zero	9
+	.byte	NK_PLUS, 1
+	.ascii	"+"
+	.zero	9
+	.byte	NK_MINUS, 1
+	.ascii	"-"
+	.zero	9
+	.byte	NK_STAR, 1
+	.ascii	"*"
+	.zero	9
+	.byte	NK_SLASH, 1
+	.ascii	"/"
+	.zero	9
+	.byte	NK_PERCENT, 1
+	.ascii	"%"
+	.zero	9
+	.byte	NK_AMP, 1
+	.ascii	"&"
+	.zero	9
+	.byte	NK_PIPE, 1
+	.ascii	"|"
+	.zero	9
+	.byte	NK_CARET, 1
+	.ascii	"^"
+	.zero	9
+	.byte	NK_BANG, 1
+	.ascii	"!"
+	.zero	9
+	.byte	NK_ASSIGN, 1
+	.ascii	"="
+	.zero	9
+	.byte	NK_LT, 1
+	.ascii	"<"
+	.zero	9
+	.byte	NK_GT, 1
+	.ascii	">"
+	.zero	9
 
 # Multi-char operators
-.byte	NK_FAT_ARROW, 2
-.ascii	"=>"
-.zero	8
-.byte	NK_EQ, 2
-.ascii	"=="
-.zero	8
-.byte	NK_NEQ, 2
-.ascii	"!="
-.zero	8
-.byte	NK_LTE, 2
-.ascii	"<="
-.zero	8
-.byte	NK_GTE, 2
-.ascii	">="
-.zero	8
-.byte	NK_AND, 2
-.ascii	"&&"
-.zero	8
-.byte	NK_OR, 2
-.ascii	"||"
-.zero	8
-.byte	NK_SHL, 2
-.ascii	"<<"
-.zero	8
-.byte	NK_SHR, 2
-.ascii	">>"
-.zero	8
-.byte	NK_DOTDOT, 2
-.ascii	".."
-.zero	8
-.byte	NK_LTU, 2
-.ascii	"<u"
-.zero	8
-.byte	NK_GTU, 2
-.ascii	">u"
-.zero	8
-.byte	NK_ASSIGN_MUT, 2
-.ascii	":="
-.zero	8
-.byte	NK_PLUS_EQ, 2
-.ascii	"+="
-.zero	8
-.byte	NK_MINUS_EQ, 2
-.ascii	"-="
-.zero	8
-.byte	NK_STAR_EQ, 2
-.ascii	"*="
-.zero	8
-.byte	NK_SLASH_EQ, 2
-.ascii	"/="
-.zero	8
-.byte	NK_PERCENT_EQ, 2
-.ascii	"%="
-.zero	8
-.byte	NK_AMP_EQ, 2
-.ascii	"&="
-.zero	8
-.byte	NK_PIPE_EQ, 2
-.ascii	"|="
-.zero	8
-.byte	NK_CARET_EQ, 2
-.ascii	"^="
-.zero	8
-.byte	NK_DOTDOT_EQ, 3
-.ascii	"..="
-.zero	7
-.byte	NK_LTEU, 3
-.ascii	"<=u"
-.zero	7
-.byte	NK_GTEU, 3
-.ascii	">=u"
-.zero	7
-.byte	NK_SHL_EQ, 3
-.ascii	"<<="
-.zero	7
-.byte	NK_SHR_EQ, 3
-.ascii	">>="
-.zero	7
+	.byte	NK_FAT_ARROW, 2
+	.ascii	"=>"
+	.zero	8
+	.byte	NK_EQ, 2
+	.ascii	"=="
+	.zero	8
+	.byte	NK_NEQ, 2
+	.ascii	"!="
+	.zero	8
+	.byte	NK_LTE, 2
+	.ascii	"<="
+	.zero	8
+	.byte	NK_GTE, 2
+	.ascii	">="
+	.zero	8
+	.byte	NK_AND, 2
+	.ascii	"&&"
+	.zero	8
+	.byte	NK_OR, 2
+	.ascii	"||"
+	.zero	8
+	.byte	NK_SHL, 2
+	.ascii	"<<"
+	.zero	8
+	.byte	NK_SHR, 2
+	.ascii	">>"
+	.zero	8
+	.byte	NK_DOTDOT, 2
+	.ascii	".."
+	.zero	8
+	.byte	NK_LTU, 2
+	.ascii	"<u"
+	.zero	8
+	.byte	NK_GTU, 2
+	.ascii	">u"
+	.zero	8
+	.byte	NK_ASSIGN_MUT, 2
+	.ascii	":="
+	.zero	8
+	.byte	NK_PLUS_EQ, 2
+	.ascii	"+="
+	.zero	8
+	.byte	NK_MINUS_EQ, 2
+	.ascii	"-="
+	.zero	8
+	.byte	NK_STAR_EQ, 2
+	.ascii	"*="
+	.zero	8
+	.byte	NK_SLASH_EQ, 2
+	.ascii	"/="
+	.zero	8
+	.byte	NK_PERCENT_EQ, 2
+	.ascii	"%="
+	.zero	8
+	.byte	NK_AMP_EQ, 2
+	.ascii	"&="
+	.zero	8
+	.byte	NK_PIPE_EQ, 2
+	.ascii	"|="
+	.zero	8
+	.byte	NK_CARET_EQ, 2
+	.ascii	"^="
+	.zero	8
+	.byte	NK_DOTDOT_EQ, 3
+	.ascii	"..="
+	.zero	7
+	.byte	NK_LTEU, 3
+	.ascii	"<=u"
+	.zero	7
+	.byte	NK_GTEU, 3
+	.ascii	">=u"
+	.zero	7
+	.byte	NK_SHL_EQ, 3
+	.ascii	"<<="
+	.zero	7
+	.byte	NK_SHR_EQ, 3
+	.ascii	">>="
+	.zero	7
 
 # Keywords
-.byte	NK_IN, 2
-.ascii	"in"
-.zero	8
-.byte	NK_FOR, 3
-.ascii	"for"
-.zero	7
-.byte	NK_ASM, 3
-.ascii	"asm"
-.zero	7
-.byte	NK_LOOP, 4
-.ascii	"loop"
-.zero	6
-.byte	NK_SELF, 4
-.ascii	"self"
-.zero	6
-.byte	NK_BREAK, 5
-.ascii	"break"
-.zero	5
-.byte	NK_MACRO, 5
-.ascii	"macro"
-.zero	5
-.byte	NK_RETURN, 6
-.ascii	"return"
-.zero	4
-.byte	NK_STRUCT, 6
-.ascii	"struct"
-.zero	4
-.byte	NK_SWITCH, 6
-.ascii	"switch"
-.zero	4
-.byte	NK_SIZEOF, 6
-.ascii	"sizeof"
-.zero	4
-.byte	NK_CONTINUE, 8
-.ascii	"continue"
-.zero	2
+	.byte	NK_IN, 2
+	.ascii	"in"
+	.zero	8
+	.byte	NK_FOR, 3
+	.ascii	"for"
+	.zero	7
+	.byte	NK_ASM, 3
+	.ascii	"asm"
+	.zero	7
+	.byte	NK_LOOP, 4
+	.ascii	"loop"
+	.zero	6
+	.byte	NK_SELF, 4
+	.ascii	"self"
+	.zero	6
+	.byte	NK_BREAK, 5
+	.ascii	"break"
+	.zero	5
+	.byte	NK_MACRO, 5
+	.ascii	"macro"
+	.zero	5
+	.byte	NK_RETURN, 6
+	.ascii	"return"
+	.zero	4
+	.byte	NK_STRUCT, 6
+	.ascii	"struct"
+	.zero	4
+	.byte	NK_SWITCH, 6
+	.ascii	"switch"
+	.zero	4
+	.byte	NK_SIZEOF, 6
+	.ascii	"sizeof"
+	.zero	4
+	.byte	NK_CONTINUE, 8
+	.ascii	"continue"
+	.zero	2
 
 # Sentinel
-.byte	0, 0
-.zero	10
+	.byte	0, 0
+	.zero	10
 
 # ══════════════════════════════════════════════════════════════════════
 #  compile: a0=input_start, a1=input_end
@@ -1044,7 +1062,7 @@ cp_pad:
 cp_pad_done:
 
 	# ",type="
-	li	t0, ','
+	li	t0, ', '
 	sb	t0, 0(s2)
 	li	t0, 't'
 	sb	t0, 1(s2)
@@ -1074,7 +1092,7 @@ cp_type_pad:
 cp_type_done:
 
 	# ","
-	li	t0, ','
+	li	t0, ', '
 	sb	t0, 0(s2)
 	addi	s2, s2, 1
 
