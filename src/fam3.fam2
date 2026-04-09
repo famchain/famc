@@ -1,0 +1,3280 @@
+# MIT License
+#
+# Copyright (c) 2026 Christopher Gilliard
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# ════════════════════════════════�
+# fam3.S — RV32I mnemonic assembler (fourth-stage bootstrap)
+# ════════════════════════════════�
+#
+# Reads text from UART (terminated by EOT = 0x04), emits a RISC-V binary
+# back over UART, then poweroffs.
+#
+# Grammar:
+#   # ... \n                    comment (to end of line)
+#   whitespace / comma          token separators (interchangeable)
+#   name:                       label definition (name <= 31 chars)
+#   N:                          local label (digit 0-9)
+#   mnemonic operands           RV32I instruction or pseudo
+#
+# Supported mnemonics (RV32I base):
+#   R: add sub sll slt sltu xor srl sra or and
+#   I: addi slti sltiu xori ori andi slli srli srai
+#   Load: lb lh lw lbu lhu
+#   Store: sb sh sw
+#   Branch: beq bne blt bge bltu bgeu
+#   U: lui auipc
+#   Jump: jal jalr
+#
+# Pseudos:
+#   nop li mv j ret beqz bnez neg not
+#   seqz snez sltz sgtz bltz bgez
+#   bgt ble bgtu bleu
+#   lla call tail wfi
+#   prologue epilogue return
+#
+# Directives:
+#   .equ NAME, value
+#   .byte val[, val...]
+#   .word val[, val...]
+#   .ascii "string"
+#   .zero count
+#
+# Branch relaxation: B-type label targets always emit an inverted-branch +8
+# then JAL trampoline (8 bytes total), converting fixup to J-type (±1 MB).
+# Numeric B-type offsets remain compact (4 bytes, ±4 KB).
+#
+# Register map:
+#   s0  = token length          s1  = output buf base
+#   s2  = output write ptr      s3  = symtab base
+#   s4  = symtab write ptr      s5  = UART base (0x10000000)
+#   s6  = 10 (constant)         s7  = fixup base
+#   s8  = fixup write ptr       s9  = mnem_table base
+#   s10 = token buf base        s11 = reg_table base
+#   sp  = descending stack
+#
+# Memory layout (auipc-relative):
+#   +0x10000   output buffer (512 KB)
+#   +0x90000   symtab (40-byte entries: 32B name + 4B value + 4B kind)
+#   +0xD0000   fixup table (40-byte entries: 32B name + 4B offset + 4B type)
+#   +0x110000  token buffer (64 KB scratch)
+#   +0x120000  stack top
+#
+# Token buffer layout (at s10):
+#   0..31     token text (zero-padded, max 31 chars)
+#   32        sticky EOT flag
+#   33..63    reserved
+#   64..103   local label counters (10 words, digits 0-9)
+#   104..107  frame_depth (for prologue/epilogue)
+#   108..407  frame_stack (5 frames × 60 bytes each)
+#   472       eol_flag
+#   476       pushback_flag
+#   480       pending_nl
+#   504       line_count
+#
+# Fixup slot types:
+#   1 = J-type (PC-relative 20-bit signed)
+#   7 = U_hi20_pcrel (auipc in lla/call/tail)
+#   8 = I_lo12_pcrel_prev (addi/jalr after auipc)
+#
+# Calling convention:
+#   args a0..a7, return a0 (a1 for two-value)
+#   s-regs are global invariants
+#   nested calls save/restore ra on stack
+
+# .section .text
+# .globl _start
+
+# ════════════════════════════════�
+#  Mnemonic table classes
+# ════════════════════════════════�
+# Each entry: 8-byte padded name + class[1] + f3[1] + f7[1] + pad[1] = 12 bytes
+# Classes:
+#   1=R, 2=I_arith, 3=I_shift, 4=I_load, 5=S, 6=B,
+#   7=U_lui, 8=U_auipc, 9=J_jal, 10=I_jalr,
+#   11=ps_li, 12=ps_mv, 13=ps_j, 14=ps_ret, 15=ps_beqz, 16=ps_bnez,
+#   17=ps_equ,
+#   19=ps_byte, 21=ps_word, 22=ps_ascii, 24=ps_zero,
+#   28=ps_lla, 29=ps_call, 30=ps_tail,
+#   31=ps_nop, 32=ps_neg, 33=ps_not,
+#   34=ps_seqz, 35=ps_snez, 36=ps_sltz, 37=ps_sgtz,
+#   38=ps_bgt, 39=ps_ble, 40=ps_bgtu, 41=ps_bleu,
+#   42=ps_prologue, 43=ps_epilogue, 44=ps_return,
+#   46=ps_bltz, 47=ps_bgez, 48=ps_wfi
+
+# ════════════════════════════════�
+#  Entry point — jump over embedded data tables
+# ════════════════════════════════�
+# _start:
+EF 02 00 34	# jal	t0,after_mnem_tab ; t0 = &mnem_table (PC after jal)
+
+# R-type (class 1)
+# mnem_table:
+61 64 64 00	# .word	0x00646461
+00 00 00 00	# .word	0x00000000
+01 00 00 00	# .word	0x00000001
+73 75 62 00	# .word	0x00627573
+00 00 00 00	# .word	0x00000000
+01 00 20 00	# .word	0x00200001
+73 6C 6C 00	# .word	0x006c6c73
+00 00 00 00	# .word	0x00000000
+01 01 00 00	# .word	0x00000101
+73 6C 74 00	# .word	0x00746c73
+00 00 00 00	# .word	0x00000000
+01 02 00 00	# .word	0x00000201
+73 6C 74 75	# .word	0x75746c73
+00 00 00 00	# .word	0x00000000
+01 03 00 00	# .word	0x00000301
+78 6F 72 00	# .word	0x00726f78
+00 00 00 00	# .word	0x00000000
+01 04 00 00	# .word	0x00000401
+73 72 6C 00	# .word	0x006c7273
+00 00 00 00	# .word	0x00000000
+01 05 00 00	# .word	0x00000501
+73 72 61 00	# .word	0x00617273
+00 00 00 00	# .word	0x00000000
+01 05 20 00	# .word	0x00200501
+6F 72 00 00	# .word	0x0000726f
+00 00 00 00	# .word	0x00000000
+01 06 00 00	# .word	0x00000601
+61 6E 64 00	# .word	0x00646e61
+00 00 00 00	# .word	0x00000000
+01 07 00 00	# .word	0x00000701
+
+# I-type arithmetic (class 2)
+61 64 64 69	# .word	0x69646461
+00 00 00 00	# .word	0x00000000
+02 00 00 00	# .word	0x00000002
+73 6C 74 69	# .word	0x69746c73
+00 00 00 00	# .word	0x00000000
+02 02 00 00	# .word	0x00000202
+73 6C 74 69	# .word	0x69746c73
+75 00 00 00	# .word	0x00000075
+02 03 00 00	# .word	0x00000302
+78 6F 72 69	# .word	0x69726f78
+00 00 00 00	# .word	0x00000000
+02 04 00 00	# .word	0x00000402
+6F 72 69 00	# .word	0x0069726f
+00 00 00 00	# .word	0x00000000
+02 06 00 00	# .word	0x00000602
+61 6E 64 69	# .word	0x69646e61
+00 00 00 00	# .word	0x00000000
+02 07 00 00	# .word	0x00000702
+
+# I-type shift (class 3)
+73 6C 6C 69	# .word	0x696c6c73
+00 00 00 00	# .word	0x00000000
+03 01 00 00	# .word	0x00000103
+73 72 6C 69	# .word	0x696c7273
+00 00 00 00	# .word	0x00000000
+03 05 00 00	# .word	0x00000503
+73 72 61 69	# .word	0x69617273
+00 00 00 00	# .word	0x00000000
+03 05 20 00	# .word	0x00200503
+
+# Loads (class 4)
+6C 62 00 00	# .word	0x0000626c
+00 00 00 00	# .word	0x00000000
+04 00 00 00	# .word	0x00000004
+6C 68 00 00	# .word	0x0000686c
+00 00 00 00	# .word	0x00000000
+04 01 00 00	# .word	0x00000104
+6C 77 00 00	# .word	0x0000776c
+00 00 00 00	# .word	0x00000000
+04 02 00 00	# .word	0x00000204
+6C 62 75 00	# .word	0x0075626c
+00 00 00 00	# .word	0x00000000
+04 04 00 00	# .word	0x00000404
+6C 68 75 00	# .word	0x0075686c
+00 00 00 00	# .word	0x00000000
+04 05 00 00	# .word	0x00000504
+
+# Stores (class 5)
+73 62 00 00	# .word	0x00006273
+00 00 00 00	# .word	0x00000000
+05 00 00 00	# .word	0x00000005
+73 68 00 00	# .word	0x00006873
+00 00 00 00	# .word	0x00000000
+05 01 00 00	# .word	0x00000105
+73 77 00 00	# .word	0x00007773
+00 00 00 00	# .word	0x00000000
+05 02 00 00	# .word	0x00000205
+
+# Branches (class 6)
+62 65 71 00	# .word	0x00716562
+00 00 00 00	# .word	0x00000000
+06 00 00 00	# .word	0x00000006
+62 6E 65 00	# .word	0x00656e62
+00 00 00 00	# .word	0x00000000
+06 01 00 00	# .word	0x00000106
+62 6C 74 00	# .word	0x00746c62
+00 00 00 00	# .word	0x00000000
+06 04 00 00	# .word	0x00000406
+62 67 65 00	# .word	0x00656762
+00 00 00 00	# .word	0x00000000
+06 05 00 00	# .word	0x00000506
+62 6C 74 75	# .word	0x75746c62
+00 00 00 00	# .word	0x00000000
+06 06 00 00	# .word	0x00000606
+62 67 65 75	# .word	0x75656762
+00 00 00 00	# .word	0x00000000
+06 07 00 00	# .word	0x00000706
+
+# U-type (classes 7-8)
+6C 75 69 00	# .word	0x0069756c
+00 00 00 00	# .word	0x00000000
+07 00 00 00	# .word	0x00000007
+61 75 69 70	# .word	0x70697561
+63 00 00 00	# .word	0x00000063
+08 00 00 00	# .word	0x00000008
+
+# J-type (class 9)
+6A 61 6C 00	# .word	0x006c616a
+00 00 00 00	# .word	0x00000000
+09 00 00 00	# .word	0x00000009
+
+# JALR (class 10)
+6A 61 6C 72	# .word	0x726c616a
+00 00 00 00	# .word	0x00000000
+0A 00 00 00	# .word	0x0000000a
+
+# Pseudos
+6C 69 00 00	# .word	0x0000696c
+00 00 00 00	# .word	0x00000000
+0B 00 00 00	# .word	0x0000000b
+6D 76 00 00	# .word	0x0000766d
+00 00 00 00	# .word	0x00000000
+0C 00 00 00	# .word	0x0000000c
+6A 00 00 00	# .word	0x0000006a
+00 00 00 00	# .word	0x00000000
+0D 00 00 00	# .word	0x0000000d
+72 65 74 00	# .word	0x00746572
+00 00 00 00	# .word	0x00000000
+0E 00 00 00	# .word	0x0000000e
+62 65 71 7A	# .word	0x7a716562
+00 00 00 00	# .word	0x00000000
+0F 00 00 00	# .word	0x0000000f
+62 6E 65 7A	# .word	0x7a656e62
+00 00 00 00	# .word	0x00000000
+10 00 00 00	# .word	0x00000010
+
+# Directives
+2E 65 71 75	# .word	0x7571652e
+00 00 00 00	# .word	0x00000000
+11 00 00 00	# .word	0x00000011
+2E 62 79 74	# .word	0x7479622e
+65 00 00 00	# .word	0x00000065
+13 00 00 00	# .word	0x00000013
+2E 77 6F 72	# .word	0x726f772e
+64 00 00 00	# .word	0x00000064
+15 00 00 00	# .word	0x00000015
+2E 61 73 63	# .word	0x6373612e
+69 69 00 00	# .word	0x00006969
+16 00 00 00	# .word	0x00000016
+2E 7A 65 72	# .word	0x72657a2e
+6F 00 00 00	# .word	0x0000006f
+18 00 00 00	# .word	0x00000018
+
+# PC-relative pseudos
+6C 6C 61 00	# .word	0x00616c6c
+00 00 00 00	# .word	0x00000000
+1C 00 00 00	# .word	0x0000001c
+63 61 6C 6C	# .word	0x6c6c6163
+00 00 00 00	# .word	0x00000000
+1D 00 00 00	# .word	0x0000001d
+74 61 69 6C	# .word	0x6c696174
+00 00 00 00	# .word	0x00000000
+1E 00 00 00	# .word	0x0000001e
+
+# Simple pseudos
+6E 6F 70 00	# .word	0x00706f6e
+00 00 00 00	# .word	0x00000000
+1F 00 00 00	# .word	0x0000001f
+6E 65 67 00	# .word	0x0067656e
+00 00 00 00	# .word	0x00000000
+20 00 00 00	# .word	0x00000020
+6E 6F 74 00	# .word	0x00746f6e
+00 00 00 00	# .word	0x00000000
+21 00 00 00	# .word	0x00000021
+73 65 71 7A	# .word	0x7a716573
+00 00 00 00	# .word	0x00000000
+22 00 00 00	# .word	0x00000022
+73 6E 65 7A	# .word	0x7a656e73
+00 00 00 00	# .word	0x00000000
+23 00 00 00	# .word	0x00000023
+73 6C 74 7A	# .word	0x7a746c73
+00 00 00 00	# .word	0x00000000
+24 00 00 00	# .word	0x00000024
+73 67 74 7A	# .word	0x7a746773
+00 00 00 00	# .word	0x00000000
+25 00 00 00	# .word	0x00000025
+62 67 74 00	# .word	0x00746762
+00 00 00 00	# .word	0x00000000
+26 00 00 00	# .word	0x00000026
+62 6C 65 00	# .word	0x00656c62
+00 00 00 00	# .word	0x00000000
+27 00 00 00	# .word	0x00000027
+62 67 74 75	# .word	0x75746762
+00 00 00 00	# .word	0x00000000
+28 00 00 00	# .word	0x00000028
+62 6C 65 75	# .word	0x75656c62
+00 00 00 00	# .word	0x00000000
+29 00 00 00	# .word	0x00000029
+62 6C 74 7A	# .word	0x7a746c62
+00 00 00 00	# .word	0x00000000
+2E 00 00 00	# .word	0x0000002e
+62 67 65 7A	# .word	0x7a656762
+00 00 00 00	# .word	0x00000000
+2F 00 00 00	# .word	0x0000002f
+
+# Frame pseudos
+70 72 6F 6C	# .word	0x6c6f7270
+6F 67 75 65	# .word	0x6575676f
+2A 00 00 00	# .word	0x0000002a
+65 70 69 6C	# .word	0x6c697065
+6F 67 75 65	# .word	0x6575676f
+2B 00 00 00	# .word	0x0000002b
+72 65 74 75	# .word	0x75746572
+72 6E 00 00	# .word	0x00006e72
+2C 00 00 00	# .word	0x0000002c
+
+# WFI
+77 66 69 00	# .word	0x00696677
+00 00 00 00	# .word	0x00000000
+30 00 00 00	# .word	0x00000030
+
+# Sentinel (null name)
+00 00 00 00
+00 00 00 00
+00 00 00 00
+
+# after_mnem_tab:
+6F 03 40 11	# jal	t1,after_reg_tab ; t1 = &reg_table
+
+# 8 bytes per entry: 4-byte padded name + 4-byte register number
+# reg_table:
+7A 65 72 6F	# .word	0x6f72657a
+00 00 00 00	# .word	0x00000000
+72 61 00 00	# .word	0x00006172
+01 00 00 00	# .word	0x00000001
+73 70 00 00	# .word	0x00007073
+02 00 00 00	# .word	0x00000002
+67 70 00 00	# .word	0x00007067
+03 00 00 00	# .word	0x00000003
+74 70 00 00	# .word	0x00007074
+04 00 00 00	# .word	0x00000004
+74 30 00 00	# .word	0x00003074
+05 00 00 00	# .word	0x00000005
+74 31 00 00	# .word	0x00003174
+06 00 00 00	# .word	0x00000006
+74 32 00 00	# .word	0x00003274
+07 00 00 00	# .word	0x00000007
+73 30 00 00	# .word	0x00003073
+08 00 00 00	# .word	0x00000008
+66 70 00 00	# .word	0x00007066
+08 00 00 00	# .word	0x00000008
+73 31 00 00	# .word	0x00003173
+09 00 00 00	# .word	0x00000009
+61 30 00 00	# .word	0x00003061
+0A 00 00 00	# .word	0x0000000a
+61 31 00 00	# .word	0x00003161
+0B 00 00 00	# .word	0x0000000b
+61 32 00 00	# .word	0x00003261
+0C 00 00 00	# .word	0x0000000c
+61 33 00 00	# .word	0x00003361
+0D 00 00 00	# .word	0x0000000d
+61 34 00 00	# .word	0x00003461
+0E 00 00 00	# .word	0x0000000e
+61 35 00 00	# .word	0x00003561
+0F 00 00 00	# .word	0x0000000f
+61 36 00 00	# .word	0x00003661
+10 00 00 00	# .word	0x00000010
+61 37 00 00	# .word	0x00003761
+11 00 00 00	# .word	0x00000011
+73 32 00 00	# .word	0x00003273
+12 00 00 00	# .word	0x00000012
+73 33 00 00	# .word	0x00003373
+13 00 00 00	# .word	0x00000013
+73 34 00 00	# .word	0x00003473
+14 00 00 00	# .word	0x00000014
+73 35 00 00	# .word	0x00003573
+15 00 00 00	# .word	0x00000015
+73 36 00 00	# .word	0x00003673
+16 00 00 00	# .word	0x00000016
+73 37 00 00	# .word	0x00003773
+17 00 00 00	# .word	0x00000017
+73 38 00 00	# .word	0x00003873
+18 00 00 00	# .word	0x00000018
+73 39 00 00	# .word	0x00003973
+19 00 00 00	# .word	0x00000019
+73 31 30 00	# .word	0x00303173
+1A 00 00 00	# .word	0x0000001a
+73 31 31 00	# .word	0x00313173
+1B 00 00 00	# .word	0x0000001b
+74 33 00 00	# .word	0x00003374
+1C 00 00 00	# .word	0x0000001c
+74 34 00 00	# .word	0x00003474
+1D 00 00 00	# .word	0x0000001d
+74 35 00 00	# .word	0x00003574
+1E 00 00 00	# .word	0x0000001e
+74 36 00 00	# .word	0x00003674
+1F 00 00 00	# .word	0x0000001f
+
+# Sentinel
+00 00 00 00
+00 00 00 00
+
+# ════════════════════════════════�
+# Initialization
+# ════════════════════════════════�
+# after_reg_tab:
+93 8C 02 00	# addi	s9,t0,0 ; mnem_table base
+93 0D 03 00	# addi	s11,t1,0 ; reg_table base
+13 0B A0 00	# addi	s6,zero,10 ; constant
+B7 0A 00 10	# lui	s5,0x10000 ; UART base
+17 05 00 00	# auipc	a0,0x0 ; PC base for memory regions
+B7 03 01 00	# lui	t2,0x10
+B3 04 75 00	# add	s1,a0,t2 ; output buffer = PC + 0x10000
+13 89 04 00	# addi	s2,s1,0
+B7 03 09 00	# lui	t2,0x90
+B3 09 75 00	# add	s3,a0,t2 ; symtab = PC + 0x90000
+13 8A 09 00	# addi	s4,s3,0
+B7 03 0D 00	# lui	t2,0xd0
+B3 0B 75 00	# add	s7,a0,t2 ; fixup table = PC + 0xD0000
+13 8C 0B 00	# addi	s8,s7,0
+B7 03 11 00	# lui	t2,0x110
+33 0D 75 00	# add	s10,a0,t2 ; token buffer = PC + 0x110000
+B7 03 12 00	# lui	t2,0x120
+33 01 75 00	# add	sp,a0,t2 ; stack = PC + 0x120000
+
+# Zero: EOT flag, local-label counters, frame depth, flags
+23 00 0D 02	# sb	zero,32(s10) ; sticky EOT
+93 03 0D 04	# addi	t2,s10,64
+13 0E CD 1F	# addi	t3,s10,508
+
+# init_zero:
+23 A0 03 00	# sw	zero,0(t2)
+93 83 43 00	# addi	t2,t2,4
+E3 9C C3 FF	# bne	t2,t3,init_zero
+23 2C 0D 1E	# sw	zero,504(s10) ; line_count = 0
+6F 00 40 00	# jal	zero,main_loop
+
+# main_loop:
+EF 00 C0 1D	# jal	ra,read_token
+63 00 04 06	# beq	s0,zero,ml_post ; empty token
+
+# Check for ':' suffix → label definition
+B3 02 8D 00	# add	t0,s10,s0
+03 C3 F2 FF	# lbu	t1,-1(t0)
+93 03 A0 03	# addi	t2,zero,58
+63 04 73 00	# beq	t1,t2,ml_label
+6F 00 40 03	# jal	zero,ml_mnem
+
+# Local label? (len==2, first char is digit)
+# ml_label:
+93 03 20 00	# addi	t2,zero,2
+63 12 74 02	# bne	s0,t2,ml_named
+83 42 0D 00	# lbu	t0,0(s10)
+13 03 00 03	# addi	t1,zero,48
+63 CC 62 00	# blt	t0,t1,ml_named
+13 03 A0 03	# addi	t1,zero,58
+63 D8 62 00	# bge	t0,t1,ml_named
+13 85 02 FD	# addi	a0,t0,-48
+EF 00 10 67	# jal	ra,def_local_label
+6F 00 40 02	# jal	zero,ml_post
+
+# ml_named:
+EF 00 90 47	# jal	ra,define_label
+6F 00 C0 01	# jal	zero,ml_post
+
+# ml_mnem:
+EF 00 40 41	# jal	ra,find_mnem
+93 02 F0 FF	# addi	t0,zero,-1
+63 16 55 00	# bne	a0,t0,ml_dispatch
+
+# Unknown mnemonic → error
+13 05 10 00	# addi	a0,zero,1
+6F 00 00 03	# jal	zero,halt_err
+
+# ml_dispatch:
+EF 10 C0 0F	# jal	ra,dispatch
+
+# ml_post:
+83 42 0D 02	# lbu	t0,32(s10) ; sticky EOT flag
+63 94 02 00	# bne	t0,zero,finish_all
+6F F0 5F F9	# jal	zero,main_loop
+
+# finish_all:
+EF 10 90 64	# jal	ra,fixup_pass
+EF 10 D0 79	# jal	ra,dump_output
+
+# poweroff:
+B7 0A 10 00	# lui	s5,0x100
+B7 52 00 00	# lui	t0,0x5
+93 82 52 55	# addi	t0,t0,1365
+23 A0 5A 00	# sw	t0,0(s5)
+
+# poweroff_hang:
+6F 00 00 00	# jal	zero,poweroff_hang
+
+# halt_err:
+93 05 05 00	# addi	a1,a0,0
+93 02 50 04	# addi	t0,zero,69
+EF 00 40 13	# jal	ra,wrch
+
+# Tens digit
+93 03 A0 00	# addi	t2,zero,10
+13 86 05 00	# addi	a2,a1,0
+93 06 00 00	# addi	a3,zero,0
+
+# he_div:
+63 48 76 00	# blt	a2,t2,he_tens
+33 06 76 40	# sub	a2,a2,t2
+93 86 16 00	# addi	a3,a3,1
+6F F0 5F FF	# jal	zero,he_div
+
+# he_tens:
+93 82 06 03	# addi	t0,a3,48
+EF 00 00 11	# jal	ra,wrch
+93 02 06 03	# addi	t0,a2,48
+EF 00 80 10	# jal	ra,wrch
+93 02 00 04	# addi	t0,zero,64
+EF 00 00 10	# jal	ra,wrch
+
+# Line number (decimal, up to 6 digits)
+83 25 8D 1F	# lw	a1,504(s10)
+13 01 81 FE	# addi	sp,sp,-24
+B7 83 01 00	# lui	t2,0x18
+93 83 03 6A	# addi	t2,t2,1696
+23 20 71 00	# sw	t2,0(sp)
+B7 23 00 00	# lui	t2,0x2
+93 83 03 71	# addi	t2,t2,1808
+23 22 71 00	# sw	t2,4(sp)
+93 03 80 3E	# addi	t2,zero,1000
+23 24 71 00	# sw	t2,8(sp)
+93 03 40 06	# addi	t2,zero,100
+23 26 71 00	# sw	t2,12(sp)
+93 03 A0 00	# addi	t2,zero,10
+23 28 71 00	# sw	t2,16(sp)
+93 03 10 00	# addi	t2,zero,1
+23 2A 71 00	# sw	t2,20(sp)
+13 0E 01 00	# addi	t3,sp,0
+93 0E 81 01	# addi	t4,sp,24
+13 06 10 00	# addi	a2,zero,1 ; leading-zero suppression
+
+# he_dec:
+63 02 DE 05	# beq	t3,t4,he_dec_done
+83 23 0E 00	# lw	t2,0(t3)
+93 06 00 00	# addi	a3,zero,0
+
+# he_dec_sub:
+63 C8 75 00	# blt	a1,t2,he_dec_emit
+B3 85 75 40	# sub	a1,a1,t2
+93 86 16 00	# addi	a3,a3,1
+6F F0 5F FF	# jal	zero,he_dec_sub
+
+# he_dec_emit:
+13 0F 4E 00	# addi	t5,t3,4
+63 0A DF 01	# beq	t5,t4,he_dec_pr ; last digit: always print
+63 86 06 00	# beq	a3,zero,he_dec_skip
+13 06 00 00	# addi	a2,zero,0 ; saw nonzero: stop suppressing
+6F 00 80 00	# jal	zero,he_dec_pr
+
+# he_dec_skip:
+63 16 06 00	# bne	a2,zero,he_dec_nx ; still suppressing
+
+# he_dec_pr:
+93 82 06 03	# addi	t0,a3,48
+EF 00 80 07	# jal	ra,wrch
+
+# he_dec_nx:
+13 0E 4E 00	# addi	t3,t3,4
+6F F0 1F FC	# jal	zero,he_dec
+
+# he_dec_done:
+13 01 81 01	# addi	sp,sp,24
+93 02 A0 00	# addi	t0,zero,10
+EF 00 40 06	# jal	ra,wrch
+B7 0A 10 00	# lui	s5,0x100
+B7 52 00 00	# lui	t0,0x5
+93 82 52 55	# addi	t0,t0,1365
+23 A0 5A 00	# sw	t0,0(s5)
+
+# halt_hang:
+6F 00 00 00	# jal	zero,halt_hang
+
+# Read one char into t1. Check expansion buffer first.
+# rdch:
+03 2F 8D 1C	# lw	t5,456(s10) ; input_flag
+63 02 0F 02	# beq	t5,zero,rdch_uart
+03 2F CD 1C	# lw	t5,460(s10) ; input_ptr
+83 2F 0D 1D	# lw	t6,464(s10) ; input_end
+63 0A FF 01	# beq	t5,t6,rdch_exh
+03 43 0F 00	# lbu	t1,0(t5)
+13 0F 1F 00	# addi	t5,t5,1
+23 26 ED 1D	# sw	t5,460(s10)
+67 80 00 00	# jalr	zero,0(ra)
+
+# rdch_exh:
+23 24 0D 1C	# sw	zero,456(s10) ; clear expansion flag
+
+# rdch_uart:
+03 4F 0D 02	# lbu	t5,32(s10) ; sticky EOT
+63 06 0F 00	# beq	t5,zero,rdch_poll
+13 05 20 00	# addi	a0,zero,2 ; E02: read after EOT
+6F F0 DF ED	# jal	zero,halt_err
+
+# rdch_poll:
+03 CF 5A 00	# lbu	t5,5(s5)
+13 7F 1F 00	# andi	t5,t5,1
+E3 0C 0F FE	# beq	t5,zero,rdch_poll
+03 C3 0A 00	# lbu	t1,0(s5)
+67 80 00 00	# jalr	zero,0(ra)
+
+# Write t0 to UART
+# wrch:
+03 CF 5A 00	# lbu	t5,5(s5)
+13 7F 0F 02	# andi	t5,t5,32
+E3 0C 0F FE	# beq	t5,zero,wrch
+23 80 5A 00	# sb	t0,0(s5)
+67 80 00 00	# jalr	zero,0(ra)
+
+# Pushback: if active, clear and return with existing token
+# read_token:
+83 22 CD 1D	# lw	t0,476(s10)
+63 86 02 00	# beq	t0,zero,rt_entry
+23 2E 0D 1C	# sw	zero,476(s10)
+67 80 00 00	# jalr	zero,0(ra)
+
+# Transfer pending_nl → eol_flag
+# rt_entry:
+83 22 0D 1E	# lw	t0,480(s10)
+23 2C 5D 1C	# sw	t0,472(s10)
+23 20 0D 1E	# sw	zero,480(s10)
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+13 04 00 00	# addi	s0,zero,0
+
+# Zero token buffer (32 bytes)
+93 02 0D 00	# addi	t0,s10,0
+93 03 0D 02	# addi	t2,s10,32
+
+# rt_zero:
+23 80 02 00	# sb	zero,0(t0)
+93 82 12 00	# addi	t0,t0,1
+E3 9C 72 FE	# bne	t0,t2,rt_zero
+
+# rt_skip:
+EF F0 5F F6	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4 ; EOT
+63 06 53 22	# beq	t1,t0,rt_eot
+93 02 30 02	# addi	t0,zero,35
+63 02 53 04	# beq	t1,t0,rt_comment
+63 1E 63 01	# bne	t1,s6,rt_not_nl ; s6 = 10 = '\n'
+
+# Newline
+93 02 10 00	# addi	t0,zero,1
+23 2C 5D 1C	# sw	t0,472(s10) ; eol_flag
+83 22 8D 1F	# lw	t0,504(s10)
+93 82 12 00	# addi	t0,t0,1
+23 2C 5D 1E	# sw	t0,504(s10) ; line_count++
+6F F0 5F FD	# jal	zero,rt_skip
+
+# rt_not_nl:
+93 02 C0 02	# addi	t0,zero,44
+E3 06 53 FC	# beq	t1,t0,rt_skip
+93 02 10 02	# addi	t0,zero,33
+E3 42 53 FC	# blt	t1,t0,rt_skip ; whitespace/control
+93 02 20 02	# addi	t0,zero,34
+63 00 53 0C	# beq	t1,t0,rt_str ; quoted string
+93 02 70 02	# addi	t0,zero,39
+63 0E 53 14	# beq	t1,t0,rt_chr ; char literal
+6F 00 C0 02	# jal	zero,rt_collect
+
+# rt_comment:
+EF F0 1F F1	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+63 0C 53 1C	# beq	t1,t0,rt_eot
+E3 1A 63 FF	# bne	t1,s6,rt_comment
+
+# Newline ends comment
+93 02 10 00	# addi	t0,zero,1
+23 2C 5D 1C	# sw	t0,472(s10)
+83 22 8D 1F	# lw	t0,504(s10)
+93 82 12 00	# addi	t0,t0,1
+23 2C 5D 1E	# sw	t0,504(s10)
+6F F0 9F F8	# jal	zero,rt_skip
+
+# rt_collect:
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+63 46 54 00	# blt	s0,t0,rt_coll_next
+13 05 30 00	# addi	a0,zero,3 ; E03: token too long
+6F F0 1F DE	# jal	zero,halt_err
+
+# rt_coll_next:
+EF F0 DF EC	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+63 0A 53 18	# beq	t1,t0,rt_eot
+93 02 30 02	# addi	t0,zero,35
+63 0A 53 02	# beq	t1,t0,rt_coll_comment
+93 02 C0 02	# addi	t0,zero,44
+63 06 53 18	# beq	t1,t0,rt_done
+63 1E 63 01	# bne	t1,s6,rt_coll_not_nl
+
+# Newline terminates token
+93 02 10 00	# addi	t0,zero,1
+23 20 5D 1E	# sw	t0,480(s10) ; pending_nl
+83 22 8D 1F	# lw	t0,504(s10)
+93 82 12 00	# addi	t0,t0,1
+23 2C 5D 1E	# sw	t0,504(s10)
+6F 00 00 17	# jal	zero,rt_done
+
+# rt_coll_not_nl:
+93 02 10 02	# addi	t0,zero,33
+63 44 53 16	# blt	t1,t0,rt_done ; whitespace ends token
+6F F0 5F FA	# jal	zero,rt_collect
+
+# Comment after token — skip to newline
+# rt_coll_comment:
+EF F0 9F E8	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+63 08 53 14	# beq	t1,t0,rt_eot
+E3 1A 63 FF	# bne	t1,s6,rt_coll_comment
+93 02 10 00	# addi	t0,zero,1
+23 20 5D 1E	# sw	t0,480(s10)
+83 22 8D 1F	# lw	t0,504(s10)
+93 82 12 00	# addi	t0,t0,1
+23 2C 5D 1E	# sw	t0,504(s10)
+6F 00 C0 13	# jal	zero,rt_done
+
+# rt_str:
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0) ; store opening '"'
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+63 46 54 00	# blt	s0,t0,rt_str_lp
+13 05 30 00	# addi	a0,zero,3
+6F F0 9F D5	# jal	zero,halt_err
+
+# rt_str_lp:
+EF F0 5F E4	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+63 0C 53 06	# beq	t1,t0,rt_str_eot
+93 02 C0 05	# addi	t0,zero,92
+63 06 53 02	# beq	t1,t0,rt_str_bs
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+63 46 54 00	# blt	s0,t0,rt_str_chk
+13 05 30 00	# addi	a0,zero,3
+6F F0 9F D2	# jal	zero,halt_err
+
+# rt_str_chk:
+93 02 20 02	# addi	t0,zero,34
+63 04 53 0E	# beq	t1,t0,rt_done ; closing quote
+6F F0 9F FC	# jal	zero,rt_str_lp
+
+# Store backslash + next char
+# rt_str_bs:
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+63 46 54 00	# blt	s0,t0,rt_str_bs2
+13 05 30 00	# addi	a0,zero,3
+6F F0 1F D0	# jal	zero,halt_err
+
+# rt_str_bs2:
+EF F0 DF DE	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+63 00 53 02	# beq	t1,t0,rt_str_eot
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+E3 46 54 F8	# blt	s0,t0,rt_str_lp
+13 05 30 00	# addi	a0,zero,3
+6F F0 9F CD	# jal	zero,halt_err
+
+# rt_str_eot:
+13 05 20 00	# addi	a0,zero,2 ; E02: unexpected EOT in string
+6F F0 1F CD	# jal	zero,halt_err
+
+# rt_chr:
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0) ; store opening '\''
+13 04 14 00	# addi	s0,s0,1
+
+# rt_chr_lp:
+EF F0 1F DB	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+E3 02 53 FE	# beq	t1,t0,rt_str_eot
+93 02 C0 05	# addi	t0,zero,92
+63 06 53 02	# beq	t1,t0,rt_chr_bs
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+63 46 54 00	# blt	s0,t0,rt_chr_chk
+13 05 30 00	# addi	a0,zero,3
+6F F0 5F C9	# jal	zero,halt_err
+
+# rt_chr_chk:
+93 02 70 02	# addi	t0,zero,39
+63 0A 53 04	# beq	t1,t0,rt_done
+6F F0 9F FC	# jal	zero,rt_chr_lp
+
+# rt_chr_bs:
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+63 46 54 00	# blt	s0,t0,rt_chr_bs2
+13 05 30 00	# addi	a0,zero,3
+6F F0 DF C6	# jal	zero,halt_err
+
+# rt_chr_bs2:
+EF F0 9F D5	# jal	ra,rdch
+93 02 40 00	# addi	t0,zero,4
+E3 06 53 F8	# beq	t1,t0,rt_str_eot
+B3 02 8D 00	# add	t0,s10,s0
+23 80 62 00	# sb	t1,0(t0)
+13 04 14 00	# addi	s0,s0,1
+93 02 00 02	# addi	t0,zero,32
+E3 46 54 F8	# blt	s0,t0,rt_chr_lp
+13 05 30 00	# addi	a0,zero,3
+6F F0 5F C4	# jal	zero,halt_err
+
+# rt_eot:
+93 02 10 00	# addi	t0,zero,1
+23 00 5D 02	# sb	t0,32(s10) ; set sticky EOT
+
+# rt_done:
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# find_mnem:
+93 82 0C 00	# addi	t0,s9,0
+
+# fm_next:
+03 C3 02 00	# lbu	t1,0(t0)
+63 02 03 04	# beq	t1,zero,fm_notfound
+93 03 0D 00	# addi	t2,s10,0
+13 8E 02 00	# addi	t3,t0,0
+93 0E 80 00	# addi	t4,zero,8
+
+# fm_cmp:
+03 CF 03 00	# lbu	t5,0(t2)
+83 4F 0E 00	# lbu	t6,0(t3)
+63 12 FF 03	# bne	t5,t6,fm_skip
+93 83 13 00	# addi	t2,t2,1
+13 0E 1E 00	# addi	t3,t3,1
+93 8E FE FF	# addi	t4,t4,-1
+E3 94 0E FE	# bne	t4,zero,fm_cmp
+03 C5 82 00	# lbu	a0,8(t0) ; class
+83 C5 92 00	# lbu	a1,9(t0) ; f3
+03 C6 A2 00	# lbu	a2,10(t0) ; f7
+67 80 00 00	# jalr	zero,0(ra)
+
+# fm_skip:
+93 82 C2 00	# addi	t0,t0,12
+6F F0 DF FB	# jal	zero,fm_next
+
+# fm_notfound:
+13 05 F0 FF	# addi	a0,zero,-1
+67 80 00 00	# jalr	zero,0(ra)
+
+# parse_reg:
+93 02 05 00	# addi	t0,a0,0 ; save ptr (a0 gets clobbered in cmp)
+63 86 05 0E	# beq	a1,zero,pr_bad
+83 C3 02 00	# lbu	t2,0(t0)
+13 0E 80 07	# addi	t3,zero,120
+63 9A C3 07	# bne	t2,t3,pr_abi
+
+# xN or xNN
+13 0E 20 00	# addi	t3,zero,2
+63 88 C5 01	# beq	a1,t3,pr_x1
+13 0E 30 00	# addi	t3,zero,3
+63 82 C5 03	# beq	a1,t3,pr_x2
+6F 00 C0 0C	# jal	zero,pr_bad
+
+# pr_x1:
+83 C3 12 00	# lbu	t2,1(t0)
+93 83 03 FD	# addi	t2,t2,-48
+63 C0 03 0C	# blt	t2,zero,pr_bad
+13 0E A0 00	# addi	t3,zero,10
+63 DC C3 0B	# bge	t2,t3,pr_bad
+13 85 03 00	# addi	a0,t2,0
+67 80 00 00	# jalr	zero,0(ra)
+
+# pr_x2:
+83 C3 12 00	# lbu	t2,1(t0)
+93 83 03 FD	# addi	t2,t2,-48
+63 C2 03 0A	# blt	t2,zero,pr_bad
+13 0E A0 00	# addi	t3,zero,10
+63 DE C3 09	# bge	t2,t3,pr_bad
+83 CE 22 00	# lbu	t4,2(t0)
+93 8E 0E FD	# addi	t4,t4,-48
+63 C8 0E 08	# blt	t4,zero,pr_bad
+63 D6 CE 09	# bge	t4,t3,pr_bad
+13 9F 33 00	# slli	t5,t2,0x3
+93 9F 13 00	# slli	t6,t2,0x1
+33 0F FF 01	# add	t5,t5,t6
+33 05 DF 01	# add	a0,t5,t4
+13 0E 00 02	# addi	t3,zero,32
+63 5A C5 07	# bge	a0,t3,pr_bad
+67 80 00 00	# jalr	zero,0(ra)
+
+# pr_abi:
+93 03 50 00	# addi	t2,zero,5
+63 D4 75 06	# bge	a1,t2,pr_bad ; ABI names are 2-4 chars
+93 83 0D 00	# addi	t2,s11,0
+
+# pr_a_next:
+03 CE 03 00	# lbu	t3,0(t2)
+63 0E 0E 04	# beq	t3,zero,pr_bad ; sentinel
+93 8E 02 00	# addi	t4,t0,0 ; token ptr (use saved t0)
+13 8F 03 00	# addi	t5,t2,0 ; entry name ptr
+93 8F 05 00	# addi	t6,a1,0 ; remaining len
+
+# pr_a_cmp:
+03 C5 0E 00	# lbu	a0,0(t4)
+03 46 0F 00	# lbu	a2,0(t5)
+63 1E C5 02	# bne	a0,a2,pr_a_skip
+93 8E 1E 00	# addi	t4,t4,1
+13 0F 1F 00	# addi	t5,t5,1
+93 8F FF FF	# addi	t6,t6,-1
+E3 94 0F FE	# bne	t6,zero,pr_a_cmp
+
+# Matched first a1 bytes. Ensure entry pad bytes are null.
+93 0F 40 00	# addi	t6,zero,4
+B3 8F BF 40	# sub	t6,t6,a1
+63 8C 0F 00	# beq	t6,zero,pr_a_found
+
+# pr_a_pad:
+03 45 0F 00	# lbu	a0,0(t5)
+63 1C 05 00	# bne	a0,zero,pr_a_skip
+13 0F 1F 00	# addi	t5,t5,1
+93 8F FF FF	# addi	t6,t6,-1
+E3 98 0F FE	# bne	t6,zero,pr_a_pad
+
+# pr_a_found:
+03 C5 43 00	# lbu	a0,4(t2) ; reg number at offset 4
+67 80 00 00	# jalr	zero,0(ra)
+
+# pr_a_skip:
+93 83 83 00	# addi	t2,t2,8
+6F F0 5F FA	# jal	zero,pr_a_next
+
+# pr_bad:
+13 05 F0 FF	# addi	a0,zero,-1
+67 80 00 00	# jalr	zero,0(ra)
+
+# parse_imm:
+93 02 05 00	# addi	t0,a0,0 ; ptr
+13 83 05 00	# addi	t1,a1,0 ; len
+93 03 10 00	# addi	t2,zero,1 ; sign (+1)
+63 0E 03 1A	# beq	t1,zero,pi_bad
+
+# Char literal?
+03 CE 02 00	# lbu	t3,0(t0)
+93 0E 70 02	# addi	t4,zero,39
+63 12 DE 0B	# bne	t3,t4,pi_not_char
+
+# 'x' (len=3) or '\x' (len=4)
+93 0E 30 00	# addi	t4,zero,3
+63 44 D3 1B	# blt	t1,t4,pi_bad
+B3 8E 62 00	# add	t4,t0,t1
+93 8E FE FF	# addi	t4,t4,-1
+03 CF 0E 00	# lbu	t5,0(t4)
+93 0E 70 02	# addi	t4,zero,39
+63 1A DF 19	# bne	t5,t4,pi_bad
+93 0E 30 00	# addi	t4,zero,3
+63 0C D3 07	# beq	t1,t4,pi_char_plain
+93 0E 40 00	# addi	t4,zero,4
+63 12 D3 19	# bne	t1,t4,pi_bad
+
+# Escaped: '\x'
+03 CE 12 00	# lbu	t3,1(t0)
+93 0E C0 05	# addi	t4,zero,92
+63 1C DE 17	# bne	t3,t4,pi_bad
+03 CE 22 00	# lbu	t3,2(t0)
+93 0E E0 06	# addi	t4,zero,110
+63 08 DE 03	# beq	t3,t4,pi_esc_n
+93 0E 40 07	# addi	t4,zero,116
+63 08 DE 03	# beq	t3,t4,pi_esc_t
+93 0E 20 07	# addi	t4,zero,114
+63 08 DE 03	# beq	t3,t4,pi_esc_r
+93 0E 00 03	# addi	t4,zero,48
+63 08 DE 03	# beq	t3,t4,pi_esc_0
+93 0E C0 05	# addi	t4,zero,92
+63 08 DE 03	# beq	t3,t4,pi_esc_lit
+93 0E 70 02	# addi	t4,zero,39
+63 04 DE 03	# beq	t3,t4,pi_esc_lit
+6F 00 00 14	# jal	zero,pi_bad
+
+# pi_esc_n:
+13 05 A0 00	# addi	a0,zero,10
+67 80 00 00	# jalr	zero,0(ra)
+
+# pi_esc_t:
+13 05 90 00	# addi	a0,zero,9
+67 80 00 00	# jalr	zero,0(ra)
+
+# pi_esc_r:
+13 05 D0 00	# addi	a0,zero,13
+67 80 00 00	# jalr	zero,0(ra)
+
+# pi_esc_0:
+13 05 00 00	# addi	a0,zero,0
+67 80 00 00	# jalr	zero,0(ra)
+
+# pi_esc_lit:
+13 05 0E 00	# addi	a0,t3,0
+67 80 00 00	# jalr	zero,0(ra)
+
+# pi_char_plain:
+03 C5 12 00	# lbu	a0,1(t0)
+67 80 00 00	# jalr	zero,0(ra)
+
+# Sign
+# pi_not_char:
+93 0E D0 02	# addi	t4,zero,45
+63 1A DE 01	# bne	t3,t4,pi_plus
+93 03 F0 FF	# addi	t2,zero,-1
+93 82 12 00	# addi	t0,t0,1
+13 03 F3 FF	# addi	t1,t1,-1
+6F 00 40 01	# jal	zero,pi_after_sign
+
+# pi_plus:
+93 0E B0 02	# addi	t4,zero,43
+63 16 DE 01	# bne	t3,t4,pi_after_sign
+93 82 12 00	# addi	t0,t0,1
+13 03 F3 FF	# addi	t1,t1,-1
+
+# pi_after_sign:
+63 02 03 0E	# beq	t1,zero,pi_bad
+
+# Check for 0x prefix
+93 0E 20 00	# addi	t4,zero,2
+63 48 D3 09	# blt	t1,t4,pi_decimal
+03 CE 02 00	# lbu	t3,0(t0)
+93 0E 00 03	# addi	t4,zero,48
+63 12 DE 09	# bne	t3,t4,pi_decimal
+03 CE 12 00	# lbu	t3,1(t0)
+93 0E 80 07	# addi	t4,zero,120
+63 08 DE 01	# beq	t3,t4,pi_hex
+93 0E 80 05	# addi	t4,zero,88
+63 04 DE 01	# beq	t3,t4,pi_hex
+6F 00 C0 06	# jal	zero,pi_decimal
+
+# pi_hex:
+93 82 22 00	# addi	t0,t0,2
+13 03 E3 FF	# addi	t1,t1,-2
+63 06 03 0A	# beq	t1,zero,pi_bad
+13 05 00 00	# addi	a0,zero,0
+
+# pi_hex_lp:
+63 0A 03 08	# beq	t1,zero,pi_done
+03 CE 02 00	# lbu	t3,0(t0)
+93 0E 0E FD	# addi	t4,t3,-48
+13 0F A0 00	# addi	t5,zero,10
+63 CA EE 03	# blt	t4,t5,pi_h_ok
+93 0E FE FB	# addi	t4,t3,-65
+93 8E AE 00	# addi	t4,t4,10
+63 C4 EE 09	# blt	t4,t5,pi_bad
+13 0F 00 01	# addi	t5,zero,16
+63 C0 EE 03	# blt	t4,t5,pi_h_ok
+93 0E FE F9	# addi	t4,t3,-97
+93 8E AE 00	# addi	t4,t4,10
+13 0F A0 00	# addi	t5,zero,10
+63 C8 EE 07	# blt	t4,t5,pi_bad
+13 0F 00 01	# addi	t5,zero,16
+63 C4 EE 01	# blt	t4,t5,pi_h_ok
+6F 00 40 06	# jal	zero,pi_bad
+
+# pi_h_ok:
+13 15 45 00	# slli	a0,a0,0x4
+33 65 D5 01	# or	a0,a0,t4
+93 82 12 00	# addi	t0,t0,1
+13 03 F3 FF	# addi	t1,t1,-1
+6F F0 DF FA	# jal	zero,pi_hex_lp
+
+# pi_decimal:
+13 05 00 00	# addi	a0,zero,0
+63 04 03 04	# beq	t1,zero,pi_bad
+
+# pi_dec_lp:
+63 0A 03 02	# beq	t1,zero,pi_done
+03 CE 02 00	# lbu	t3,0(t0)
+13 0E 0E FD	# addi	t3,t3,-48
+63 4C 0E 02	# blt	t3,zero,pi_bad
+93 0E A0 00	# addi	t4,zero,10
+63 58 DE 03	# bge	t3,t4,pi_bad
+93 1E 35 00	# slli	t4,a0,0x3
+13 1F 15 00	# slli	t5,a0,0x1
+B3 8E EE 01	# add	t4,t4,t5
+33 85 CE 01	# add	a0,t4,t3
+93 82 12 00	# addi	t0,t0,1
+13 03 F3 FF	# addi	t1,t1,-1
+6F F0 1F FD	# jal	zero,pi_dec_lp
+
+# pi_done:
+13 0E 10 00	# addi	t3,zero,1
+63 84 C3 01	# beq	t2,t3,pi_ret
+33 05 A0 40	# sub	a0,zero,a0
+
+# pi_ret:
+67 80 00 00	# jalr	zero,0(ra)
+
+# pi_bad:
+13 05 50 00	# addi	a0,zero,5 ; E05: bad immediate
+6F F0 5F 91	# jal	zero,halt_err
+
+# parse_mem:
+13 01 C1 FE	# addi	sp,sp,-20
+23 20 11 00	# sw	ra,0(sp)
+23 22 A1 00	# sw	a0,4(sp) ; ptr
+23 24 B1 00	# sw	a1,8(sp) ; len
+93 02 05 00	# addi	t0,a0,0
+13 83 05 00	# addi	t1,a1,0
+93 03 00 00	# addi	t2,zero,0
+13 0E 80 02	# addi	t3,zero,40
+
+# pm_scan:
+63 DE 63 06	# bge	t2,t1,pm_bad
+B3 8E 72 00	# add	t4,t0,t2
+03 CF 0E 00	# lbu	t5,0(t4)
+63 06 CF 01	# beq	t5,t3,pm_found
+93 83 13 00	# addi	t2,t2,1
+6F F0 DF FE	# jal	zero,pm_scan
+
+# pm_found:
+23 26 71 00	# sw	t2,12(sp) ; paren position
+
+# Parse immediate: ptr..ptr+t2
+13 85 02 00	# addi	a0,t0,0
+93 85 03 00	# addi	a1,t2,0
+EF F0 DF DE	# jal	ra,parse_imm
+23 28 A1 00	# sw	a0,16(sp) ; imm value
+
+# Parse register: ptr+t2+1 .. ptr+len-1 (excluding closing ')')
+83 22 41 00	# lw	t0,4(sp)
+03 23 81 00	# lw	t1,8(sp)
+83 23 C1 00	# lw	t2,12(sp)
+
+# Check closing ')'
+13 0E F3 FF	# addi	t3,t1,-1
+B3 8E C2 01	# add	t4,t0,t3
+03 CF 0E 00	# lbu	t5,0(t4)
+93 0F 90 02	# addi	t6,zero,41
+63 1A FF 03	# bne	t5,t6,pm_bad
+
+# Register name: ptr+t2+1, len = t1-t2-2
+33 85 72 00	# add	a0,t0,t2
+13 05 15 00	# addi	a0,a0,1
+B3 05 73 40	# sub	a1,t1,t2
+93 85 E5 FF	# addi	a1,a1,-2
+EF F0 DF CB	# jal	ra,parse_reg
+13 0E F0 FF	# addi	t3,zero,-1
+63 0C C5 01	# beq	a0,t3,pm_bad
+93 05 05 00	# addi	a1,a0,0 ; reg
+03 25 01 01	# lw	a0,16(sp) ; imm
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 01	# addi	sp,sp,20
+67 80 00 00	# jalr	zero,0(ra)
+
+# pm_bad:
+13 05 60 00	# addi	a0,zero,6 ; E06: bad memory operand
+6F F0 1F 87	# jal	zero,halt_err
+
+# eval_expr:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+23 24 B1 00	# sw	a1,8(sp) ; save end ptr (eval_primary clobbers a1)
+EF 00 80 06	# jal	ra,eval_primary
+83 25 81 00	# lw	a1,8(sp) ; restore end
+
+# ee_lp:
+63 0A B6 04	# beq	a2,a1,ee_done
+83 42 06 00	# lbu	t0,0(a2)
+13 03 B0 02	# addi	t1,zero,43
+63 88 62 00	# beq	t0,t1,ee_add
+13 03 D0 02	# addi	t1,zero,45
+63 82 62 02	# beq	t0,t1,ee_sub
+6F 00 C0 03	# jal	zero,ee_done
+
+# ee_add:
+23 22 A1 00	# sw	a0,4(sp)
+13 05 16 00	# addi	a0,a2,1
+EF 00 C0 03	# jal	ra,eval_primary
+83 25 81 00	# lw	a1,8(sp) ; restore end
+83 22 41 00	# lw	t0,4(sp)
+33 85 A2 00	# add	a0,t0,a0
+6F F0 DF FC	# jal	zero,ee_lp
+
+# ee_sub:
+23 22 A1 00	# sw	a0,4(sp)
+13 05 16 00	# addi	a0,a2,1
+EF 00 00 02	# jal	ra,eval_primary
+83 25 81 00	# lw	a1,8(sp) ; restore end
+83 22 41 00	# lw	t0,4(sp)
+33 85 A2 40	# sub	a0,t0,a0
+6F F0 1F FB	# jal	zero,ee_lp
+
+# ee_done:
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+67 80 00 00	# jalr	zero,0(ra)
+
+# eval_primary:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+63 06 B5 12	# beq	a0,a1,ep_bad
+83 42 05 00	# lbu	t0,0(a0)
+
+# '(' → subexpression
+13 03 80 02	# addi	t1,zero,40
+63 8C 62 0E	# beq	t0,t1,ep_paren
+
+# Digit or sign → number
+13 03 00 03	# addi	t1,zero,48
+63 DC 62 00	# bge	t0,t1,ep_num_chk
+13 03 D0 02	# addi	t1,zero,45
+63 8E 62 00	# beq	t0,t1,ep_num_range
+13 03 B0 02	# addi	t1,zero,43
+63 8A 62 00	# beq	t0,t1,ep_num_range
+6F 00 80 06	# jal	zero,ep_ident_chk
+
+# ep_num_chk:
+13 03 A0 03	# addi	t1,zero,58
+63 C4 62 00	# blt	t0,t1,ep_num_range
+6F 00 C0 05	# jal	zero,ep_ident_chk
+
+# Find end of number: scan until non-alnum
+# ep_num_range:
+93 03 05 00	# addi	t2,a0,0
+
+# ep_num_scan:
+63 82 B3 04	# beq	t2,a1,ep_num_end
+03 CE 03 00	# lbu	t3,0(t2)
+93 0E 00 03	# addi	t4,zero,48
+63 4C DE 03	# blt	t3,t4,ep_num_end
+93 0E A0 03	# addi	t4,zero,58
+63 44 DE 03	# blt	t3,t4,ep_num_go
+93 0E 10 04	# addi	t4,zero,65
+63 44 DE 03	# blt	t3,t4,ep_num_end
+93 0E B0 05	# addi	t4,zero,91
+63 4C DE 01	# blt	t3,t4,ep_num_go
+93 0E 10 06	# addi	t4,zero,97
+63 4C DE 01	# blt	t3,t4,ep_num_end
+93 0E B0 07	# addi	t4,zero,123
+63 44 DE 01	# blt	t3,t4,ep_num_go
+6F 00 C0 00	# jal	zero,ep_num_end
+
+# ep_num_go:
+93 83 13 00	# addi	t2,t2,1
+6F F0 1F FC	# jal	zero,ep_num_scan
+
+# ep_num_end:
+13 86 03 00	# addi	a2,t2,0 ; save new_ptr
+B3 85 A3 40	# sub	a1,t2,a0 ; len
+EF F0 9F C8	# jal	ra,parse_imm ; a0 = value
+6F 00 40 09	# jal	zero,ep_ret
+
+# Char literal
+# ep_ident_chk:
+13 03 70 02	# addi	t1,zero,39
+63 8E 62 02	# beq	t0,t1,ep_char
+
+# Letter or underscore → symbol
+13 03 10 04	# addi	t1,zero,65
+63 C0 62 02	# blt	t0,t1,ep_us
+13 03 B0 05	# addi	t1,zero,91
+63 C2 62 02	# blt	t0,t1,ep_sym
+13 03 10 06	# addi	t1,zero,97
+63 C8 62 00	# blt	t0,t1,ep_us
+13 03 B0 07	# addi	t1,zero,123
+63 CA 62 00	# blt	t0,t1,ep_sym
+6F 00 40 00	# jal	zero,ep_us
+
+# ep_us:
+13 03 F0 05	# addi	t1,zero,95
+63 84 62 00	# beq	t0,t1,ep_sym
+6F 00 80 06	# jal	zero,ep_bad
+
+# ep_sym:
+EF 00 C0 06	# jal	ra,find_sym_ident
+6F 00 40 05	# jal	zero,ep_ret
+
+# Determine length: 'x' = 3, '\x' = 4
+# Char literal in expression context
+# ep_char:
+93 03 25 00	# addi	t2,a0,2 ; at least 3 chars
+63 DC B3 04	# bge	t2,a1,ep_bad
+03 4E 15 00	# lbu	t3,1(a0)
+93 0E C0 05	# addi	t4,zero,92
+63 18 DE 01	# bne	t3,t4,ep_char_3
+93 03 45 00	# addi	t2,a0,4 ; escaped = 4 chars
+63 C2 75 04	# blt	a1,t2,ep_bad
+6F 00 80 00	# jal	zero,ep_char_go
+
+# ep_char_3:
+93 03 35 00	# addi	t2,a0,3
+
+# ep_char_go:
+13 86 03 00	# addi	a2,t2,0 ; new_ptr past closing quote
+B3 85 A3 40	# sub	a1,t2,a0 ; len
+EF F0 5F C1	# jal	ra,parse_imm
+6F 00 00 02	# jal	zero,ep_ret
+
+# ep_paren:
+13 05 15 00	# addi	a0,a0,1 ; skip '('
+EF F0 DF E7	# jal	ra,eval_expr
+63 00 B6 02	# beq	a2,a1,ep_bad
+83 42 06 00	# lbu	t0,0(a2)
+13 03 90 02	# addi	t1,zero,41
+63 9A 62 00	# bne	t0,t1,ep_bad
+13 06 16 00	# addi	a2,a2,1 ; skip ')'
+
+# ep_ret:
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# ep_bad:
+13 05 50 00	# addi	a0,zero,5
+6F F0 0F EC	# jal	zero,halt_err
+
+# find_sym_ident:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp) ; save end
+93 02 05 00	# addi	t0,a0,0
+
+# fsi_scan:
+63 86 B2 04	# beq	t0,a1,fsi_end
+03 C3 02 00	# lbu	t1,0(t0)
+93 03 F0 05	# addi	t2,zero,95
+63 0C 73 02	# beq	t1,t2,fsi_go
+93 03 00 03	# addi	t2,zero,48
+63 4C 73 02	# blt	t1,t2,fsi_end
+93 03 A0 03	# addi	t2,zero,58
+63 44 73 02	# blt	t1,t2,fsi_go
+93 03 10 04	# addi	t2,zero,65
+63 44 73 02	# blt	t1,t2,fsi_end
+93 03 B0 05	# addi	t2,zero,91
+63 4C 73 00	# blt	t1,t2,fsi_go
+93 03 10 06	# addi	t2,zero,97
+63 4C 73 00	# blt	t1,t2,fsi_end
+93 03 B0 07	# addi	t2,zero,123
+63 44 73 00	# blt	t1,t2,fsi_go
+6F 00 C0 00	# jal	zero,fsi_end
+
+# fsi_go:
+93 82 12 00	# addi	t0,t0,1
+6F F0 9F FB	# jal	zero,fsi_scan
+
+# fsi_end:
+23 24 51 00	# sw	t0,8(sp) ; save new_ptr
+B3 85 A2 40	# sub	a1,t0,a0 ; len
+63 8E 05 00	# beq	a1,zero,fsi_bad
+EF 00 80 31	# jal	ra,find_sym ; a0=val, a1=kind, a2=found
+63 0A 06 00	# beq	a2,zero,fsi_bad ; not found
+03 26 81 00	# lw	a2,8(sp) ; restore new_ptr
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+67 80 00 00	# jalr	zero,0(ra)
+
+# fsi_bad:
+13 05 10 01	# addi	a0,zero,17 ; E17: unresolved symbol
+6F F0 8F E3	# jal	zero,halt_err
+
+# read_multi_expr:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+B7 42 00 00	# lui	t0,0x4
+93 82 02 92	# addi	t0,t0,-1760
+B3 02 5D 00	# add	t0,s10,t0 ; buf base (14624 offset in token area)
+23 22 51 00	# sw	t0,4(sp)
+13 03 00 00	# addi	t1,zero,0 ; len written
+
+# rme_lp:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 51 00	# sw	t0,0(sp)
+23 22 61 00	# sw	t1,4(sp)
+EF F0 CF F5	# jal	ra,read_token
+83 22 01 00	# lw	t0,0(sp)
+03 23 41 00	# lw	t1,4(sp)
+13 01 C1 00	# addi	sp,sp,12
+63 16 04 00	# bne	s0,zero,rme_chk_eol
+63 0A 03 06	# beq	t1,zero,rme_bad ; empty on first iter
+6F 00 40 05	# jal	zero,rme_eval ; EOT finishes
+
+# rme_chk_eol:
+83 23 8D 1D	# lw	t2,472(s10) ; eol_flag
+63 8A 03 00	# beq	t2,zero,rme_accept
+63 02 03 06	# beq	t1,zero,rme_bad
+93 03 10 00	# addi	t2,zero,1
+23 2E 7D 1C	# sw	t2,476(s10) ; pushback
+6F 00 C0 03	# jal	zero,rme_eval
+
+# rme_accept:
+B3 83 62 00	# add	t2,t0,t1
+13 0E 0D 00	# addi	t3,s10,0
+93 0E 04 00	# addi	t4,s0,0
+
+# rme_cp:
+63 80 0E 02	# beq	t4,zero,rme_cpd
+03 4F 0E 00	# lbu	t5,0(t3)
+23 80 E3 01	# sb	t5,0(t2)
+93 83 13 00	# addi	t2,t2,1
+13 0E 1E 00	# addi	t3,t3,1
+93 8E FE FF	# addi	t4,t4,-1
+13 03 13 00	# addi	t1,t1,1
+6F F0 5F FE	# jal	zero,rme_cp
+
+# rme_cpd:
+93 03 00 08	# addi	t2,zero,128
+63 52 73 02	# bge	t1,t2,rme_bad
+6F F0 DF F8	# jal	zero,rme_lp
+
+# rme_eval:
+13 85 02 00	# addi	a0,t0,0
+B3 85 62 00	# add	a1,t0,t1
+EF F0 DF D2	# jal	ra,eval_expr
+63 18 B6 00	# bne	a2,a1,rme_bad
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+67 80 00 00	# jalr	zero,0(ra)
+
+# rme_bad:
+13 05 50 00	# addi	a0,zero,5
+6F F0 0F D8	# jal	zero,halt_err
+
+# read_reg_op:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F EC	# jal	ra,read_token
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+EF F0 1F 99	# jal	ra,parse_reg
+93 02 F0 FF	# addi	t0,zero,-1
+63 16 55 00	# bne	a0,t0,rro_ok
+13 05 80 00	# addi	a0,zero,8 ; E08: bad register
+6F F0 8F D5	# jal	zero,halt_err
+
+# rro_ok:
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# read_imm_op:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 0F E9	# jal	ra,read_token
+13 05 0D 00	# addi	a0,s10,0
+B3 05 8D 00	# add	a1,s10,s0
+EF F0 9F CC	# jal	ra,eval_expr
+63 18 B6 00	# bne	a2,a1,rio_bad
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# rio_bad:
+13 05 50 00	# addi	a0,zero,5
+6F F0 CF D1	# jal	zero,halt_err
+
+# read_mem_op:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 0F E6	# jal	ra,read_token
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+EF F0 5F BF	# jal	ra,parse_mem
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# read_br_target:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+23 22 A1 00	# sw	a0,4(sp) ; slot_type
+EF F0 8F E3	# jal	ra,read_token
+
+# Local label ref? (len=2, digit + 'f'/'b')
+93 03 20 00	# addi	t2,zero,2
+63 1A 74 08	# bne	s0,t2,rbt_not_local
+83 42 0D 00	# lbu	t0,0(s10)
+13 03 00 03	# addi	t1,zero,48
+63 C4 62 08	# blt	t0,t1,rbt_not_local
+13 03 A0 03	# addi	t1,zero,58
+63 D0 62 08	# bge	t0,t1,rbt_not_local
+03 43 1D 00	# lbu	t1,1(s10)
+93 03 60 06	# addi	t2,zero,102
+63 08 73 00	# beq	t1,t2,rbt_local
+93 03 20 06	# addi	t2,zero,98
+63 04 73 00	# beq	t1,t2,rbt_local
+6F 00 80 06	# jal	zero,rbt_not_local
+
+# Build local label name, record fixup
+# rbt_local:
+13 8E 02 FD	# addi	t3,t0,-48 ; digit
+93 1E 2E 00	# slli	t4,t3,0x2
+B3 0E DD 01	# add	t4,s10,t4
+03 AF 0E 04	# lw	t5,64(t4) ; counter[digit]
+93 03 60 06	# addi	t2,zero,102
+63 16 73 00	# bne	t1,t2,rbt_local_b
+13 0F 1F 00	# addi	t5,t5,1 ; forward: seq = counter+1
+6F 00 80 00	# jal	zero,rbt_local_build
+
+# rbt_local_b:
+63 0C 0F 0A	# beq	t5,zero,rbt_bad ; backward with no prior def
+
+# rbt_local_build:
+13 01 01 FF	# addi	sp,sp,-16
+13 05 0E 00	# addi	a0,t3,0 ; digit
+93 05 0F 00	# addi	a1,t5,0 ; seq
+13 06 01 00	# addi	a2,sp,0 ; buf
+EF 00 00 21	# jal	ra,build_local_name
+13 05 01 00	# addi	a0,sp,0 ; name_ptr
+93 05 90 00	# addi	a1,zero,9 ; name_len
+33 06 99 40	# sub	a2,s2,s1 ; patch_offset
+83 26 41 01	# lw	a3,20(sp) ; slot_type (at 4(sp) before 16-push = 20)
+63 96 06 00	# bne	a3,zero,rbt_local_j
+
+# B-type → trampoline: fixup at offset+4 (JAL)
+13 06 46 00	# addi	a2,a2,4
+93 06 10 00	# addi	a3,zero,1 ; J-type
+
+# rbt_local_j:
+EF 00 40 1A	# jal	ra,record_fixup_arg
+13 01 01 01	# addi	sp,sp,16
+13 05 00 00	# addi	a0,zero,0
+6F 00 C0 06	# jal	zero,rbt_done
+
+# Letter or underscore → label
+# rbt_not_local:
+83 42 0D 00	# lbu	t0,0(s10)
+13 03 10 04	# addi	t1,zero,65
+63 CE 62 00	# blt	t0,t1,rbt_chk_us
+13 03 B0 05	# addi	t1,zero,91
+63 C6 62 02	# blt	t0,t1,rbt_label
+13 03 10 06	# addi	t1,zero,97
+63 C6 62 00	# blt	t0,t1,rbt_chk_us
+13 03 B0 07	# addi	t1,zero,123
+63 CE 62 00	# blt	t0,t1,rbt_label
+
+# rbt_chk_us:
+13 03 F0 05	# addi	t1,zero,95
+63 8A 62 00	# beq	t0,t1,rbt_label
+
+# Must be numeric immediate
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+EF F0 9F 93	# jal	ra,parse_imm
+6F 00 00 03	# jal	zero,rbt_done
+
+# rbt_label:
+83 25 41 00	# lw	a1,4(sp) ; slot_type
+63 9E 05 00	# bne	a1,zero,rbt_label_j ; J-type: record as-is
+
+# B-type → trampoline: fixup at offset+4
+33 05 99 40	# sub	a0,s2,s1
+13 05 45 00	# addi	a0,a0,4
+93 05 10 00	# addi	a1,zero,1 ; J-type
+EF 00 40 13	# jal	ra,record_fixup
+13 05 00 00	# addi	a0,zero,0
+6F 00 00 01	# jal	zero,rbt_done
+
+# rbt_label_j:
+33 05 99 40	# sub	a0,s2,s1 ; patch_offset
+EF 00 40 12	# jal	ra,record_fixup
+13 05 00 00	# addi	a0,zero,0
+
+# rbt_done:
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+67 80 00 00	# jalr	zero,0(ra)
+
+# rbt_bad:
+13 05 A0 00	# addi	a0,zero,10 ; E10: bad branch target
+6F F0 4F BD	# jal	zero,halt_err
+
+# define_label:
+93 02 10 02	# addi	t0,zero,33 ; max s0 = 32 (31 chars + colon)
+63 46 54 00	# blt	s0,t0,dl_ok
+13 05 B0 00	# addi	a0,zero,11 ; E11: label too long
+6F F0 4F BC	# jal	zero,halt_err
+
+# dl_ok:
+93 02 F4 FF	# addi	t0,s0,-1 ; position of ':'
+33 03 5D 00	# add	t1,s10,t0
+23 00 03 00	# sb	zero,0(t1) ; zero out colon
+
+# Duplicate check
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+13 05 0D 00	# addi	a0,s10,0
+93 05 F4 FF	# addi	a1,s0,-1
+EF 00 80 06	# jal	ra,find_sym
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+63 06 06 00	# beq	a2,zero,dl_new ; not found → OK
+13 05 C0 00	# addi	a0,zero,12 ; E12: duplicate label
+6F F0 0F B9	# jal	zero,halt_err
+
+# Zero 40 bytes at s4
+# dl_new:
+93 03 0A 00	# addi	t2,s4,0
+13 0E 8A 02	# addi	t3,s4,40
+
+# dl_zero:
+23 A0 03 00	# sw	zero,0(t2)
+93 83 43 00	# addi	t2,t2,4
+E3 9C C3 FF	# bne	t2,t3,dl_zero
+
+# Copy name (32 bytes max, buffer already zero-padded)
+93 03 0D 00	# addi	t2,s10,0
+13 0E 0A 00	# addi	t3,s4,0
+93 02 F4 FF	# addi	t0,s0,-1 ; name len (without colon)
+
+# dl_cp:
+63 8E 02 00	# beq	t0,zero,dl_store
+03 CF 03 00	# lbu	t5,0(t2)
+23 00 EE 01	# sb	t5,0(t3)
+93 83 13 00	# addi	t2,t2,1
+13 0E 1E 00	# addi	t3,t3,1
+93 82 F2 FF	# addi	t0,t0,-1
+6F F0 9F FE	# jal	zero,dl_cp
+
+# dl_store:
+33 0F 99 40	# sub	t5,s2,s1 ; output offset
+23 20 EA 03	# sw	t5,32(s4) ; value
+23 22 0A 02	# sw	zero,36(s4) ; kind = 0 (code label)
+13 0A 8A 02	# addi	s4,s4,40
+67 80 00 00	# jalr	zero,0(ra)
+
+# find_sym:
+93 82 09 00	# addi	t0,s3,0 ; symtab scan ptr
+
+# fs_lp:
+63 84 42 07	# beq	t0,s4,fs_notfound
+
+# But we only compare a1 bytes then check remaining are zero
+# Compare name: must match all 32 bytes (entry is zero-padded)
+93 03 05 00	# addi	t2,a0,0 ; name ptr
+13 8E 02 00	# addi	t3,t0,0 ; entry ptr
+93 8E 05 00	# addi	t4,a1,0 ; remaining
+
+# fs_cmp:
+63 80 0E 02	# beq	t4,zero,fs_pad
+03 CF 03 00	# lbu	t5,0(t2)
+83 4F 0E 00	# lbu	t6,0(t3)
+63 12 FF 05	# bne	t5,t6,fs_next
+93 83 13 00	# addi	t2,t2,1
+13 0E 1E 00	# addi	t3,t3,1
+93 8E FE FF	# addi	t4,t4,-1
+6F F0 5F FE	# jal	zero,fs_cmp
+
+# Check remaining bytes in entry name are zero
+# fs_pad:
+93 0E 00 02	# addi	t4,zero,32
+B3 8E BE 40	# sub	t4,t4,a1
+63 8C 0E 00	# beq	t4,zero,fs_found
+
+# fs_pad_lp:
+03 4F 0E 00	# lbu	t5,0(t3)
+63 10 0F 02	# bne	t5,zero,fs_next
+13 0E 1E 00	# addi	t3,t3,1
+93 8E FE FF	# addi	t4,t4,-1
+E3 98 0E FE	# bne	t4,zero,fs_pad_lp
+
+# fs_found:
+03 A5 02 02	# lw	a0,32(t0) ; value
+83 A5 42 02	# lw	a1,36(t0) ; kind
+13 06 10 00	# addi	a2,zero,1 ; found
+67 80 00 00	# jalr	zero,0(ra)
+
+# fs_next:
+93 82 82 02	# addi	t0,t0,40
+6F F0 DF F9	# jal	zero,fs_lp
+
+# fs_notfound:
+13 06 00 00	# addi	a2,zero,0
+67 80 00 00	# jalr	zero,0(ra)
+
+# record_fixup:
+13 06 05 00	# addi	a2,a0,0
+93 86 05 00	# addi	a3,a1,0
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+
+# Zero 40 bytes at s8
+# record_fixup_arg:
+13 03 0C 00	# addi	t1,s8,0
+13 0F 8C 02	# addi	t5,s8,40
+
+# rfa_zero:
+23 20 03 00	# sw	zero,0(t1)
+13 03 43 00	# addi	t1,t1,4
+E3 1C E3 FF	# bne	t1,t5,rfa_zero
+
+# Copy name
+13 03 05 00	# addi	t1,a0,0
+93 03 0C 00	# addi	t2,s8,0
+13 8E 05 00	# addi	t3,a1,0
+
+# rfa_cp:
+63 0E 0E 00	# beq	t3,zero,rfa_fields
+03 4F 03 00	# lbu	t5,0(t1)
+23 80 E3 01	# sb	t5,0(t2)
+13 03 13 00	# addi	t1,t1,1
+93 83 13 00	# addi	t2,t2,1
+13 0E FE FF	# addi	t3,t3,-1
+6F F0 9F FE	# jal	zero,rfa_cp
+
+# rfa_fields:
+23 20 CC 02	# sw	a2,32(s8) ; patch_offset
+23 22 DC 02	# sw	a3,36(s8) ; slot_type
+13 0C 8C 02	# addi	s8,s8,40
+67 80 00 00	# jalr	zero,0(ra)
+
+# build_local_name:
+93 02 E0 02	# addi	t0,zero,46
+23 00 56 00	# sb	t0,0(a2)
+93 02 C0 04	# addi	t0,zero,76
+A3 00 56 00	# sb	t0,1(a2)
+93 02 05 03	# addi	t0,a0,48
+23 01 56 00	# sb	t0,2(a2)
+
+# Write seq as decimal (up to 6 digits)
+93 02 36 00	# addi	t0,a2,3
+13 03 00 00	# addi	t1,zero,0 ; digit count
+
+# Repeatedly divide by 10 (shift method), push digits
+13 01 81 FE	# addi	sp,sp,-24
+93 83 05 00	# addi	t2,a1,0
+
+# bln_lp:
+13 0E A0 00	# addi	t3,zero,10
+93 0E 00 00	# addi	t4,zero,0 ; quotient
+
+# bln_div:
+63 C8 C3 01	# blt	t2,t3,bln_rem
+B3 83 C3 41	# sub	t2,t2,t3
+93 8E 1E 00	# addi	t4,t4,1
+6F F0 5F FF	# jal	zero,bln_div
+
+# bln_rem:
+13 8F 03 03	# addi	t5,t2,48
+B3 0F 61 00	# add	t6,sp,t1
+23 80 EF 01	# sb	t5,0(t6) ; push remainder
+13 03 13 00	# addi	t1,t1,1
+93 83 0E 00	# addi	t2,t4,0
+E3 9A 03 FC	# bne	t2,zero,bln_lp
+
+# bln_pop:
+13 03 F3 FF	# addi	t1,t1,-1
+B3 0F 61 00	# add	t6,sp,t1
+03 CF 0F 00	# lbu	t5,0(t6)
+23 80 E2 01	# sb	t5,0(t0)
+93 82 12 00	# addi	t0,t0,1
+E3 16 03 FE	# bne	t1,zero,bln_pop
+13 01 81 01	# addi	sp,sp,24
+
+# Zero-pad remaining
+13 03 96 00	# addi	t1,a2,9
+
+# bln_pad:
+63 D8 62 00	# bge	t0,t1,bln_done
+23 80 02 00	# sb	zero,0(t0)
+93 82 12 00	# addi	t0,t0,1
+6F F0 5F FF	# jal	zero,bln_pad
+
+# bln_done:
+67 80 00 00	# jalr	zero,0(ra)
+
+# def_local_label:
+13 01 C1 FE	# addi	sp,sp,-20
+23 20 11 00	# sw	ra,0(sp)
+93 12 25 00	# slli	t0,a0,0x2
+B3 02 5D 00	# add	t0,s10,t0
+03 A3 02 04	# lw	t1,64(t0) ; counter[digit]
+13 03 13 00	# addi	t1,t1,1
+23 A0 62 04	# sw	t1,64(t0) ; counter[digit]++
+
+# Build name at sp+4
+93 05 03 00	# addi	a1,t1,0 ; seq
+13 06 41 00	# addi	a2,sp,4
+EF F0 1F F5	# jal	ra,build_local_name
+
+# Copy to token buffer for define_label
+93 02 0D 00	# addi	t0,s10,0
+13 03 41 00	# addi	t1,sp,4
+93 03 90 00	# addi	t2,zero,9
+
+# dll_cp:
+03 4E 03 00	# lbu	t3,0(t1)
+23 80 C2 01	# sb	t3,0(t0)
+93 82 12 00	# addi	t0,t0,1
+13 03 13 00	# addi	t1,t1,1
+93 83 F3 FF	# addi	t2,t2,-1
+E3 96 03 FE	# bne	t2,zero,dll_cp
+
+# Zero rest of token buffer
+13 03 0D 02	# addi	t1,s10,32
+
+# dll_z:
+63 88 62 00	# beq	t0,t1,dll_def
+23 80 02 00	# sb	zero,0(t0)
+93 82 12 00	# addi	t0,t0,1
+6F F0 5F FF	# jal	zero,dll_z
+
+# Add ':' and set s0 = 10 (name + colon)
+# dll_def:
+93 02 A0 03	# addi	t0,zero,58
+A3 04 5D 00	# sb	t0,9(s10)
+13 04 A0 00	# addi	s0,zero,10
+EF F0 5F DA	# jal	ra,define_label
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 01	# addi	sp,sp,20
+67 80 00 00	# jalr	zero,0(ra)
+
+# emit_word:
+23 00 A9 00	# sb	a0,0(s2)
+13 5F 85 00	# srli	t5,a0,0x8
+A3 00 E9 01	# sb	t5,1(s2)
+13 5F 8F 00	# srli	t5,t5,0x8
+23 01 E9 01	# sb	t5,2(s2)
+13 5F 8F 00	# srli	t5,t5,0x8
+A3 01 E9 01	# sb	t5,3(s2)
+13 09 49 00	# addi	s2,s2,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# emit_u_inst:
+93 12 C6 00	# slli	t0,a2,0xc
+13 F3 F5 01	# andi	t1,a1,31
+13 13 73 00	# slli	t1,t1,0x7
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F5 07	# andi	t1,a0,127
+33 E5 62 00	# or	a0,t0,t1
+6F F0 5F FC	# jal	zero,emit_word
+
+# emit_i_inst:
+93 12 47 01	# slli	t0,a4,0x14
+13 73 F6 01	# andi	t1,a2,31
+13 13 F3 00	# slli	t1,t1,0xf
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 76 00	# andi	t1,a3,7
+13 13 C3 00	# slli	t1,t1,0xc
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 F5 01	# andi	t1,a1,31
+13 13 73 00	# slli	t1,t1,0x7
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F5 07	# andi	t1,a0,127
+33 E5 62 00	# or	a0,t0,t1
+6F F0 1F F9	# jal	zero,emit_word
+
+# emit_r_inst:
+13 F3 F7 07	# andi	t1,a5,127
+93 12 93 01	# slli	t0,t1,0x19
+13 F3 F6 01	# andi	t1,a3,31
+13 13 43 01	# slli	t1,t1,0x14
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F6 01	# andi	t1,a2,31
+13 13 F3 00	# slli	t1,t1,0xf
+B3 E2 62 00	# or	t0,t0,t1
+13 73 77 00	# andi	t1,a4,7
+13 13 C3 00	# slli	t1,t1,0xc
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 F5 01	# andi	t1,a1,31
+13 13 73 00	# slli	t1,t1,0x7
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F5 07	# andi	t1,a0,127
+33 E5 62 00	# or	a0,t0,t1
+6F F0 DF F4	# jal	zero,emit_word
+
+# emit_s_inst:
+13 53 57 00	# srli	t1,a4,0x5
+13 73 F3 07	# andi	t1,t1,127
+93 12 93 01	# slli	t0,t1,0x19
+13 73 F6 01	# andi	t1,a2,31
+13 13 43 01	# slli	t1,t1,0x14
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 F5 01	# andi	t1,a1,31
+13 13 F3 00	# slli	t1,t1,0xf
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 76 00	# andi	t1,a3,7
+13 13 C3 00	# slli	t1,t1,0xc
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F7 01	# andi	t1,a4,31
+13 13 73 00	# slli	t1,t1,0x7
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F5 07	# andi	t1,a0,127
+33 E5 62 00	# or	a0,t0,t1
+6F F0 5F F0	# jal	zero,emit_word
+
+# emit_b_inst:
+93 52 C7 00	# srli	t0,a4,0xc
+93 F2 12 00	# andi	t0,t0,1
+93 92 F2 01	# slli	t0,t0,0x1f
+13 53 57 00	# srli	t1,a4,0x5
+13 73 F3 03	# andi	t1,t1,63
+13 13 93 01	# slli	t1,t1,0x19
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F6 01	# andi	t1,a2,31
+13 13 43 01	# slli	t1,t1,0x14
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 F5 01	# andi	t1,a1,31
+13 13 F3 00	# slli	t1,t1,0xf
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 76 00	# andi	t1,a3,7
+13 13 C3 00	# slli	t1,t1,0xc
+B3 E2 62 00	# or	t0,t0,t1
+13 53 17 00	# srli	t1,a4,0x1
+13 73 F3 00	# andi	t1,t1,15
+13 13 83 00	# slli	t1,t1,0x8
+B3 E2 62 00	# or	t0,t0,t1
+13 53 B7 00	# srli	t1,a4,0xb
+13 73 13 00	# andi	t1,t1,1
+13 13 73 00	# slli	t1,t1,0x7
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F5 07	# andi	t1,a0,127
+33 E5 62 00	# or	a0,t0,t1
+6F F0 9F E9	# jal	zero,emit_word
+
+# emit_j_inst:
+93 52 46 01	# srli	t0,a2,0x14
+93 F2 12 00	# andi	t0,t0,1
+93 92 F2 01	# slli	t0,t0,0x1f
+13 53 16 00	# srli	t1,a2,0x1
+13 0E F0 3F	# addi	t3,zero,1023
+33 73 C3 01	# and	t1,t1,t3
+13 13 53 01	# slli	t1,t1,0x15
+B3 E2 62 00	# or	t0,t0,t1
+13 53 B6 00	# srli	t1,a2,0xb
+13 73 13 00	# andi	t1,t1,1
+13 13 43 01	# slli	t1,t1,0x14
+B3 E2 62 00	# or	t0,t0,t1
+13 53 C6 00	# srli	t1,a2,0xc
+13 73 F3 0F	# andi	t1,t1,255
+13 13 C3 00	# slli	t1,t1,0xc
+B3 E2 62 00	# or	t0,t0,t1
+13 F3 F5 01	# andi	t1,a1,31
+13 13 73 00	# slli	t1,t1,0x7
+B3 E2 62 00	# or	t0,t0,t1
+13 73 F5 07	# andi	t1,a0,127
+33 E5 62 00	# or	a0,t0,t1
+6F F0 1F E4	# jal	zero,emit_word
+
+# emit_branch_auto:
+E3 1E 07 F2	# bne	a4,zero,emit_b_inst ; numeric → compact
+
+# Always relax: inverted branch +8, then JAL placeholder
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+93 C6 16 00	# xori	a3,a3,1 ; invert condition
+13 07 80 00	# addi	a4,zero,8 ; branch over JAL
+EF F0 9F F2	# jal	ra,emit_b_inst
+13 05 F0 06	# addi	a0,zero,111 ; JAL x0, 0 (placeholder)
+EF F0 1F E2	# jal	ra,emit_word
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# rec_pcrel_pair:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF 8B	# jal	ra,read_token
+
+# Record U_hi20_pcrel fixup for auipc
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+33 06 99 40	# sub	a2,s2,s1
+93 06 70 00	# addi	a3,zero,7 ; U_hi20_pcrel
+EF F0 1F CA	# jal	ra,record_fixup_arg
+
+# Record I_lo12_pcrel_prev fixup for addi/jalr
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+33 06 99 40	# sub	a2,s2,s1
+13 06 46 00	# addi	a2,a2,4
+93 06 80 00	# addi	a3,zero,8 ; I_lo12_pcrel_prev
+EF F0 9F C8	# jal	ra,record_fixup_arg
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# dispatch:
+93 02 10 00	# addi	t0,zero,1
+63 04 55 1C	# beq	a0,t0,do_r
+93 02 20 00	# addi	t0,zero,2
+63 04 55 20	# beq	a0,t0,do_i_arith
+93 02 30 00	# addi	t0,zero,3
+63 00 55 24	# beq	a0,t0,do_i_shift
+93 02 40 00	# addi	t0,zero,4
+63 06 55 28	# beq	a0,t0,do_i_load
+93 02 50 00	# addi	t0,zero,5
+63 0E 55 2A	# beq	a0,t0,do_s
+93 02 60 00	# addi	t0,zero,6
+63 06 55 2E	# beq	a0,t0,do_b
+93 02 70 00	# addi	t0,zero,7
+63 04 55 32	# beq	a0,t0,do_u_lui
+93 02 80 00	# addi	t0,zero,8
+63 06 55 34	# beq	a0,t0,do_u_auipc
+93 02 90 00	# addi	t0,zero,9
+63 08 55 36	# beq	a0,t0,do_j_jal
+93 02 A0 00	# addi	t0,zero,10
+63 0C 55 3A	# beq	a0,t0,do_i_jalr
+
+# Pseudos — use bne+j trampolines for far targets
+93 02 B0 00	# addi	t0,zero,11
+63 14 55 00	# bne	a0,t0,d_12
+6F 00 80 42	# jal	zero,do_ps_li
+
+# d_12:
+93 02 C0 00	# addi	t0,zero,12
+63 14 55 00	# bne	a0,t0,d_13
+6F 00 80 4B	# jal	zero,do_ps_mv
+
+# d_13:
+93 02 D0 00	# addi	t0,zero,13
+63 14 55 00	# bne	a0,t0,d_14
+6F 00 00 4E	# jal	zero,do_ps_j
+
+# d_14:
+93 02 E0 00	# addi	t0,zero,14
+63 14 55 00	# bne	a0,t0,d_15
+6F 00 C0 4F	# jal	zero,do_ps_ret
+
+# d_15:
+93 02 F0 00	# addi	t0,zero,15
+63 14 55 00	# bne	a0,t0,d_16
+6F 00 80 50	# jal	zero,do_ps_beqz
+
+# d_16:
+93 02 00 01	# addi	t0,zero,16
+63 14 55 00	# bne	a0,t0,d_17
+6F 00 40 53	# jal	zero,do_ps_bnez
+
+# d_17:
+93 02 10 01	# addi	t0,zero,17
+63 14 55 00	# bne	a0,t0,d_19
+6F 00 50 0D	# jal	zero,do_ps_equ
+
+# d_19:
+93 02 30 01	# addi	t0,zero,19
+63 14 55 00	# bne	a0,t0,d_21
+6F 00 10 13	# jal	zero,do_ps_byte
+
+# d_21:
+93 02 50 01	# addi	t0,zero,21
+63 14 55 00	# bne	a0,t0,d_22
+6F 00 D0 14	# jal	zero,do_ps_word
+
+# d_22:
+93 02 60 01	# addi	t0,zero,22
+63 14 55 00	# bne	a0,t0,d_24
+6F 00 50 16	# jal	zero,do_ps_ascii
+
+# d_24:
+93 02 80 01	# addi	t0,zero,24
+63 14 55 00	# bne	a0,t0,d_28
+6F 00 10 22	# jal	zero,do_ps_zero
+
+# d_28:
+93 02 C0 01	# addi	t0,zero,28
+63 14 55 00	# bne	a0,t0,d_29
+6F 00 C0 7D	# jal	zero,do_ps_lla
+
+# d_29:
+93 02 D0 01	# addi	t0,zero,29
+63 14 55 00	# bne	a0,t0,d_30
+6F 00 50 01	# jal	zero,do_ps_call
+
+# d_30:
+93 02 E0 01	# addi	t0,zero,30
+63 14 55 00	# bne	a0,t0,d_31
+6F 00 50 04	# jal	zero,do_ps_tail
+
+# d_31:
+93 02 F0 01	# addi	t0,zero,31
+63 14 55 00	# bne	a0,t0,d_32
+6F 00 C0 36	# jal	zero,do_ps_nop
+
+# d_32:
+93 02 00 02	# addi	t0,zero,32
+63 14 55 00	# bne	a0,t0,d_33
+6F 00 40 4F	# jal	zero,do_ps_neg
+
+# d_33:
+93 02 10 02	# addi	t0,zero,33
+63 14 55 00	# bne	a0,t0,d_34
+6F 00 00 52	# jal	zero,do_ps_not
+
+# d_34:
+93 02 20 02	# addi	t0,zero,34
+63 14 55 00	# bne	a0,t0,d_35
+6F 00 80 54	# jal	zero,do_ps_seqz
+
+# d_35:
+93 02 30 02	# addi	t0,zero,35
+63 14 55 00	# bne	a0,t0,d_36
+6F 00 00 57	# jal	zero,do_ps_snez
+
+# d_36:
+93 02 40 02	# addi	t0,zero,36
+63 14 55 00	# bne	a0,t0,d_37
+6F 00 C0 59	# jal	zero,do_ps_sltz
+
+# d_37:
+93 02 50 02	# addi	t0,zero,37
+63 14 55 00	# bne	a0,t0,d_38
+6F 00 80 5C	# jal	zero,do_ps_sgtz
+
+# d_38:
+93 02 60 02	# addi	t0,zero,38
+63 14 55 00	# bne	a0,t0,d_39
+6F 00 40 5F	# jal	zero,do_ps_bgt
+
+# d_39:
+93 02 70 02	# addi	t0,zero,39
+63 14 55 00	# bne	a0,t0,d_40
+6F 00 80 62	# jal	zero,do_ps_ble
+
+# d_40:
+93 02 80 02	# addi	t0,zero,40
+63 14 55 00	# bne	a0,t0,d_41
+6F 00 C0 65	# jal	zero,do_ps_bgtu
+
+# d_41:
+93 02 90 02	# addi	t0,zero,41
+63 14 55 00	# bne	a0,t0,d_42
+6F 00 00 69	# jal	zero,do_ps_bleu
+
+# d_42:
+93 02 A0 02	# addi	t0,zero,42
+63 14 55 00	# bne	a0,t0,d_43
+6F 00 D0 19	# jal	zero,do_ps_prologue
+
+# d_43:
+93 02 B0 02	# addi	t0,zero,43
+63 14 55 00	# bne	a0,t0,d_44
+6F 00 50 2C	# jal	zero,do_ps_epilogue
+
+# d_44:
+93 02 C0 02	# addi	t0,zero,44
+63 14 55 00	# bne	a0,t0,d_46
+6F 00 50 3A	# jal	zero,do_ps_return
+
+# d_46:
+93 02 E0 02	# addi	t0,zero,46
+63 14 55 00	# bne	a0,t0,d_47
+6F 00 00 6A	# jal	zero,do_ps_bltz
+
+# d_47:
+93 02 F0 02	# addi	t0,zero,47
+63 14 55 00	# bne	a0,t0,d_48
+6F 00 C0 6C	# jal	zero,do_ps_bgez
+
+# d_48:
+93 02 00 03	# addi	t0,zero,48
+63 14 55 00	# bne	a0,t0,d_err
+6F 00 40 2B	# jal	zero,do_ps_wfi
+
+# d_err:
+13 05 10 00	# addi	a0,zero,1
+6F E0 9F D6	# jal	zero,halt_err
+
+# do_r:
+13 01 C1 FE	# addi	sp,sp,-20
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp)
+23 24 C1 00	# sw	a2,8(sp)
+EF F0 8F FD	# jal	ra,read_reg_op
+23 26 A1 00	# sw	a0,12(sp) ; rd
+EF F0 0F FD	# jal	ra,read_reg_op
+23 28 A1 00	# sw	a0,16(sp) ; rs1
+EF F0 8F FC	# jal	ra,read_reg_op
+93 06 05 00	# addi	a3,a0,0 ; rs2
+83 27 81 00	# lw	a5,8(sp) ; f7
+03 27 41 00	# lw	a4,4(sp) ; f3
+03 26 01 01	# lw	a2,16(sp) ; rs1
+83 25 C1 00	# lw	a1,12(sp) ; rd
+13 05 30 03	# addi	a0,zero,51
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 01	# addi	sp,sp,20
+6F F0 1F C3	# jal	zero,emit_r_inst
+
+# do_i_arith:
+13 01 01 FF	# addi	sp,sp,-16
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp)
+EF F0 4F F9	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp) ; rd
+EF F0 CF F8	# jal	ra,read_reg_op
+23 26 A1 00	# sw	a0,12(sp) ; rs1
+EF F0 8F FB	# jal	ra,read_imm_op
+13 07 05 00	# addi	a4,a0,0 ; imm
+83 26 41 00	# lw	a3,4(sp) ; f3
+03 26 C1 00	# lw	a2,12(sp) ; rs1
+83 25 81 00	# lw	a1,8(sp) ; rd
+13 05 30 01	# addi	a0,zero,19
+83 20 01 00	# lw	ra,0(sp)
+13 01 01 01	# addi	sp,sp,16
+6F F0 DF BB	# jal	zero,emit_i_inst
+
+# do_i_shift:
+13 01 C1 FE	# addi	sp,sp,-20
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp)
+23 24 C1 00	# sw	a2,8(sp)
+EF F0 0F F5	# jal	ra,read_reg_op
+23 26 A1 00	# sw	a0,12(sp) ; rd
+EF F0 8F F4	# jal	ra,read_reg_op
+23 28 A1 00	# sw	a0,16(sp) ; rs1
+EF F0 4F F7	# jal	ra,read_imm_op
+13 77 F5 01	# andi	a4,a0,31 ; shamt
+83 22 81 00	# lw	t0,8(sp) ; f7
+93 F2 F2 07	# andi	t0,t0,127
+93 92 52 00	# slli	t0,t0,0x5
+33 67 57 00	# or	a4,a4,t0 ; imm = (f7<<5)|shamt
+83 26 41 00	# lw	a3,4(sp) ; f3
+03 26 01 01	# lw	a2,16(sp) ; rs1
+83 25 C1 00	# lw	a1,12(sp) ; rd
+13 05 30 01	# addi	a0,zero,19
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 01	# addi	sp,sp,20
+6F F0 9F B6	# jal	zero,emit_i_inst
+
+# do_i_load:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp)
+EF F0 0F F0	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp) ; rd
+EF F0 CF F5	# jal	ra,read_mem_op ; a0=imm, a1=rs1
+13 07 05 00	# addi	a4,a0,0 ; imm
+13 86 05 00	# addi	a2,a1,0 ; rs1
+83 26 41 00	# lw	a3,4(sp) ; f3
+83 25 81 00	# lw	a1,8(sp) ; rd
+13 05 30 00	# addi	a0,zero,3
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 1F B3	# jal	zero,emit_i_inst
+
+# do_s:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp)
+EF F0 8F EC	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp) ; rs2
+EF F0 4F F2	# jal	ra,read_mem_op ; a0=imm, a1=rs1
+13 07 05 00	# addi	a4,a0,0 ; imm
+93 85 05 00	# addi	a1,a1,0 ; rs1
+03 26 81 00	# lw	a2,8(sp) ; rs2
+83 26 41 00	# lw	a3,4(sp) ; f3
+13 05 30 02	# addi	a0,zero,35
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 1F B7	# jal	zero,emit_s_inst
+
+# do_b:
+13 01 01 FF	# addi	sp,sp,-16
+23 20 11 00	# sw	ra,0(sp)
+23 22 B1 00	# sw	a1,4(sp)
+EF F0 0F E9	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp) ; rs1
+EF F0 8F E8	# jal	ra,read_reg_op
+23 26 A1 00	# sw	a0,12(sp) ; rs2
+13 05 00 00	# addi	a0,zero,0 ; slot_type B
+EF F0 4F F0	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0 ; offset
+83 26 41 00	# lw	a3,4(sp) ; f3
+83 25 81 00	# lw	a1,8(sp) ; rs1
+03 26 C1 00	# lw	a2,12(sp) ; rs2
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 01 01	# addi	sp,sp,16
+6F F0 9F C3	# jal	zero,emit_branch_auto
+
+# do_u_lui:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 0F E5	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF E7	# jal	ra,read_imm_op
+13 06 05 00	# addi	a2,a0,0
+83 25 41 00	# lw	a1,4(sp)
+13 05 70 03	# addi	a0,zero,55
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 DF A6	# jal	zero,emit_u_inst
+
+# do_u_auipc:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F E2	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 0F E5	# jal	ra,read_imm_op
+13 06 05 00	# addi	a2,a0,0
+83 25 41 00	# lw	a1,4(sp)
+13 05 70 01	# addi	a0,zero,23
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 1F A4	# jal	zero,emit_u_inst
+
+# do_j_jal:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF E0 5F CC	# jal	ra,read_token
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+EF E0 1F F9	# jal	ra,parse_reg
+93 02 F0 FF	# addi	t0,zero,-1
+63 18 55 00	# bne	a0,t0,jal_have_rd
+
+# Not a register → default rd=ra, pushback
+13 05 10 00	# addi	a0,zero,1
+93 02 10 00	# addi	t0,zero,1
+23 2E 5D 1C	# sw	t0,476(s10)
+
+# jal_have_rd:
+23 22 A1 00	# sw	a0,4(sp)
+13 05 10 00	# addi	a0,zero,1 ; slot_type J
+EF F0 4F E5	# jal	ra,read_br_target
+13 06 05 00	# addi	a2,a0,0 ; offset
+83 25 41 00	# lw	a1,4(sp) ; rd
+13 05 F0 06	# addi	a0,zero,111
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 9F B3	# jal	zero,emit_j_inst
+
+# do_i_jalr:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+EF F0 8F DA	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp) ; rd
+EF E0 DF C6	# jal	ra,read_token
+
+# Try parsing as register (3-operand form)
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+EF E0 9F F3	# jal	ra,parse_reg
+93 02 F0 FF	# addi	t0,zero,-1
+63 1E 55 00	# bne	a0,t0,jalr_3op
+
+# Not a register → must be imm(rs1) form
+13 05 0D 00	# addi	a0,s10,0
+93 05 04 00	# addi	a1,s0,0
+EF F0 CF 9E	# jal	ra,parse_mem
+13 07 05 00	# addi	a4,a0,0 ; imm
+13 86 05 00	# addi	a2,a1,0 ; rs1
+6F 00 40 01	# jal	zero,jalr_emit
+
+# jalr_3op:
+23 24 A1 00	# sw	a0,8(sp) ; rs1
+EF F0 0F DA	# jal	ra,read_imm_op
+13 07 05 00	# addi	a4,a0,0 ; imm
+03 26 81 00	# lw	a2,8(sp) ; rs1
+
+# jalr_emit:
+83 25 41 00	# lw	a1,4(sp) ; rd
+93 06 00 00	# addi	a3,zero,0 ; f3
+13 05 70 06	# addi	a0,zero,103
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 5F 9A	# jal	zero,emit_i_inst
+
+# do_ps_nop:
+13 05 30 01	# addi	a0,zero,19 ; addi x0, x0, 0
+6F F0 DF 95	# jal	zero,emit_word
+
+# do_ps_wfi:
+37 05 50 10	# lui	a0,0x10500 ; wfi encoding
+13 05 35 07	# addi	a0,a0,115
+6F F0 1F 95	# jal	zero,emit_word
+
+# do_ps_li:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF D2	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp) ; rd
+EF F0 CF C6	# jal	ra,read_multi_expr
+23 24 A1 00	# sw	a0,8(sp) ; imm
+
+# Check if fits in 12-bit signed
+83 22 81 00	# lw	t0,8(sp)
+13 03 F0 7F	# addi	t1,zero,2047
+63 46 53 02	# blt	t1,t0,li_two
+13 03 00 80	# addi	t1,zero,-2048
+63 C2 62 02	# blt	t0,t1,li_two
+
+# Single addi rd, x0, imm
+13 87 02 00	# addi	a4,t0,0
+93 06 00 00	# addi	a3,zero,0
+13 06 00 00	# addi	a2,zero,0
+83 25 41 00	# lw	a1,4(sp)
+13 05 30 01	# addi	a0,zero,19
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 5F 94	# jal	zero,emit_i_inst
+
+# lui rd, upper + addi rd, rd, lower
+# li_two:
+83 22 81 00	# lw	t0,8(sp)
+37 13 00 00	# lui	t1,0x1
+13 03 03 80	# addi	t1,t1,-2048
+B3 83 62 00	# add	t2,t0,t1
+93 D3 C3 40	# srai	t2,t2,0xc ; upper20
+83 25 41 00	# lw	a1,4(sp) ; rd
+13 86 03 00	# addi	a2,t2,0
+13 05 70 03	# addi	a0,zero,55 ; lui
+EF F0 5F 90	# jal	ra,emit_u_inst
+83 22 81 00	# lw	t0,8(sp)
+93 92 42 01	# slli	t0,t0,0x14
+93 D2 42 41	# srai	t0,t0,0x14 ; lower12
+13 87 02 00	# addi	a4,t0,0
+93 06 00 00	# addi	a3,zero,0
+03 26 41 00	# lw	a2,4(sp) ; rs1=rd
+83 25 41 00	# lw	a1,4(sp) ; rd
+13 05 30 01	# addi	a0,zero,19 ; addi
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 5F 8F	# jal	zero,emit_i_inst
+
+# do_ps_mv:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 0F C9	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp) ; rd
+EF F0 8F C8	# jal	ra,read_reg_op
+13 06 05 00	# addi	a2,a0,0 ; rs1
+83 25 41 00	# lw	a1,4(sp) ; rd
+13 07 00 00	# addi	a4,zero,0
+93 06 00 00	# addi	a3,zero,0
+13 05 30 01	# addi	a0,zero,19
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 1F 8C	# jal	zero,emit_i_inst
+
+# do_ps_j:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+13 05 10 00	# addi	a0,zero,1 ; slot_type J
+EF F0 0F CE	# jal	ra,read_br_target
+13 06 05 00	# addi	a2,a0,0
+93 05 00 00	# addi	a1,zero,0 ; rd = x0
+13 05 F0 06	# addi	a0,zero,111
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+6F F0 5F 9C	# jal	zero,emit_j_inst
+
+# do_ps_ret:
+13 07 00 00	# addi	a4,zero,0
+93 06 00 00	# addi	a3,zero,0
+13 06 10 00	# addi	a2,zero,1 ; rs1 = ra
+93 05 00 00	# addi	a1,zero,0 ; rd = x0
+13 05 70 06	# addi	a0,zero,103
+6F F0 1F 88	# jal	zero,emit_i_inst
+
+# do_ps_beqz:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF C1	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp) ; rs1
+13 05 00 00	# addi	a0,zero,0 ; slot_type B
+EF F0 8F C9	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+83 25 41 00	# lw	a1,4(sp) ; rs1
+13 06 00 00	# addi	a2,zero,0 ; rs2 = x0
+93 06 00 00	# addi	a3,zero,0 ; f3 = beq
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 DF 9C	# jal	zero,emit_branch_auto
+
+# do_ps_bnez:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F BE	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 0F C6	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+83 25 41 00	# lw	a1,4(sp)
+13 06 00 00	# addi	a2,zero,0
+93 06 10 00	# addi	a3,zero,1 ; f3 = bne
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 5F 99	# jal	zero,emit_branch_auto
+
+# do_ps_neg:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF BA	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 4F BA	# jal	ra,read_reg_op
+93 06 05 00	# addi	a3,a0,0 ; rs2
+13 06 00 00	# addi	a2,zero,0 ; rs1 = x0
+83 25 41 00	# lw	a1,4(sp) ; rd
+93 07 00 02	# addi	a5,zero,32 ; f7
+13 07 00 00	# addi	a4,zero,0 ; f3
+13 05 30 03	# addi	a0,zero,51
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 DF 80	# jal	zero,emit_r_inst
+
+# do_ps_not:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F B7	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF B6	# jal	ra,read_reg_op
+13 06 05 00	# addi	a2,a0,0 ; rs1
+83 25 41 00	# lw	a1,4(sp) ; rd
+13 07 F0 FF	# addi	a4,zero,-1 ; imm
+93 06 40 00	# addi	a3,zero,4 ; f3 = xori
+13 05 30 01	# addi	a0,zero,19
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 4F FA	# jal	zero,emit_i_inst
+
+# do_ps_seqz:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 0F B4	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 8F B3	# jal	ra,read_reg_op
+13 06 05 00	# addi	a2,a0,0
+83 25 41 00	# lw	a1,4(sp)
+13 07 10 00	# addi	a4,zero,1
+93 06 30 00	# addi	a3,zero,3 ; sltiu
+13 05 30 01	# addi	a0,zero,19
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 0F F7	# jal	zero,emit_i_inst
+
+# do_ps_snez:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF B0	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 4F B0	# jal	ra,read_reg_op
+93 06 05 00	# addi	a3,a0,0 ; rs2
+13 06 00 00	# addi	a2,zero,0 ; rs1 = x0
+83 25 41 00	# lw	a1,4(sp)
+93 07 00 00	# addi	a5,zero,0
+13 07 30 00	# addi	a4,zero,3 ; sltu
+13 05 30 03	# addi	a0,zero,51
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 CF F6	# jal	zero,emit_r_inst
+
+# do_ps_sltz:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F AD	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF AC	# jal	ra,read_reg_op
+13 06 05 00	# addi	a2,a0,0 ; rs1
+93 06 00 00	# addi	a3,zero,0 ; rs2 = x0
+83 25 41 00	# lw	a1,4(sp)
+93 07 00 00	# addi	a5,zero,0
+13 07 20 00	# addi	a4,zero,2 ; slt
+13 05 30 03	# addi	a0,zero,51
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 4F F3	# jal	zero,emit_r_inst
+
+# do_ps_sgtz:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF A9	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 4F A9	# jal	ra,read_reg_op
+93 06 05 00	# addi	a3,a0,0 ; rs2
+13 06 00 00	# addi	a2,zero,0 ; rs1 = x0
+83 25 41 00	# lw	a1,4(sp)
+93 07 00 00	# addi	a5,zero,0
+13 07 20 00	# addi	a4,zero,2 ; slt
+13 05 30 03	# addi	a0,zero,51
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 CF EF	# jal	zero,emit_r_inst
+
+# do_ps_bgt:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F A6	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF A5	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 8F AD	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+03 26 41 00	# lw	a2,4(sp) ; rs2 = first operand (swapped)
+83 25 81 00	# lw	a1,8(sp) ; rs1 = second operand (swapped)
+93 06 40 00	# addi	a3,zero,4 ; blt
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 DF 80	# jal	zero,emit_branch_auto
+
+# do_ps_ble:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F A2	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF A1	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 8F A9	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+03 26 41 00	# lw	a2,4(sp)
+83 25 81 00	# lw	a1,8(sp)
+93 06 50 00	# addi	a3,zero,5 ; bge
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 CF FC	# jal	zero,emit_branch_auto
+
+# do_ps_bgtu:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F 9E	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF 9D	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 8F A5	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+03 26 41 00	# lw	a2,4(sp)
+83 25 81 00	# lw	a1,8(sp)
+93 06 60 00	# addi	a3,zero,6 ; bltu
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 CF F8	# jal	zero,emit_branch_auto
+
+# do_ps_bleu:
+13 01 41 FF	# addi	sp,sp,-12
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F 9A	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+EF F0 CF 99	# jal	ra,read_reg_op
+23 24 A1 00	# sw	a0,8(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 8F A1	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+03 26 41 00	# lw	a2,4(sp)
+83 25 81 00	# lw	a1,8(sp)
+93 06 70 00	# addi	a3,zero,7 ; bgeu
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 C1 00	# addi	sp,sp,12
+6F F0 CF F4	# jal	zero,emit_branch_auto
+
+# do_ps_bltz:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F 96	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 0F 9E	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+83 25 41 00	# lw	a1,4(sp)
+13 06 00 00	# addi	a2,zero,0
+93 06 40 00	# addi	a3,zero,4 ; blt
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 4F F1	# jal	zero,emit_branch_auto
+
+# do_ps_bgez:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF 92	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp)
+13 05 00 00	# addi	a0,zero,0
+EF F0 8F 9A	# jal	ra,read_br_target
+13 07 05 00	# addi	a4,a0,0
+83 25 41 00	# lw	a1,4(sp)
+13 06 00 00	# addi	a2,zero,0
+93 06 50 00	# addi	a3,zero,5 ; bge
+13 05 30 06	# addi	a0,zero,99
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 CF ED	# jal	zero,emit_branch_auto
+
+# do_ps_lla:
+13 01 81 FF	# addi	sp,sp,-8
+23 20 11 00	# sw	ra,0(sp)
+EF F0 4F 8F	# jal	ra,read_reg_op
+23 22 A1 00	# sw	a0,4(sp) ; rd
+EF F0 4F EF	# jal	ra,rec_pcrel_pair
+83 25 41 00	# lw	a1,4(sp) ; rd
+13 06 00 00	# addi	a2,zero,0
+13 05 70 01	# addi	a0,zero,23 ; auipc
+EF F0 8F D1	# jal	ra,emit_u_inst
+83 25 41 00	# lw	a1,4(sp)
+13 86 05 00	# addi	a2,a1,0 ; rs1 = rd
+13 07 00 00	# addi	a4,zero,0
+93 06 00 00	# addi	a3,zero,0
+13 05 30 01	# addi	a0,zero,19 ; addi
+83 20 01 00	# lw	ra,0(sp)
+13 01 81 00	# addi	sp,sp,8
+6F F0 4F D1	# jal	zero,emit_i_inst
+
+# do_ps_call:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 8F EB	# jal	ra,rec_pcrel_pair
+93 05 10 00	# addi	a1,zero,1 ; rd = ra
+13 06 00 00	# addi	a2,zero,0
+13 05 70 01	# addi	a0,zero,23 ; auipc
+EF F0 CF CD	# jal	ra,emit_u_inst
+93 05 10 00	# addi	a1,zero,1 ; rd = ra
+13 06 10 00	# addi	a2,zero,1 ; rs1 = ra
+13 07 00 00	# addi	a4,zero,0
+93 06 00 00	# addi	a3,zero,0
+13 05 70 06	# addi	a0,zero,103 ; jalr
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+6F F0 8F CD	# jal	zero,emit_i_inst
+
+# do_ps_tail:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 CF E7	# jal	ra,rec_pcrel_pair
+93 05 60 00	# addi	a1,zero,6 ; rd = t1
+13 06 00 00	# addi	a2,zero,0
+13 05 70 01	# addi	a0,zero,23 ; auipc
+EF F0 0F CA	# jal	ra,emit_u_inst
+93 05 00 00	# addi	a1,zero,0 ; rd = x0
+13 06 60 00	# addi	a2,zero,6 ; rs1 = t1
+13 07 00 00	# addi	a4,zero,0
+93 06 00 00	# addi	a3,zero,0
+13 05 70 06	# addi	a0,zero,103 ; jalr
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+6F F0 CF C9	# jal	zero,emit_i_inst
+
+# do_ps_equ:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF E0 4F F0	# jal	ra,read_token ; name
+
+# Save name in symtab: zero 40 bytes, copy name, set kind=1
+93 03 0A 00	# addi	t2,s4,0
+13 0E 8A 02	# addi	t3,s4,40
+
+# equ_z:
+23 A0 03 00	# sw	zero,0(t2)
+93 83 43 00	# addi	t2,t2,4
+E3 9C C3 FF	# bne	t2,t3,equ_z
+93 03 0D 00	# addi	t2,s10,0
+13 0E 0A 00	# addi	t3,s4,0
+93 0E 04 00	# addi	t4,s0,0
+
+# equ_cp:
+63 8E 0E 00	# beq	t4,zero,equ_val
+03 CF 03 00	# lbu	t5,0(t2)
+23 00 EE 01	# sb	t5,0(t3)
+93 83 13 00	# addi	t2,t2,1
+13 0E 1E 00	# addi	t3,t3,1
+93 8E FE FF	# addi	t4,t4,-1
+6F F0 9F FE	# jal	zero,equ_cp
+
+# equ_val:
+EF E0 1F F4	# jal	ra,read_multi_expr
+23 20 AA 02	# sw	a0,32(s4) ; value
+93 02 10 00	# addi	t0,zero,1
+23 22 5A 02	# sw	t0,36(s4) ; kind = 1 (constant)
+13 0A 8A 02	# addi	s4,s4,40
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# do_ps_byte:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+
+# byte_lp:
+EF E0 9F F1	# jal	ra,read_multi_expr
+23 00 A9 00	# sb	a0,0(s2)
+13 09 19 00	# addi	s2,s2,1
+
+# Check if more values (eol_flag not set means more tokens on this line)
+83 22 8D 1D	# lw	t0,472(s10)
+E3 88 02 FE	# beq	t0,zero,byte_lp
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# do_ps_word:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+
+# word_lp:
+EF E0 1F EF	# jal	ra,read_multi_expr
+EF F0 CF BB	# jal	ra,emit_word
+83 22 8D 1D	# lw	t0,472(s10)
+E3 8A 02 FE	# beq	t0,zero,word_lp
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# do_ps_ascii:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF E0 0F E5	# jal	ra,read_token ; token = "content"
+
+# First char must be '"', skip it
+83 42 0D 00	# lbu	t0,0(s10)
+13 03 20 02	# addi	t1,zero,34
+63 96 62 0A	# bne	t0,t1,ascii_bad
+
+# We emit chars from index 1 to s0-2 (skip opening and closing quotes)
+# Token: "content" → bytes: '"', c, o, n, t, e, n, t, '"'
+# actually tokenizer includes closing quote as last char)
+# Process chars from s10+1 to s10+s0 (closing quote already stripped by tokenizer...
+93 03 1D 00	# addi	t2,s10,1 ; start
+33 0E 8D 00	# add	t3,s10,s0
+13 0E FE FF	# addi	t3,t3,-1 ; end (exclusive, before closing quote)
+
+# ascii_lp:
+63 88 C3 09	# beq	t2,t3,ascii_done
+83 C2 03 00	# lbu	t0,0(t2)
+13 03 C0 05	# addi	t1,zero,92
+63 8A 62 00	# beq	t0,t1,ascii_esc
+23 00 59 00	# sb	t0,0(s2)
+13 09 19 00	# addi	s2,s2,1
+93 83 13 00	# addi	t2,t2,1
+6F F0 5F FE	# jal	zero,ascii_lp
+
+# ascii_esc:
+93 83 13 00	# addi	t2,t2,1
+63 8C C3 07	# beq	t2,t3,ascii_bad
+83 C2 03 00	# lbu	t0,0(t2)
+13 03 E0 06	# addi	t1,zero,110
+63 88 62 02	# beq	t0,t1,ascii_n
+13 03 40 07	# addi	t1,zero,116
+63 88 62 02	# beq	t0,t1,ascii_t
+13 03 20 07	# addi	t1,zero,114
+63 88 62 02	# beq	t0,t1,ascii_r
+13 03 00 03	# addi	t1,zero,48
+63 88 62 02	# beq	t0,t1,ascii_0
+13 03 C0 05	# addi	t1,zero,92
+63 88 62 02	# beq	t0,t1,ascii_emit
+13 03 20 02	# addi	t1,zero,34
+63 84 62 02	# beq	t0,t1,ascii_emit
+6F 00 00 04	# jal	zero,ascii_bad
+
+# ascii_n:
+93 02 A0 00	# addi	t0,zero,10
+6F 00 C0 01	# jal	zero,ascii_emit
+
+# ascii_t:
+93 02 90 00	# addi	t0,zero,9
+6F 00 40 01	# jal	zero,ascii_emit
+
+# ascii_r:
+93 02 D0 00	# addi	t0,zero,13
+6F 00 C0 00	# jal	zero,ascii_emit
+
+# ascii_0:
+93 02 00 00	# addi	t0,zero,0
+6F 00 40 00	# jal	zero,ascii_emit
+
+# ascii_emit:
+23 00 59 00	# sb	t0,0(s2)
+13 09 19 00	# addi	s2,s2,1
+93 83 13 00	# addi	t2,t2,1
+6F F0 5F F7	# jal	zero,ascii_lp
+
+# ascii_done:
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# ascii_bad:
+13 05 80 01	# addi	a0,zero,24 ; E24: bad string
+6F E0 4F C4	# jal	zero,halt_err
+
+# do_ps_zero:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF E0 1F EF	# jal	ra,read_imm_op
+93 02 05 00	# addi	t0,a0,0
+
+# zero_lp:
+63 8A 02 00	# beq	t0,zero,zero_done
+23 00 09 00	# sb	zero,0(s2)
+13 09 19 00	# addi	s2,s2,1
+93 82 F2 FF	# addi	t0,t0,-1
+6F F0 1F FF	# jal	zero,zero_lp
+
+# zero_done:
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# do_ps_prologue:
+13 01 01 FC	# addi	sp,sp,-64
+23 2E 11 02	# sw	ra,60(sp)
+23 28 01 02	# sw	zero,48(sp) ; nregs = 0
+
+# prol_read:
+EF E0 9F E8	# jal	ra,read_reg_op
+63 04 05 02	# beq	a0,zero,prol_build ; x0 sentinel
+83 22 01 03	# lw	t0,48(sp)
+13 03 C0 00	# addi	t1,zero,12
+63 D8 62 10	# bge	t0,t1,prol_bad
+13 93 22 00	# slli	t1,t0,0x2
+33 03 61 00	# add	t1,sp,t1
+23 20 A3 00	# sw	a0,0(t1) ; regs[nregs]
+93 82 12 00	# addi	t0,t0,1
+23 28 51 02	# sw	t0,48(sp)
+6F F0 9F FD	# jal	zero,prol_read
+
+# prol_build:
+83 22 01 03	# lw	t0,48(sp) ; nregs
+13 83 12 00	# addi	t1,t0,1 ; +1 for ra
+13 13 23 00	# slli	t1,t1,0x2 ; bytes
+13 03 F3 00	# addi	t1,t1,15
+13 73 03 FF	# andi	t1,t1,-16 ; align to 16
+23 2A 61 02	# sw	t1,52(sp) ; frame_size
+
+# Save frame info at 108 + depth*60 offset in token area
+83 23 8D 06	# lw	t2,104(s10) ; frame_depth
+13 0E 50 00	# addi	t3,zero,5
+63 DA C3 0D	# bge	t2,t3,prol_bad
+
+# Compute offset: depth * 60 = depth * 64 - depth * 4
+13 9E 63 00	# slli	t3,t2,0x6 ; depth*64
+93 9E 23 00	# slli	t4,t2,0x2 ; depth*4
+33 0E DE 41	# sub	t3,t3,t4 ; depth*60
+33 0E AE 01	# add	t3,t3,s10
+13 0E CE 06	# addi	t3,t3,108 ; frame base
+23 20 6E 00	# sw	t1,0(t3) ; frame_size
+23 22 5E 00	# sw	t0,4(t3) ; nregs
+
+# Copy regs
+93 0E 01 00	# addi	t4,sp,0
+13 0F 8E 00	# addi	t5,t3,8
+93 8F 02 00	# addi	t6,t0,0
+
+# prol_cp:
+63 8E 0F 00	# beq	t6,zero,prol_cpd
+03 A5 0E 00	# lw	a0,0(t4)
+23 20 AF 00	# sw	a0,0(t5)
+93 8E 4E 00	# addi	t4,t4,4
+13 0F 4F 00	# addi	t5,t5,4
+93 8F FF FF	# addi	t6,t6,-1
+6F F0 9F FE	# jal	zero,prol_cp
+
+# prol_cpd:
+93 83 13 00	# addi	t2,t2,1
+23 24 7D 06	# sw	t2,104(s10) ; depth++
+
+# Emit: addi sp, sp, -frame_size
+03 23 41 03	# lw	t1,52(sp)
+33 07 60 40	# sub	a4,zero,t1
+93 06 00 00	# addi	a3,zero,0
+13 06 20 00	# addi	a2,zero,2 ; sp
+93 05 20 00	# addi	a1,zero,2 ; sp
+13 05 30 01	# addi	a0,zero,19
+EF F0 CF A2	# jal	ra,emit_i_inst
+
+# Emit: sw ra, 0(sp)
+13 07 00 00	# addi	a4,zero,0
+93 06 20 00	# addi	a3,zero,2 ; sw
+13 06 10 00	# addi	a2,zero,1 ; ra
+93 05 20 00	# addi	a1,zero,2 ; sp
+13 05 30 02	# addi	a0,zero,35
+EF F0 CF A8	# jal	ra,emit_s_inst
+
+# Emit: sw regs[i], (i+1)*4(sp)
+23 2C 01 02	# sw	zero,56(sp) ; i = 0
+
+# prol_emit:
+83 22 81 03	# lw	t0,56(sp)
+03 23 01 03	# lw	t1,48(sp)
+63 8C 62 02	# beq	t0,t1,prol_ret
+93 93 22 00	# slli	t2,t0,0x2
+B3 03 71 00	# add	t2,sp,t2
+03 A6 03 00	# lw	a2,0(t2) ; reg
+13 8E 12 00	# addi	t3,t0,1
+13 17 2E 00	# slli	a4,t3,0x2 ; offset = (i+1)*4
+93 06 20 00	# addi	a3,zero,2 ; sw
+93 05 20 00	# addi	a1,zero,2 ; sp
+13 05 30 02	# addi	a0,zero,35
+EF F0 8F A5	# jal	ra,emit_s_inst
+83 22 81 03	# lw	t0,56(sp)
+93 82 12 00	# addi	t0,t0,1
+23 2C 51 02	# sw	t0,56(sp)
+6F F0 5F FC	# jal	zero,prol_emit
+
+# prol_ret:
+83 20 C1 03	# lw	ra,60(sp)
+13 01 01 04	# addi	sp,sp,64
+67 80 00 00	# jalr	zero,0(ra)
+
+# prol_bad:
+13 05 90 01	# addi	a0,zero,25
+6F E0 0F AE	# jal	zero,halt_err
+
+# do_ps_epilogue:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+83 22 8D 06	# lw	t0,104(s10) ; frame_depth
+63 8C 02 0C	# beq	t0,zero,epil_bad
+93 82 F2 FF	# addi	t0,t0,-1
+23 24 5D 06	# sw	t0,104(s10)
+
+# Load frame info
+13 93 62 00	# slli	t1,t0,0x6
+93 93 22 00	# slli	t2,t0,0x2
+33 03 73 40	# sub	t1,t1,t2 ; depth*60
+33 03 A3 01	# add	t1,t1,s10
+13 03 C3 06	# addi	t1,t1,108
+83 23 03 00	# lw	t2,0(t1) ; frame_size
+03 2E 43 00	# lw	t3,4(t1) ; nregs
+
+# Emit: lw ra, 0(sp)
+13 07 00 00	# addi	a4,zero,0
+93 06 20 00	# addi	a3,zero,2 ; lw
+13 06 20 00	# addi	a2,zero,2 ; sp (base)
+93 05 10 00	# addi	a1,zero,1 ; rd = ra
+13 05 30 00	# addi	a0,zero,3
+EF F0 0F 97	# jal	ra,emit_i_inst
+
+# Recalculate frame pointer (t1 was clobbered by emit)
+# Emit: lw regs[i], (i+1)*4(sp)
+83 22 8D 06	# lw	t0,104(s10) ; current depth (already decremented)
+93 9E 62 00	# slli	t4,t0,0x6
+13 9F 22 00	# slli	t5,t0,0x2
+B3 8E EE 41	# sub	t4,t4,t5
+B3 8E AE 01	# add	t4,t4,s10
+93 8E CE 06	# addi	t4,t4,108
+03 AE 4E 00	# lw	t3,4(t4) ; nregs
+13 0F 00 00	# addi	t5,zero,0 ; i
+
+# epil_lp:
+63 0A CF 05	# beq	t5,t3,epil_end
+93 8F 8E 00	# addi	t6,t4,8
+93 18 2F 00	# slli	a7,t5,0x2
+B3 88 F8 01	# add	a7,a7,t6
+83 A5 08 00	# lw	a1,0(a7) ; rd = regs[i]
+93 0F 1F 00	# addi	t6,t5,1
+13 97 2F 00	# slli	a4,t6,0x2 ; offset = (i+1)*4
+93 06 20 00	# addi	a3,zero,2 ; lw
+13 06 20 00	# addi	a2,zero,2 ; sp
+13 05 30 00	# addi	a0,zero,3
+
+# save t3,t4,t5 across call
+13 01 41 FF	# addi	sp,sp,-12
+23 20 C1 01	# sw	t3,0(sp)
+23 22 D1 01	# sw	t4,4(sp)
+23 24 E1 01	# sw	t5,8(sp)
+EF F0 4F 91	# jal	ra,emit_i_inst
+03 2E 01 00	# lw	t3,0(sp)
+83 2E 41 00	# lw	t4,4(sp)
+03 2F 81 00	# lw	t5,8(sp)
+13 01 C1 00	# addi	sp,sp,12
+13 0F 1F 00	# addi	t5,t5,1
+6F F0 1F FB	# jal	zero,epil_lp
+
+# Emit: addi sp, sp, frame_size
+# epil_end:
+03 A7 0E 00	# lw	a4,0(t4) ; frame_size
+93 06 00 00	# addi	a3,zero,0
+13 06 20 00	# addi	a2,zero,2
+93 05 20 00	# addi	a1,zero,2
+13 05 30 01	# addi	a0,zero,19
+EF F0 4F 8E	# jal	ra,emit_i_inst
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# epil_bad:
+13 05 A0 01	# addi	a0,zero,26
+6F E0 4F 9F	# jal	zero,halt_err
+
+# do_ps_return:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+EF F0 DF F0	# jal	ra,do_ps_epilogue
+EF F0 DF 82	# jal	ra,do_ps_ret
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
+67 80 00 00	# jalr	zero,0(ra)
+
+# fixup_pass:
+93 82 0B 00	# addi	t0,s7,0 ; fixup iterator
+
+# fp_lp:
+63 88 82 15	# beq	t0,s8,fp_ret
+
+# Search symtab for matching name
+13 88 09 00	# addi	a6,s3,0
+
+# fp_sym:
+63 02 48 07	# beq	a6,s4,fp_noresolve
+
+# Compare 32-byte names
+13 83 02 00	# addi	t1,t0,0
+93 03 08 00	# addi	t2,a6,0
+13 0E 00 02	# addi	t3,zero,32
+
+# fp_cmp:
+83 4E 03 00	# lbu	t4,0(t1)
+03 CF 03 00	# lbu	t5,0(t2)
+63 92 EE 05	# bne	t4,t5,fp_skip
+13 03 13 00	# addi	t1,t1,1
+93 83 13 00	# addi	t2,t2,1
+13 0E FE FF	# addi	t3,t3,-1
+E3 14 0E FE	# bne	t3,zero,fp_cmp
+
+# Matched — resolve
+03 2F 08 02	# lw	t5,32(a6) ; symbol value
+83 AF 02 02	# lw	t6,32(t0) ; patch offset
+83 A8 42 02	# lw	a7,36(t0) ; slot_type
+B3 83 F4 01	# add	t2,s1,t6 ; patch addr
+13 0E 10 00	# addi	t3,zero,1
+63 86 C8 03	# beq	a7,t3,fp_enc_j
+13 0E 70 00	# addi	t3,zero,7
+63 82 C8 0B	# beq	a7,t3,fp_enc_uhi_pcrel
+13 0E 80 00	# addi	t3,zero,8
+63 86 C8 0D	# beq	a7,t3,fp_enc_ilo_pcrp
+13 05 20 01	# addi	a0,zero,18 ; E18: unknown fixup type
+6F E0 0F 97	# jal	zero,halt_err
+
+# fp_skip:
+13 08 88 02	# addi	a6,a6,40
+6F F0 1F FA	# jal	zero,fp_sym
+
+# fp_noresolve:
+13 05 10 01	# addi	a0,zero,17 ; E17: unresolved symbol
+6F E0 0F 96	# jal	zero,halt_err
+
+# fp_enc_j:
+33 0F FF 41	# sub	t5,t5,t6 ; PC-relative
+
+# Range check
+B7 08 10 00	# lui	a7,0x100 ; 0x100000
+63 46 1F 01	# blt	t5,a7,fpj_hi
+13 05 60 01	# addi	a0,zero,22
+6F E0 CF 94	# jal	zero,halt_err
+
+# fpj_hi:
+B3 08 10 41	# sub	a7,zero,a7
+63 56 1F 01	# bge	t5,a7,fpj_ok
+13 05 60 01	# addi	a0,zero,22
+6F E0 CF 93	# jal	zero,halt_err
+
+# fpj_ok:
+03 AE 03 00	# lw	t3,0(t2)
+
+# Clear imm bits: keep low 12 bits (rd + opcode)
+B7 1E 00 00	# lui	t4,0x1
+93 8E FE FF	# addi	t4,t4,-1 ; 0xFFF
+33 7E DE 01	# and	t3,t3,t4
+
+# Encode J-type imm
+93 5E 4F 01	# srli	t4,t5,0x14
+93 FE 1E 00	# andi	t4,t4,1
+93 9E FE 01	# slli	t4,t4,0x1f
+33 6E DE 01	# or	t3,t3,t4
+93 5E 1F 00	# srli	t4,t5,0x1
+93 08 F0 3F	# addi	a7,zero,1023
+B3 FE 1E 01	# and	t4,t4,a7
+93 9E 5E 01	# slli	t4,t4,0x15
+33 6E DE 01	# or	t3,t3,t4
+93 5E BF 00	# srli	t4,t5,0xb
+93 FE 1E 00	# andi	t4,t4,1
+93 9E 4E 01	# slli	t4,t4,0x14
+33 6E DE 01	# or	t3,t3,t4
+93 5E CF 00	# srli	t4,t5,0xc
+93 FE FE 0F	# andi	t4,t4,255
+93 9E CE 00	# slli	t4,t4,0xc
+33 6E DE 01	# or	t3,t3,t4
+23 A0 C3 01	# sw	t3,0(t2)
+6F 00 80 05	# jal	zero,fp_next
+
+# delta = symbol - patch_offset
+# fp_enc_uhi_pcrel:
+33 0F FF 41	# sub	t5,t5,t6
+03 AE 03 00	# lw	t3,0(t2)
+13 1E 4E 01	# slli	t3,t3,0x14
+13 5E 4E 01	# srli	t3,t3,0x14 ; clear bits 31:12
+B7 1E 00 00	# lui	t4,0x1
+93 DE 1E 00	# srli	t4,t4,0x1 ; 0x800
+33 0F DF 01	# add	t5,t5,t4
+13 5F CF 00	# srli	t5,t5,0xc
+13 1F CF 00	# slli	t5,t5,0xc
+33 6E EE 01	# or	t3,t3,t5
+23 A0 C3 01	# sw	t3,0(t2)
+6F 00 80 02	# jal	zero,fp_next
+
+# delta = symbol - (patch_offset - 4)
+# fp_enc_ilo_pcrp:
+93 8F CF FF	# addi	t6,t6,-4 ; auipc PC
+33 0F FF 41	# sub	t5,t5,t6
+03 AE 03 00	# lw	t3,0(t2)
+13 1E CE 00	# slli	t3,t3,0xc
+13 5E CE 00	# srli	t3,t3,0xc ; clear bits 31:20
+13 1F 4F 01	# slli	t5,t5,0x14 ; lo12 at bits 31:20
+33 6E EE 01	# or	t3,t3,t5
+23 A0 C3 01	# sw	t3,0(t2)
+6F 00 40 00	# jal	zero,fp_next
+
+# fp_next:
+93 82 82 02	# addi	t0,t0,40
+6F F0 5F EB	# jal	zero,fp_lp
+
+# fp_ret:
+67 80 00 00	# jalr	zero,0(ra)
+
+# dump_output:
+13 85 04 00	# addi	a0,s1,0
+
+# do_lp:
+63 00 25 03	# beq	a0,s2,do_ret
+83 42 05 00	# lbu	t0,0(a0)
+13 05 15 00	# addi	a0,a0,1
+
+# do_tx:
+03 CF 5A 00	# lbu	t5,5(s5)
+13 7F 0F 02	# andi	t5,t5,32
+E3 0C 0F FE	# beq	t5,zero,do_tx
+23 80 5A 00	# sb	t0,0(s5)
+6F F0 5F FE	# jal	zero,do_lp
+
+# do_ret:
+67 80 00 00	# jalr	zero,0(ra)
