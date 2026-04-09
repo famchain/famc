@@ -478,9 +478,9 @@ test_has_check() {
 	fi
 }
 
-test_has_check  "sp check emitted"        "x := 42; x"
-test_stack_ovf  "stack overflow detected"  "x := 1; y := 2; x + y"
-test_stack_ovf  "overflow on push"         "x := 42; x + 1"
+test_has_check  "sp check emitted"        "a := 1; b := 2; c := 3; d := 4; e := 5; a + b + c + d + e"
+test_stack_ovf  "stack overflow detected"  "a := 1; b := 2; c := 3; d := 4; e := 5; a + b + c + d + e"
+test_stack_ovf  "overflow on push"         "a := 1; b := 2; c := 3; d := 4; e := 5; a + b + c + d + e"
 
 # ============================================================================
 echo ""
