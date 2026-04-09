@@ -1187,8 +1187,15 @@ ep_num_chk:
 	j	ep_ident_chk
 
 ep_num_range:
-	# Find end of number: scan until non-alnum
+	# Find end of number: skip leading sign, then scan alnum
 	mv	t2, a0
+	lbu	t3, 0(t2)
+	li	t4, '-'
+	beq	t3, t4, ep_num_skipsign
+	li	t4, '+'
+	bne	t3, t4, ep_num_scan
+ep_num_skipsign:
+	addi	t2, t2, 1		# skip sign char
 ep_num_scan:
 	beq	t2, a1, ep_num_end
 	lbu	t3, 0(t2)

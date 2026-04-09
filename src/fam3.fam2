@@ -497,11 +497,11 @@ B3 02 8D 00	# add	t0,s10,s0
 13 03 A0 03	# addi	t1,zero,58
 63 D8 62 00	# bge	t0,t1,ml_named
 13 85 02 FD	# addi	a0,t0,-48
-EF 00 10 67	# jal	ra,def_local_label
+EF 00 90 68	# jal	ra,def_local_label
 6F 00 40 02	# jal	zero,ml_post
 
 # ml_named:
-EF 00 90 47	# jal	ra,define_label
+EF 00 10 49	# jal	ra,define_label
 6F 00 C0 01	# jal	zero,ml_post
 
 # ml_mnem:
@@ -514,7 +514,7 @@ EF 00 40 41	# jal	ra,find_mnem
 6F 00 00 03	# jal	zero,halt_err
 
 # ml_dispatch:
-EF 10 C0 0F	# jal	ra,dispatch
+EF 10 40 11	# jal	ra,dispatch
 
 # ml_post:
 83 42 0D 02	# lbu	t0,32(s10) ; sticky EOT flag
@@ -522,8 +522,8 @@ EF 10 C0 0F	# jal	ra,dispatch
 6F F0 5F F9	# jal	zero,main_loop
 
 # finish_all:
-EF 10 90 64	# jal	ra,fixup_pass
-EF 10 D0 79	# jal	ra,dump_output
+EF 10 10 66	# jal	ra,fixup_pass
+EF 10 50 7B	# jal	ra,dump_output
 
 # poweroff:
 B7 0A 10 00	# lui	s5,0x100
@@ -1252,12 +1252,12 @@ EF 00 00 02	# jal	ra,eval_primary
 # eval_primary:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-63 06 B5 12	# beq	a0,a1,ep_bad
+63 02 B5 14	# beq	a0,a1,ep_bad
 83 42 05 00	# lbu	t0,0(a0)
 
 # '(' → subexpression
 13 03 80 02	# addi	t1,zero,40
-63 8C 62 0E	# beq	t0,t1,ep_paren
+63 88 62 10	# beq	t0,t1,ep_paren
 
 # Digit or sign → number
 13 03 00 03	# addi	t1,zero,48
@@ -1266,16 +1266,24 @@ EF 00 00 02	# jal	ra,eval_primary
 63 8E 62 00	# beq	t0,t1,ep_num_range
 13 03 B0 02	# addi	t1,zero,43
 63 8A 62 00	# beq	t0,t1,ep_num_range
-6F 00 80 06	# jal	zero,ep_ident_chk
+6F 00 00 08	# jal	zero,ep_ident_chk
 
 # ep_num_chk:
 13 03 A0 03	# addi	t1,zero,58
 63 C4 62 00	# blt	t0,t1,ep_num_range
-6F 00 C0 05	# jal	zero,ep_ident_chk
+6F 00 40 07	# jal	zero,ep_ident_chk
 
-# Find end of number: scan until non-alnum
+# Find end of number: skip leading sign, then scan alnum
 # ep_num_range:
 93 03 05 00	# addi	t2,a0,0
+03 CE 03 00	# lbu	t3,0(t2)
+93 0E D0 02	# addi	t4,zero,45
+63 06 DE 01	# beq	t3,t4,ep_num_skipsign
+93 0E B0 02	# addi	t4,zero,43
+63 14 DE 01	# bne	t3,t4,ep_num_scan
+
+# ep_num_skipsign:
+93 83 13 00	# addi	t2,t2,1 ; skip sign char
 
 # ep_num_scan:
 63 82 B3 04	# beq	t2,a1,ep_num_end
@@ -1301,7 +1309,7 @@ EF 00 00 02	# jal	ra,eval_primary
 # ep_num_end:
 13 86 03 00	# addi	a2,t2,0 ; save new_ptr
 B3 85 A3 40	# sub	a1,t2,a0 ; len
-EF F0 9F C8	# jal	ra,parse_imm ; a0 = value
+EF F0 1F C7	# jal	ra,parse_imm ; a0 = value
 6F 00 40 09	# jal	zero,ep_ret
 
 # Char literal
@@ -1347,12 +1355,12 @@ EF 00 C0 06	# jal	ra,find_sym_ident
 # ep_char_go:
 13 86 03 00	# addi	a2,t2,0 ; new_ptr past closing quote
 B3 85 A3 40	# sub	a1,t2,a0 ; len
-EF F0 5F C1	# jal	ra,parse_imm
+EF F0 DF BF	# jal	ra,parse_imm
 6F 00 00 02	# jal	zero,ep_ret
 
 # ep_paren:
 13 05 15 00	# addi	a0,a0,1 ; skip '('
-EF F0 DF E7	# jal	ra,eval_expr
+EF F0 5F E6	# jal	ra,eval_expr
 63 00 B6 02	# beq	a2,a1,ep_bad
 83 42 06 00	# lbu	t0,0(a2)
 13 03 90 02	# addi	t1,zero,41
@@ -1366,7 +1374,7 @@ EF F0 DF E7	# jal	ra,eval_expr
 
 # ep_bad:
 13 05 50 00	# addi	a0,zero,5
-6F F0 0F EC	# jal	zero,halt_err
+6F F0 8F EA	# jal	zero,halt_err
 
 # find_sym_ident:
 13 01 41 FF	# addi	sp,sp,-12
@@ -1410,7 +1418,7 @@ EF 00 80 31	# jal	ra,find_sym ; a0=val, a1=kind, a2=found
 
 # fsi_bad:
 13 05 10 01	# addi	a0,zero,17 ; E17: unresolved symbol
-6F F0 8F E3	# jal	zero,halt_err
+6F F0 0F E2	# jal	zero,halt_err
 
 # read_multi_expr:
 13 01 81 FF	# addi	sp,sp,-8
@@ -1425,7 +1433,7 @@ B3 02 5D 00	# add	t0,s10,t0 ; buf base (14624 offset in token area)
 13 01 41 FF	# addi	sp,sp,-12
 23 20 51 00	# sw	t0,0(sp)
 23 22 61 00	# sw	t1,4(sp)
-EF F0 CF F5	# jal	ra,read_token
+EF F0 4F F4	# jal	ra,read_token
 83 22 01 00	# lw	t0,0(sp)
 03 23 41 00	# lw	t1,4(sp)
 13 01 C1 00	# addi	sp,sp,12
@@ -1464,7 +1472,7 @@ B3 83 62 00	# add	t2,t0,t1
 # rme_eval:
 13 85 02 00	# addi	a0,t0,0
 B3 85 62 00	# add	a1,t0,t1
-EF F0 DF D2	# jal	ra,eval_expr
+EF F0 5F D1	# jal	ra,eval_expr
 63 18 B6 00	# bne	a2,a1,rme_bad
 83 20 01 00	# lw	ra,0(sp)
 13 01 81 00	# addi	sp,sp,8
@@ -1472,19 +1480,19 @@ EF F0 DF D2	# jal	ra,eval_expr
 
 # rme_bad:
 13 05 50 00	# addi	a0,zero,5
-6F F0 0F D8	# jal	zero,halt_err
+6F F0 8F D6	# jal	zero,halt_err
 
 # read_reg_op:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-EF F0 4F EC	# jal	ra,read_token
+EF F0 CF EA	# jal	ra,read_token
 13 05 0D 00	# addi	a0,s10,0
 93 05 04 00	# addi	a1,s0,0
-EF F0 1F 99	# jal	ra,parse_reg
+EF F0 9F 97	# jal	ra,parse_reg
 93 02 F0 FF	# addi	t0,zero,-1
 63 16 55 00	# bne	a0,t0,rro_ok
 13 05 80 00	# addi	a0,zero,8 ; E08: bad register
-6F F0 8F D5	# jal	zero,halt_err
+6F F0 0F D4	# jal	zero,halt_err
 
 # rro_ok:
 83 20 01 00	# lw	ra,0(sp)
@@ -1494,10 +1502,10 @@ EF F0 1F 99	# jal	ra,parse_reg
 # read_imm_op:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-EF F0 0F E9	# jal	ra,read_token
+EF F0 8F E7	# jal	ra,read_token
 13 05 0D 00	# addi	a0,s10,0
 B3 05 8D 00	# add	a1,s10,s0
-EF F0 9F CC	# jal	ra,eval_expr
+EF F0 1F CB	# jal	ra,eval_expr
 63 18 B6 00	# bne	a2,a1,rio_bad
 83 20 01 00	# lw	ra,0(sp)
 13 01 41 00	# addi	sp,sp,4
@@ -1505,15 +1513,15 @@ EF F0 9F CC	# jal	ra,eval_expr
 
 # rio_bad:
 13 05 50 00	# addi	a0,zero,5
-6F F0 CF D1	# jal	zero,halt_err
+6F F0 4F D0	# jal	zero,halt_err
 
 # read_mem_op:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-EF F0 0F E6	# jal	ra,read_token
+EF F0 8F E4	# jal	ra,read_token
 13 05 0D 00	# addi	a0,s10,0
 93 05 04 00	# addi	a1,s0,0
-EF F0 5F BF	# jal	ra,parse_mem
+EF F0 DF BD	# jal	ra,parse_mem
 83 20 01 00	# lw	ra,0(sp)
 13 01 41 00	# addi	sp,sp,4
 67 80 00 00	# jalr	zero,0(ra)
@@ -1522,7 +1530,7 @@ EF F0 5F BF	# jal	ra,parse_mem
 13 01 81 FF	# addi	sp,sp,-8
 23 20 11 00	# sw	ra,0(sp)
 23 22 A1 00	# sw	a0,4(sp) ; slot_type
-EF F0 8F E3	# jal	ra,read_token
+EF F0 0F E2	# jal	ra,read_token
 
 # Local label ref? (len=2, digit + 'f'/'b')
 93 03 20 00	# addi	t2,zero,2
@@ -1594,7 +1602,7 @@ EF 00 40 1A	# jal	ra,record_fixup_arg
 # Must be numeric immediate
 13 05 0D 00	# addi	a0,s10,0
 93 05 04 00	# addi	a1,s0,0
-EF F0 9F 93	# jal	ra,parse_imm
+EF F0 1F 92	# jal	ra,parse_imm
 6F 00 00 03	# jal	zero,rbt_done
 
 # rbt_label:
@@ -1621,13 +1629,13 @@ EF 00 40 12	# jal	ra,record_fixup
 
 # rbt_bad:
 13 05 A0 00	# addi	a0,zero,10 ; E10: bad branch target
-6F F0 4F BD	# jal	zero,halt_err
+6F F0 CF BB	# jal	zero,halt_err
 
 # define_label:
 93 02 10 02	# addi	t0,zero,33 ; max s0 = 32 (31 chars + colon)
 63 46 54 00	# blt	s0,t0,dl_ok
 13 05 B0 00	# addi	a0,zero,11 ; E11: label too long
-6F F0 4F BC	# jal	zero,halt_err
+6F F0 CF BA	# jal	zero,halt_err
 
 # dl_ok:
 93 02 F4 FF	# addi	t0,s0,-1 ; position of ':'
@@ -1644,7 +1652,7 @@ EF 00 80 06	# jal	ra,find_sym
 13 01 81 00	# addi	sp,sp,8
 63 06 06 00	# beq	a2,zero,dl_new ; not found → OK
 13 05 C0 00	# addi	a0,zero,12 ; E12: duplicate label
-6F F0 0F B9	# jal	zero,halt_err
+6F F0 8F B7	# jal	zero,halt_err
 
 # Zero 40 bytes at s4
 # dl_new:
@@ -2008,7 +2016,7 @@ EF F0 1F E2	# jal	ra,emit_word
 # rec_pcrel_pair:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-EF F0 CF 8B	# jal	ra,read_token
+EF F0 4F 8A	# jal	ra,read_token
 
 # Record U_hi20_pcrel fixup for auipc
 13 05 0D 00	# addi	a0,s10,0
@@ -2207,7 +2215,7 @@ EF F0 9F C8	# jal	ra,record_fixup_arg
 
 # d_err:
 13 05 10 00	# addi	a0,zero,1
-6F E0 9F D6	# jal	zero,halt_err
+6F E0 1F D5	# jal	zero,halt_err
 
 # do_r:
 13 01 C1 FE	# addi	sp,sp,-20
@@ -2350,10 +2358,10 @@ EF F0 0F E5	# jal	ra,read_imm_op
 # do_j_jal:
 13 01 81 FF	# addi	sp,sp,-8
 23 20 11 00	# sw	ra,0(sp)
-EF E0 5F CC	# jal	ra,read_token
+EF E0 DF CA	# jal	ra,read_token
 13 05 0D 00	# addi	a0,s10,0
 93 05 04 00	# addi	a1,s0,0
-EF E0 1F F9	# jal	ra,parse_reg
+EF E0 9F F7	# jal	ra,parse_reg
 93 02 F0 FF	# addi	t0,zero,-1
 63 18 55 00	# bne	a0,t0,jal_have_rd
 
@@ -2378,19 +2386,19 @@ EF F0 4F E5	# jal	ra,read_br_target
 23 20 11 00	# sw	ra,0(sp)
 EF F0 8F DA	# jal	ra,read_reg_op
 23 22 A1 00	# sw	a0,4(sp) ; rd
-EF E0 DF C6	# jal	ra,read_token
+EF E0 5F C5	# jal	ra,read_token
 
 # Try parsing as register (3-operand form)
 13 05 0D 00	# addi	a0,s10,0
 93 05 04 00	# addi	a1,s0,0
-EF E0 9F F3	# jal	ra,parse_reg
+EF E0 1F F2	# jal	ra,parse_reg
 93 02 F0 FF	# addi	t0,zero,-1
 63 1E 55 00	# bne	a0,t0,jalr_3op
 
 # Not a register → must be imm(rs1) form
 13 05 0D 00	# addi	a0,s10,0
 93 05 04 00	# addi	a1,s0,0
-EF F0 CF 9E	# jal	ra,parse_mem
+EF F0 4F 9D	# jal	ra,parse_mem
 13 07 05 00	# addi	a4,a0,0 ; imm
 13 86 05 00	# addi	a2,a1,0 ; rs1
 6F 00 40 01	# jal	zero,jalr_emit
@@ -2787,7 +2795,7 @@ EF F0 0F CA	# jal	ra,emit_u_inst
 # do_ps_equ:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-EF E0 4F F0	# jal	ra,read_token ; name
+EF E0 CF EE	# jal	ra,read_token ; name
 
 # Save name in symtab: zero 40 bytes, copy name, set kind=1
 93 03 0A 00	# addi	t2,s4,0
@@ -2852,7 +2860,7 @@ E3 8A 02 FE	# beq	t0,zero,word_lp
 # do_ps_ascii:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-EF E0 0F E5	# jal	ra,read_token ; token = "content"
+EF E0 8F E3	# jal	ra,read_token ; token = "content"
 
 # First char must be '"', skip it
 83 42 0D 00	# lbu	t0,0(s10)
@@ -2924,7 +2932,7 @@ EF E0 0F E5	# jal	ra,read_token ; token = "content"
 
 # ascii_bad:
 13 05 80 01	# addi	a0,zero,24 ; E24: bad string
-6F E0 4F C4	# jal	zero,halt_err
+6F E0 CF C2	# jal	zero,halt_err
 
 # do_ps_zero:
 13 01 C1 FF	# addi	sp,sp,-4
@@ -3047,7 +3055,7 @@ EF F0 8F A5	# jal	ra,emit_s_inst
 
 # prol_bad:
 13 05 90 01	# addi	a0,zero,25
-6F E0 0F AE	# jal	zero,halt_err
+6F E0 8F AC	# jal	zero,halt_err
 
 # do_ps_epilogue:
 13 01 C1 FF	# addi	sp,sp,-4
@@ -3124,7 +3132,7 @@ EF F0 4F 8E	# jal	ra,emit_i_inst
 
 # epil_bad:
 13 05 A0 01	# addi	a0,zero,26
-6F E0 4F 9F	# jal	zero,halt_err
+6F E0 CF 9D	# jal	zero,halt_err
 
 # do_ps_return:
 13 01 C1 FF	# addi	sp,sp,-4
@@ -3173,7 +3181,7 @@ B3 83 F4 01	# add	t2,s1,t6 ; patch addr
 13 0E 80 00	# addi	t3,zero,8
 63 86 C8 0D	# beq	a7,t3,fp_enc_ilo_pcrp
 13 05 20 01	# addi	a0,zero,18 ; E18: unknown fixup type
-6F E0 0F 97	# jal	zero,halt_err
+6F E0 8F 95	# jal	zero,halt_err
 
 # fp_skip:
 13 08 88 02	# addi	a6,a6,40
@@ -3181,7 +3189,7 @@ B3 83 F4 01	# add	t2,s1,t6 ; patch addr
 
 # fp_noresolve:
 13 05 10 01	# addi	a0,zero,17 ; E17: unresolved symbol
-6F E0 0F 96	# jal	zero,halt_err
+6F E0 8F 94	# jal	zero,halt_err
 
 # fp_enc_j:
 33 0F FF 41	# sub	t5,t5,t6 ; PC-relative
@@ -3190,13 +3198,13 @@ B3 83 F4 01	# add	t2,s1,t6 ; patch addr
 B7 08 10 00	# lui	a7,0x100 ; 0x100000
 63 46 1F 01	# blt	t5,a7,fpj_hi
 13 05 60 01	# addi	a0,zero,22
-6F E0 CF 94	# jal	zero,halt_err
+6F E0 4F 93	# jal	zero,halt_err
 
 # fpj_hi:
 B3 08 10 41	# sub	a7,zero,a7
 63 56 1F 01	# bge	t5,a7,fpj_ok
 13 05 60 01	# addi	a0,zero,22
-6F E0 CF 93	# jal	zero,halt_err
+6F E0 4F 92	# jal	zero,halt_err
 
 # fpj_ok:
 03 AE 03 00	# lw	t3,0(t2)
@@ -3267,11 +3275,11 @@ B7 1E 00 00	# lui	t4,0x1
 
 # Emit q32 magic nop (0x13, 0x00, 0x00, 0x00) before output
 93 02 30 01	# addi	t0,zero,19
-EF E0 CF 9A	# jal	ra,wrch
+EF E0 4F 99	# jal	ra,wrch
 93 02 00 00	# addi	t0,zero,0
-EF E0 4F 9A	# jal	ra,wrch
-EF E0 0F 9A	# jal	ra,wrch
-EF E0 CF 99	# jal	ra,wrch
+EF E0 CF 98	# jal	ra,wrch
+EF E0 8F 98	# jal	ra,wrch
+EF E0 4F 98	# jal	ra,wrch
 13 85 04 00	# addi	a0,s1,0
 
 # do_lp:
