@@ -301,6 +301,16 @@ pd_done:
 .equ	R_S1,	9
 .equ	R_A0,	10
 .equ	R_A1,	11
+.equ	R_S2,	18
+.equ	R_S3,	19
+.equ	R_S4,	20
+.equ	R_S5,	21
+.equ	R_S6,	22
+.equ	R_S7,	23
+.equ	R_S8,	24
+.equ	R_S9,	25
+.equ	R_S10,	26
+.equ	MAX_RDEPTH,	9
 
 # Asm mnemonic classes
 .equ	MC_RTYPE,	1
@@ -384,7 +394,10 @@ pd_done:
 .equ	ST_STRT,	16
 .equ	ST_STYP,	20
 .equ	ST_MCRT,	24
-.equ	ST_DATA,	28
+.equ	ST_RDEPTH,	28
+.equ	ST_LPUSH,	32
+.equ	ST_LPREG,	36
+.equ	ST_DATA,	40
 
 # Macro table entry (12 bytes)
 .equ	MR_NOFF,	0
@@ -2756,12 +2769,42 @@ el_large:
 el_done:
 	return
 
-# em_push: emit push register onto stack with overflow check
-#   a0 = register number
-#   s8 = address of stack overflow handler in output buffer
+# em_push: push value onto register stack (s2-s10)
+#   a0 = source register number
+#   If depth < MAX_RDEPTH, emits mv to s-register (or nothing if same).
+#   Otherwise falls back to real stack push.
 em_push:
 	prologue s3 x0
 	mv	s3, a0
+	lw	t0, ST_RDEPTH(s1)
+	li	t1, MAX_RDEPTH
+	bge	t0, t1, ep_spill
+	# Register path: target = R_S2 + depth
+	addi	t1, t0, R_S2
+	addi	t0, t0, 1
+	sw	t0, ST_RDEPTH(s1)
+	beq	s3, t1, ep_push_nomv
+	# Emit: mv target, source (addi target, source, 0)
+	li	a0, 0
+	mv	a1, s3
+	li	a2, 0
+	mv	a3, t1
+	li	a4, 0x13
+	# Record peephole state: position before mv, source register
+	addi	t0, s0, 0
+	sw	t0, ST_LPUSH(s1)
+	sw	s3, ST_LPREG(s1)
+	jal	em_itype
+	j	ep_push_done
+ep_push_nomv:
+	# Same register — record position for peephole (no mv emitted)
+	sw	s0, ST_LPUSH(s1)
+	sw	s3, ST_LPREG(s1)
+	j	ep_push_done
+ep_spill:
+	# Real stack push (depth >= MAX_RDEPTH)
+	addi	t0, t0, 1
+	sw	t0, ST_RDEPTH(s1)
 	# addi sp, sp, -4
 	li	a0, -4
 	li	a1, R_SP
@@ -2769,7 +2812,7 @@ em_push:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
-	# bgeu sp, tp, +8 (no overflow, skip jal)
+	# bgeu sp, tp, +8
 	li	a0, 8
 	li	a1, R_SP
 	li	a2, R_TP
@@ -2786,13 +2829,56 @@ em_push:
 	li	a3, 2
 	li	a4, 0x23
 	jal	em_stype
+ep_push_done:
 	return
 
-# em_pop: emit pop from stack into register
-#   a0 = register number
+# em_pop: pop value from register stack (s2-s10)
+#   a0 = destination register number
+#   If depth < MAX_RDEPTH, emits mv from s-register (or nothing if same).
+#   Otherwise falls back to real stack pop.
 em_pop:
 	prologue s3 x0
 	mv	s3, a0
+	lw	t0, ST_RDEPTH(s1)
+	addi	t0, t0, -1
+	sw	t0, ST_RDEPTH(s1)
+	li	t1, MAX_RDEPTH
+	bge	t0, t1, ep_unspill
+	# Peephole: if last push's mv is still the last thing emitted, rewind
+	lw	t1, ST_LPUSH(s1)
+	beqz	t1, ep_pop_reg
+	beq	t1, s0, ep_pop_adj_nomv
+	addi	t2, t1, 4
+	bne	t2, s0, ep_pop_reg
+	# Adjacent (with mv): rewind the mv instruction
+	addi	s0, s0, -4
+ep_pop_adj_nomv:
+	# Adjacent (no mv or rewound): use original source register
+	sw	x0, ST_LPUSH(s1)
+	lw	t1, ST_LPREG(s1)
+	beq	s3, t1, ep_pop_done
+	# Emit mv dest, original_source
+	li	a0, 0
+	mv	a1, t1
+	li	a2, 0
+	mv	a3, s3
+	li	a4, 0x13
+	jal	em_itype
+	j	ep_pop_done
+ep_pop_reg:
+	# Non-adjacent: read from s-register
+	sw	x0, ST_LPUSH(s1)
+	addi	t1, t0, R_S2
+	beq	s3, t1, ep_pop_done
+	li	a0, 0
+	mv	a1, t1
+	li	a2, 0
+	mv	a3, s3
+	li	a4, 0x13
+	jal	em_itype
+	j	ep_pop_done
+ep_unspill:
+	# Real stack pop (depth was >= MAX_RDEPTH)
 	# lw reg, 0(sp)
 	li	a0, 0
 	li	a1, R_SP
@@ -2807,6 +2893,7 @@ em_pop:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+ep_pop_done:
 	return
 
 # em_var_load: emit code to load word from variable slot into register
@@ -2915,6 +3002,7 @@ pj_ok:
 	slli	t1, t1, 31
 	or	t0, t0, t1
 	sw	t0, 0(a0)
+	sw	x0, ST_LPUSH(s1)
 	ret
 
 # ============================================================================
@@ -3048,11 +3136,11 @@ pc_done:
 #   Returns a0 = symbol table pointer
 sym_init:
 	prologue s3 s4 x0
-	# 28 header + 256 * 16 entries = 4124
-	li	a0, 4124
+	# 40 header + 256 * 16 entries = 4136
+	li	a0, 4136
 	jal	alloc
 	mv	s3, a0
-	li	a1, 4124
+	li	a1, 4136
 	jal	memzero
 	li	t0, 256
 	sw	t0, ST_CAP(s3)
@@ -3109,6 +3197,12 @@ sym_def:
 	sw	t0, ST_STYP(t3)
 	lw	t0, ST_MCRT(s1)
 	sw	t0, ST_MCRT(t3)
+	lw	t0, ST_RDEPTH(s1)
+	sw	t0, ST_RDEPTH(t3)
+	lw	t0, ST_LPUSH(s1)
+	sw	t0, ST_LPUSH(t3)
+	lw	t0, ST_LPREG(s1)
+	sw	t0, ST_LPREG(t3)
 	# Copy entries (count * 16 bytes)
 	lw	t0, ST_CNT(s1)
 	slli	t0, t0, 4
@@ -3434,7 +3528,23 @@ ge_binop:
 	beq	s5, t0, ge_land
 	li	t0, NK_PIPE_PIPE
 	beq	s5, t0, ge_lor
-	# Generate LHS, save to frame slot
+	# Check if register-only path is possible (depth + 2 <= MAX_RDEPTH)
+	lw	t0, ST_RDEPTH(s1)
+	li	t1, 8
+	bge	t0, t1, gbo_frame
+	# Register path: LHS and RHS both stay in s-registers
+	lw	a0, N_FIRST_CHILD(s3)
+	jal	gen_expr
+	lw	t0, N_FIRST_CHILD(s3)
+	lw	a0, N_NEXT_SIB(t0)
+	jal	gen_expr
+	li	a0, R_T1
+	jal	em_pop
+	li	a0, R_T0
+	jal	em_pop
+	j	gbo_dispatch
+gbo_frame:
+	# Frame-slot path: LHS saved to stack while RHS is generated
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
 	li	a0, R_T0
@@ -3459,17 +3569,14 @@ ge_binop:
 	mv	a0, s6
 	li	a1, R_T0
 	jal	em_var_store
-	# Generate RHS
 	lw	t0, N_FIRST_CHILD(s3)
 	lw	a0, N_NEXT_SIB(t0)
 	jal	gen_expr
-	# Pop RHS into t1, load LHS from frame slot into t0
 	li	a0, R_T1
 	jal	em_pop
 	mv	a0, s6
 	li	a1, R_T0
 	jal	em_var_load
-	# Reclaim frame slot (restore ST_NEXT, emit addi sp, sp, 4)
 	addi	s6, s6, 4
 	sw	s6, ST_NEXT(s1)
 	li	a0, 4
@@ -3478,6 +3585,7 @@ ge_binop:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
+gbo_dispatch:
 	# Dispatch on operator kind
 	li	t0, NK_PLUS
 	beq	s5, t0, gbo_add
@@ -4542,17 +4650,9 @@ gbl_child:
 	mv	a0, s7
 	jal	gen_expr
 	beq	s7, s6, gbl_end
-	# Asm blocks: rewind dummy li+push (20 bytes) instead of pop
-	lw	t0, N_KIND(s7)
-	li	t1, NK_ASM
-	bne	t0, t1, gbl_pop
-	addi	s0, s0, -20
-	j	gbl_next
-gbl_pop:
 	# pop intermediate value
 	li	a0, R_T0
 	jal	em_pop
-gbl_next:
 	lw	s7, N_NEXT_SIB(s7)
 	j	gbl_child
 gbl_end:
@@ -6431,8 +6531,9 @@ ge_closure:
 	li	a0, 0
 	li	a1, R_T0
 	jal	em_jtype
-	# Emit prologue: save ra, s0, s1; set s0=sp (with tp check)
-	li	a0, -12
+	# Emit prologue: save ra, s0, s1, s2-s10; set s0=sp (with tp check)
+	# Frame: 48 bytes (12 regs * 4)
+	li	a0, -48
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
@@ -6446,24 +6547,42 @@ ge_closure:
 	sub	a0, s8, s0
 	li	a1, R_ZERO
 	jal	em_jtype
-	li	a0, 8
+	# sw ra, 44(sp)
+	li	a0, 44
 	li	a1, 1
 	li	a2, R_SP
 	li	a3, 2
 	li	a4, 0x23
 	jal	em_stype
-	li	a0, 4
+	# sw s0, 40(sp)
+	li	a0, 40
 	li	a1, R_S0
 	li	a2, R_SP
 	li	a3, 2
 	li	a4, 0x23
 	jal	em_stype
-	li	a0, 0
+	# sw s1, 36(sp)
+	li	a0, 36
 	li	a1, R_S1
 	li	a2, R_SP
 	li	a3, 2
 	li	a4, 0x23
 	jal	em_stype
+	# sw s2-s10, 32..0(sp)
+	li	s6, R_S2
+	li	s7, 32
+gc_sv_s:
+	mv	a0, s7
+	mv	a1, s6
+	li	a2, R_SP
+	li	a3, 2
+	li	a4, 0x23
+	jal	em_stype
+	addi	s6, s6, 1
+	addi	s7, s7, -4
+	li	t0, R_S10
+	bge	t0, s6, gc_sv_s
+	# mv s0, sp
 	li	a0, 0
 	li	a1, R_SP
 	li	a2, 0
@@ -7940,9 +8059,9 @@ aa_fdone:
 	return
 
 # em_epilogue: emit closure/function epilogue
-#   mv sp,s0; lw s1,0(sp); lw s0,4(sp); lw ra,8(sp); addi sp,12; ret
+#   mv sp,s0; lw s10-s2; lw s1; lw s0; lw ra; addi sp,48; ret
 em_epilogue:
-	prologue x0
+	prologue s3 s4 x0
 	# mv sp, s0
 	li	a0, 0
 	li	a1, R_S0
@@ -7950,29 +8069,43 @@ em_epilogue:
 	li	a3, R_SP
 	li	a4, 0x13
 	jal	em_itype
-	# lw s1, 0(sp)
-	li	a0, 0
+	# lw s10..s2, 0..32(sp)
+	li	s3, R_S10
+	li	s4, 0
+ee_rest_s:
+	mv	a0, s4
+	li	a1, R_SP
+	li	a2, 2
+	mv	a3, s3
+	li	a4, 0x03
+	jal	em_itype
+	addi	s3, s3, -1
+	addi	s4, s4, 4
+	li	t0, R_S2
+	bge	s3, t0, ee_rest_s
+	# lw s1, 36(sp)
+	li	a0, 36
 	li	a1, R_SP
 	li	a2, 2
 	li	a3, R_S1
 	li	a4, 0x03
 	jal	em_itype
-	# lw s0, 4(sp)
-	li	a0, 4
+	# lw s0, 40(sp)
+	li	a0, 40
 	li	a1, R_SP
 	li	a2, 2
 	li	a3, R_S0
 	li	a4, 0x03
 	jal	em_itype
-	# lw ra, 8(sp)
-	li	a0, 8
+	# lw ra, 44(sp)
+	li	a0, 44
 	li	a1, R_SP
 	li	a2, 2
 	li	a3, 1
 	li	a4, 0x03
 	jal	em_itype
-	# addi sp, sp, 12
-	li	a0, 12
+	# addi sp, sp, 48
+	li	a0, 48
 	li	a1, R_SP
 	li	a2, 0
 	li	a3, R_SP
@@ -8473,17 +8606,9 @@ cg_top_loop:
 	jal	gen_expr
 	lw	s6, N_NEXT_SIB(s5)
 	beqz	s6, cg_top_last
-	# Asm blocks: rewind dummy li+push instead of pop
-	lw	t0, N_KIND(s5)
-	li	t1, NK_ASM
-	bne	t0, t1, cg_top_pop
-	addi	s0, s0, -20
-	j	cg_top_next
-cg_top_pop:
 	# Pop intermediate result
 	li	a0, R_T0
 	jal	em_pop
-cg_top_next:
 	mv	s5, s6
 	j	cg_top_loop
 cg_top_last:
