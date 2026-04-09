@@ -3396,10 +3396,12 @@ ge_num:
 	lw	a1, N_LOC_LEN(s3)
 	jal	parse_int
 	mv	s5, a0
-	li	a0, R_T0
+	lw	t0, ST_RDEPTH(s1)
+	addi	s6, t0, R_S2
+	mv	a0, s6
 	mv	a1, s5
 	jal	em_li
-	li	a0, R_T0
+	mv	a0, s6
 	jal	em_push
 	j	ge_done
 
@@ -3410,10 +3412,12 @@ ge_char:
 	lw	a1, N_LOC_LEN(s3)
 	jal	parse_char
 	mv	s5, a0
-	li	a0, R_T0
+	lw	t0, ST_RDEPTH(s1)
+	addi	s6, t0, R_S2
+	mv	a0, s6
 	mv	a1, s5
 	jal	em_li
-	li	a0, R_T0
+	mv	a0, s6
 	jal	em_push
 	j	ge_done
 
@@ -3489,6 +3493,8 @@ gs_pad:
 
 # --- Identifier (variable reference) ---
 ge_ident:
+	lw	t0, ST_RDEPTH(s1)
+	addi	s6, t0, R_S2
 	lw	a0, N_LOC_OFF(s3)
 	lw	a1, N_LOC_LEN(s3)
 	jal	sym_try
@@ -3500,20 +3506,20 @@ ge_ident:
 	bge	a1, s11, gi_local
 	# Outer variable: record capture scope boundary
 	sw	s11, ST_CAPS(s1)
-	# Emit lw t0, slot(s1)
+	# Emit lw depth_reg, slot(s1)
 	mv	a0, s5
 	li	a1, R_S1
 	li	a2, 2
-	li	a3, R_T0
+	mv	a3, s6
 	li	a4, 0x03
 	jal	em_itype
 	j	gi_push
 gi_local:
 	mv	a0, s5
-	li	a1, R_T0
+	mv	a1, s6
 	jal	em_var_load
 gi_push:
-	li	a0, R_T0
+	mv	a0, s6
 	jal	em_push
 	j	ge_done
 
@@ -3532,12 +3538,13 @@ ge_binop:
 	lw	t0, ST_RDEPTH(s1)
 	li	t1, 8
 	bge	t0, t1, gbo_frame
-	# Register path: LHS and RHS both stay in s-registers
+	# Register path: LHS and RHS stay in s-registers
 	lw	a0, N_FIRST_CHILD(s3)
 	jal	gen_expr
 	lw	t0, N_FIRST_CHILD(s3)
 	lw	a0, N_NEXT_SIB(t0)
 	jal	gen_expr
+	# Pop into t1 (RHS) and t0 (LHS) for ALU dispatch
 	li	a0, R_T1
 	jal	em_pop
 	li	a0, R_T0
@@ -3784,7 +3791,6 @@ gbo_srl:
 	jal	em_rtype
 	j	gbo_push
 gbo_slt:
-	# a < b (signed): slt t0, t0, t1
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3793,7 +3799,6 @@ gbo_slt:
 	jal	em_rtype
 	j	gbo_push
 gbo_gt:
-	# a > b (signed): slt t0, t1, t0
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
@@ -3802,7 +3807,6 @@ gbo_gt:
 	jal	em_rtype
 	j	gbo_push
 gbo_lte:
-	# a <= b (signed): not(a > b) → slt t0, t1, t0; xori t0, t0, 1
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
@@ -3817,7 +3821,6 @@ gbo_lte:
 	jal	em_itype
 	j	gbo_push
 gbo_gte:
-	# a >= b (signed): not(a < b) → slt t0, t0, t1; xori t0, t0, 1
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3832,7 +3835,6 @@ gbo_gte:
 	jal	em_itype
 	j	gbo_push
 gbo_sltu:
-	# a <u b (unsigned): sltu t0, t0, t1
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3841,7 +3843,6 @@ gbo_sltu:
 	jal	em_rtype
 	j	gbo_push
 gbo_gtu:
-	# a >u b (unsigned): sltu t0, t1, t0
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
@@ -3850,7 +3851,6 @@ gbo_gtu:
 	jal	em_rtype
 	j	gbo_push
 gbo_lteu:
-	# a <=u b (unsigned): not(a >u b)
 	li	a0, 0
 	li	a1, R_T0
 	li	a2, R_T1
@@ -3865,7 +3865,6 @@ gbo_lteu:
 	jal	em_itype
 	j	gbo_push
 gbo_gteu:
-	# a >=u b (unsigned): not(a <u b)
 	li	a0, 0
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3880,7 +3879,6 @@ gbo_gteu:
 	jal	em_itype
 	j	gbo_push
 gbo_eq:
-	# sub t0, t0, t1; sltiu t0, t0, 1 (seqz)
 	li	a0, 0x20
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3895,7 +3893,6 @@ gbo_eq:
 	jal	em_itype
 	j	gbo_push
 gbo_ne:
-	# sub t0, t0, t1; sltu t0, x0, t0 (snez)
 	li	a0, 0x20
 	li	a1, R_T1
 	li	a2, R_T0
@@ -3912,7 +3909,6 @@ gbo_ne:
 
 # --- Multiply: t0 * t1 → t0 (shift-and-add) ---
 gbo_mul:
-	# Emit: li t2, 0; loop { if t1==0 break; if t1&1: t2+=t0; t0<<=1; t1>>=1 }; mv t0,t2
 	# 9 instructions, 36 bytes inline. t3=x28 as scratch.
 	li	a0, R_T2
 	li	a1, 0
