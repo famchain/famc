@@ -123,6 +123,7 @@
 #  Entry point — jump over embedded data tables
 # ══════════════════════════════════════════════════════════════════════════════
 _start:
+	nop				# q32 magic
 	jal	t0, after_mnem_tab	# t0 = &mnem_table (PC after jal)
 
 mnem_table:
@@ -1088,10 +1089,11 @@ pm_scan:
 	j	pm_scan
 pm_found:
 	sw	t2, 12(sp)		# paren position
-	# Parse immediate: ptr..ptr+t2
+	# Parse immediate: ptr..ptr+t2 (use eval_expr for symbol support)
 	mv	a0, t0
-	mv	a1, t2
-	jal	ra, parse_imm
+	add	a1, t0, t2		# end ptr = start + paren offset
+	jal	ra, eval_expr
+	bne	a2, a1, pm_bad		# must consume everything before '('
 	sw	a0, 16(sp)		# imm value
 	# Parse register: ptr+t2+1 .. ptr+len-1 (excluding closing ')')
 	lw	t0, 4(sp)
@@ -2726,12 +2728,17 @@ do_ps_byte:
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
 byte_lp:
-	jal	ra, read_multi_expr
+	jal	ra, read_imm_op		# single-token expression per value
 	sb	a0, 0(s2)
 	addi	s2, s2, 1
-	# Check if more values (eol_flag not set means more tokens on this line)
-	lw	t0, 472(s10)
+	# Check if more values: pending_nl or eol_flag means end of line
+	lw	t0, 480(s10)		# pending_nl (set when newline ends token)
+	bnez	t0, byte_done
+	lw	t0, 472(s10)		# eol_flag (set at start of next read_token)
+	bnez	t0, byte_done
+	lbu	t0, 32(s10)		# sticky EOT
 	beqz	t0, byte_lp
+byte_done:
 	lw	ra, 0(sp)
 	addi	sp, sp, 4
 	ret
@@ -2741,10 +2748,15 @@ do_ps_word:
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
 word_lp:
-	jal	ra, read_multi_expr
+	jal	ra, read_imm_op
 	jal	ra, emit_word
+	lw	t0, 480(s10)
+	bnez	t0, word_done
 	lw	t0, 472(s10)
+	bnez	t0, word_done
+	lbu	t0, 32(s10)
 	beqz	t0, word_lp
+word_done:
 	lw	ra, 0(sp)
 	addi	sp, sp, 4
 	ret
