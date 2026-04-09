@@ -14,6 +14,44 @@ write_byte:
 	sb	a0, 0(t0)
 	return
 
+# read_byte: read one byte from UART into a0. Spins until RX ready.
+read_byte:
+	prologue	t0 t1 x0
+	lui	t0, UART
+rb_poll:
+	lbu	t1, 5(t0)
+	andi	t1, t1, 1		# RX data ready (bit 0 of LSR)
+	beqz	t1, rb_poll
+	lbu	a0, 0(t0)
+	return
+
+# print_hex: print 32-bit value in a0 as "0xHHHHHHHH"
+print_hex:
+	prologue	s0 s1 t0 t1 t2 x0
+	mv	s0, a0			# save value
+	li	s1, 28			# shift (28,24,...,0)
+	li	a0, '0'
+	jal	write_byte
+	li	a0, 'x'
+	jal	write_byte
+ph_digit:
+	blt	s1, x0, ph_done
+	srl	a0, s0, s1
+	andi	a0, a0, 0xF
+	li	t0, 10
+	blt	a0, t0, ph_dec
+	addi	a0, a0, 55		# 'A'-10
+	j	ph_out
+ph_dec:
+	addi	a0, a0, '0'
+ph_out:
+	jal	write_byte
+	addi	s1, s1, -4
+	j	ph_digit
+ph_done:
+	return
+
+# exit the app with QEMU specific values (wfi as backup)
 exit:
 	lui	t0, 0x100
 	lui	t1, 5
@@ -23,16 +61,79 @@ exit:
 	wfi
 	j	1b
 
+read_data:
+	prologue	s0 s1 s2 x0
+	li	s0, 4
+	mv	s1, a0
+	mv	s2, s1
+
+1:
+	jal	read_byte
+	beq	a0, s0, 2f
+	sb	a0, 0(s1)
+	addi	s1, s1, 1
+	j	1b
+2:
+	sub	a0, s1, s2
+	return
+
+# write_data: write bytes from a0 (start) to a1 (end) to UART.
+write_data:
+	prologue	s0 s1 x0
+	mv	s0, a0			# cursor
+	mv	s1, a1			# end
+
+1:
+	bgeu	s0, s1, 2f
+	lbu	a0, 0(s0)
+	jal	write_byte
+	addi	s0, s0, 1
+	j	1b
+2:
+	return
+
+compile:
+	prologue	s0 s1 s2 x0
+	mv	s0, a0
+	mv	s1, a1
+	mv	s2, a1
+
+1:
+	bge	s0, s1, 2f
+	lb	t0, 0(s0)
+	sb	t0, 0(s2)
+	addi	s0, s0, 1
+	addi	s2, s2, 1
+	j	1b
+2:
+
+	mv	a0, s1
+	mv	a1, s2
+
+	return
+
 main:
+	# Setup the heap/stack
 	lla	gp, data
 	addi	gp, gp, 15
 	andi	gp, gp, -16
-	li	sp, 0x100000
+	li	sp, 0x4000000
 	add	sp, sp, gp
-	li	a0, 'x'
-	jal	write_byte
-	li	a0, '\n'
-	jal	write_byte
+
+	# Read data from UART
+	mv	a0, sp
+	jal	read_data
+
+	# Call compile
+	mv	a1, sp
+	add	a1, a1, a0
+	mv	a0, sp
+	jal	compile
+
+	# Write returned data to UART
+	jal	write_data
+
+	# Exit
 	j	exit
 
 data:
