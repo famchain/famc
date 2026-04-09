@@ -19,6 +19,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+
 # ────────────────────────────────�
 # file: fam1.S - stage 1 bootstrap assembler (GNU as reference)
 # RISC-V 32-bit Hex-to-Binary with Labels and Branch Fixups
@@ -53,8 +54,10 @@
 #   s9  = fixup table base
 #   s10 = fixup table write ptr
 #   t4  = high nibble accumulator (across loop iterations)
+
 # _start:
 13 00 00 00	# addi	zero,zero,0 ; q32 magic
+
 # ── Constants ──
 13 0B A0 00	# addi	s6,zero,10 ; '\n' and hex limit
 B7 0A 00 10	# lui	s5,0x10000 ; UART base 0x10000000
@@ -71,8 +74,6 @@ B7 2C 00 80	# lui	s9,0x80002 ; Fixup table  @ 0x80002000
 B7 34 00 80	# lui	s1,0x80003 ; Output buffer @ 0x80003000
 13 89 04 00	# addi	s2,s1,0
 
-# ─── Main Input Loop ───────────────────────�
-
 # loop:
 03 CF 5A 00	# lbu	t5,5(s5) ; UART status
 13 7F 1F 00	# andi	t5,t5,1 ; Data ready?
@@ -83,15 +84,14 @@ E3 0C 0F FE	# beq	t5,zero,loop
 63 14 63 01	# bne	t1,s6,not_nl
 13 0A 00 00	# addi	s4,zero,0
 
-# not_nl:
 # '#' starts comment
+# not_nl:
 13 0E 30 02	# addi	t3,zero,35
 63 14 C3 01	# bne	t1,t3,not_hash
 13 0A 10 00	# addi	s4,zero,1
 
-# not_hash:
-
 # EOT → resolve fixups and output
+# not_hash:
 13 0E 40 00	# addi	t3,zero,4
 63 02 C3 0D	# beq	t1,t3,resolve
 
@@ -118,8 +118,6 @@ E3 4E C3 FB	# blt	t1,t3,loop
 63 64 C3 01	# bltu	t1,t3,store ; 10–15 valid
 6F F0 5F FA	# jal	zero,loop ; invalid → skip
 
-# ─── Nibble Packing ────────────────────────
-
 # store:
 93 C9 19 00	# xori	s3,s3,1 ; Toggle high/low
 63 96 09 00	# bne	s3,zero,store_low ; Was high → now store low
@@ -131,9 +129,6 @@ B3 EE 6E 00	# or	t4,t4,t1 ; Pack high | low
 23 00 D9 01	# sb	t4,0(s2) ; Write byte
 13 09 19 00	# addi	s2,s2,1
 6F F0 5F F8	# jal	zero,loop
-
-# ─── Label Definition ───────────────────────�
-# Read 4 chars from UART, store (name, output_addr) in label table
 
 # label_def:
 13 0E 00 00	# addi	t3,zero,0 ; Byte counter
@@ -151,9 +146,6 @@ E3 10 5E FE	# bne	t3,t0,ld_poll
 23 22 2C 01	# sw	s2,4(s8) ; Record current output address
 13 0C 8C 00	# addi	s8,s8,8 ; Advance table pointer
 6F F0 1F F5	# jal	zero,loop
-
-# ─── Fixup Reference ───────────────────────�
-# Read 4 chars from UART, store (name, instr_addr) in fixup table
 
 # fixup_ref:
 13 0E 00 00	# addi	t3,zero,0 ; Byte counter
@@ -173,15 +165,11 @@ E3 10 5E FE	# bne	t3,t0,fu_poll
 13 0D 8D 00	# addi	s10,s10,8 ; Advance table pointer
 6F F0 9F F1	# jal	zero,loop
 
-# ─── Resolve Fixups ────────────────────────
-# Iterate fixup table, look up each name, patch the instruction
-
 # resolve:
 93 8F 0C 00	# addi	t6,s9,0 ; t6 = fixup iterator
 
 # res_loop:
 63 8A AF 0F	# beq	t6,s10,output ; All fixups done → output
-
 03 AE 0F 00	# lw	t3,0(t6) ; Fixup name (as word)
 83 A3 4F 00	# lw	t2,4(t6) ; Instruction address in output buf
 
@@ -202,80 +190,60 @@ E3 10 5E FE	# bne	t3,t0,fu_poll
 # Determine type from opcode byte
 03 CE 03 00	# lbu	t3,0(t2) ; Opcode byte of instruction
 13 7E FE 07	# andi	t3,t3,127
-
 93 02 30 06	# addi	t0,zero,99
 63 08 5E 00	# beq	t3,t0,patch_b ; B-type branch
 93 02 F0 06	# addi	t0,zero,111
 63 0E 5E 04	# beq	t3,t0,patch_j ; J-type jump
 6F 00 80 0A	# jal	zero,res_next ; Unknown → skip
 
-# ─── Patch B-type Immediate ─────────────────────�
-# B-type: imm[12|10:5] rs2 rs1 funct3 imm[4:1|11] opcode
-
 # patch_b:
 83 A2 03 00	# lw	t0,0(t2) ; Load instruction
 13 0E 00 00	# addi	t3,zero,0 ; Build encoded immediate
-
 93 5E C3 00	# srli	t4,t1,0xc ; imm[12] → inst[31]
 93 FE 1E 00	# andi	t4,t4,1
 93 9E FE 01	# slli	t4,t4,0x1f
 33 6E DE 01	# or	t3,t3,t4
-
 93 5E 53 00	# srli	t4,t1,0x5 ; imm[10:5] → inst[30:25]
 93 FE FE 03	# andi	t4,t4,63
 93 9E 9E 01	# slli	t4,t4,0x19
 33 6E DE 01	# or	t3,t3,t4
-
 93 5E 13 00	# srli	t4,t1,0x1 ; imm[4:1] → inst[11:8]
 93 FE FE 00	# andi	t4,t4,15
 93 9E 8E 00	# slli	t4,t4,0x8
 33 6E DE 01	# or	t3,t3,t4
-
 93 5E B3 00	# srli	t4,t1,0xb ; imm[11] → inst[7]
 93 FE 1E 00	# andi	t4,t4,1
 93 9E 7E 00	# slli	t4,t4,0x7
 33 6E DE 01	# or	t3,t3,t4
-
 B3 E2 C2 01	# or	t0,t0,t3 ; Merge immediate into instruction
 23 A0 53 00	# sw	t0,0(t2) ; Store patched instruction
 6F 00 40 05	# jal	zero,res_next
 
-# ─── Patch J-type Immediate ─────────────────────�
-# J-type: imm[20|10:1|11|19:12] rd opcode
-
 # patch_j:
 83 A2 03 00	# lw	t0,0(t2) ; Load instruction
 13 0E 00 00	# addi	t3,zero,0 ; Build encoded immediate
-
 93 5E 43 01	# srli	t4,t1,0x14 ; imm[20] → inst[31]
 93 FE 1E 00	# andi	t4,t4,1
 93 9E FE 01	# slli	t4,t4,0x1f
 33 6E DE 01	# or	t3,t3,t4
-
 93 5E 13 00	# srli	t4,t1,0x1 ; imm[10:1] → inst[30:21]
 93 FE FE 3F	# andi	t4,t4,1023
 93 9E 5E 01	# slli	t4,t4,0x15
 33 6E DE 01	# or	t3,t3,t4
-
 93 5E B3 00	# srli	t4,t1,0xb ; imm[11] → inst[20]
 93 FE 1E 00	# andi	t4,t4,1
 93 9E 4E 01	# slli	t4,t4,0x14
 33 6E DE 01	# or	t3,t3,t4
-
 93 5E C3 00	# srli	t4,t1,0xc ; imm[19:12] → inst[19:12]
 93 FE FE 0F	# andi	t4,t4,255
 93 9E CE 00	# slli	t4,t4,0xc
 33 6E DE 01	# or	t3,t3,t4
-
 B3 E2 C2 01	# or	t0,t0,t3 ; Merge immediate into instruction
 23 A0 53 00	# sw	t0,0(t2) ; Store patched instruction
-# fall through
 
 # res_next:
 93 8F 8F 00	# addi	t6,t6,8
 6F F0 1F F1	# jal	zero,res_loop
-
-# ─── Output ──────────────────────────�
 
 # output:
 63 80 24 03	# beq	s1,s2,shutdown ; Empty → exit
@@ -288,8 +256,6 @@ B3 E2 C2 01	# or	t0,t0,t3 ; Merge immediate into instruction
 E3 0C 03 FE	# beq	t1,zero,tx_poll
 23 80 CA 01	# sb	t3,0(s5) ; Send byte
 6F F0 5F FE	# jal	zero,output
-
-# ─── Shutdown ──────────────────────────
 
 # shutdown:
 B7 0A 10 00	# lui	s5,0x100 ; QEMU virt test device 0x100000
