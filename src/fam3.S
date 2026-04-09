@@ -3142,6 +3142,15 @@ fp_ret:
 # ══════════════════════════════════════════════════════════════════════════════
 
 dump_output:
+	addi	sp, sp, -4
+	sw	ra, 0(sp)
+	# Emit q32 magic nop (0x13, 0x00, 0x00, 0x00) before output
+	li	t0, 0x13
+	jal	ra, wrch
+	li	t0, 0
+	jal	ra, wrch
+	jal	ra, wrch
+	jal	ra, wrch
 	mv	a0, s1
 do_lp:
 	beq	a0, s2, do_ret
@@ -3154,4 +3163,6 @@ do_tx:
 	sb	t0, 0(s5)
 	j	do_lp
 do_ret:
+	lw	ra, 0(sp)
+	addi	sp, sp, 4
 	ret

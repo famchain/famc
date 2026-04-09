@@ -1525,6 +1525,31 @@ res_next:
 #  Output
 # ═══════════════════════════════════════════════════════════════════════
 output:
+	# Emit q32 magic nop (0x13, 0x00, 0x00, 0x00) before output
+	li	a0, 0x00000013
+	sb	a0, 0(s2)		# borrow s2 as scratch (output done)
+	srli	a0, a0, 8
+	sb	a0, 1(s2)
+	srli	a0, a0, 8
+	sb	a0, 2(s2)
+	srli	a0, a0, 8
+	sb	a0, 3(s2)
+	# Send magic 4 bytes from s2
+	mv	t3, s2
+	addi	a0, s2, 4
+tx_magic:
+	beq	t3, a0, output_lp
+	lbu	t4, 0(t3)
+	addi	t3, t3, 1
+tx_magic_poll:
+	lbu	t0, 5(s5)
+	andi	t0, t0, 0x20
+	beqz	t0, tx_magic_poll
+	sb	t4, 0(s5)
+	j	tx_magic
+
+	# Normal output loop
+output_lp:
 	beq	s1, s2, shutdown
 	lbu	t3, 0(s1)
 	addi	s1, s1, 1
@@ -1533,7 +1558,7 @@ tx_poll:
 	andi	t0, t0, 0x20
 	beqz	t0, tx_poll
 	sb	t3, 0(s5)
-	j	output
+	j	output_lp
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Shutdown

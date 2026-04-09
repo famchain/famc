@@ -3262,6 +3262,16 @@ B7 1E 00 00	# lui	t4,0x1
 67 80 00 00	# jalr	zero,0(ra)
 
 # dump_output:
+13 01 C1 FF	# addi	sp,sp,-4
+23 20 11 00	# sw	ra,0(sp)
+
+# Emit q32 magic nop (0x13, 0x00, 0x00, 0x00) before output
+93 02 30 01	# addi	t0,zero,19
+EF E0 CF 9A	# jal	ra,wrch
+93 02 00 00	# addi	t0,zero,0
+EF E0 4F 9A	# jal	ra,wrch
+EF E0 0F 9A	# jal	ra,wrch
+EF E0 CF 99	# jal	ra,wrch
 13 85 04 00	# addi	a0,s1,0
 
 # do_lp:
@@ -3277,4 +3287,6 @@ E3 0C 0F FE	# beq	t5,zero,do_tx
 6F F0 5F FE	# jal	zero,do_lp
 
 # do_ret:
+83 20 01 00	# lw	ra,0(sp)
+13 01 41 00	# addi	sp,sp,4
 67 80 00 00	# jalr	zero,0(ra)
