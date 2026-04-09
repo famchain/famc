@@ -50,16 +50,17 @@
 .equ	NK_GTU,		40
 .equ	NK_LTEU,	41
 .equ	NK_GTEU,	42
-.equ	NK_PLUS_EQ,	43
-.equ	NK_MINUS_EQ,	44
-.equ	NK_STAR_EQ,	45
-.equ	NK_SLASH_EQ,	46
-.equ	NK_PERCENT_EQ,	47
-.equ	NK_AMP_EQ,	48
-.equ	NK_PIPE_EQ,	49
-.equ	NK_CARET_EQ,	50
-.equ	NK_SHL_EQ,	51
-.equ	NK_SHR_EQ,	52
+.equ	NK_ASSIGN_MUT,	43
+.equ	NK_PLUS_EQ,	44
+.equ	NK_MINUS_EQ,	45
+.equ	NK_STAR_EQ,	46
+.equ	NK_SLASH_EQ,	47
+.equ	NK_PERCENT_EQ,	48
+.equ	NK_AMP_EQ,	49
+.equ	NK_PIPE_EQ,	50
+.equ	NK_CARET_EQ,	51
+.equ	NK_SHL_EQ,	52
+.equ	NK_SHR_EQ,	53
 
 # Keywords
 .equ	NK_LOOP,	60
@@ -880,6 +881,9 @@ tok_table:
 .zero	8
 .byte	NK_GTU, 2
 .ascii	">u"
+.zero	8
+.byte	NK_ASSIGN_MUT, 2
+.ascii	":="
 .zero	8
 .byte	NK_PLUS_EQ, 2
 .ascii	"+="
