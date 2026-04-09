@@ -1,4 +1,52 @@
+# UART constants
 .equ	UART, 0x10000
+
+# Node kinds (lexer tokens + AST nodes)
+.equ	NK_ERROR,	0
+.equ	NK_TERM,	1
+.equ	NK_SEMI,	2
+.equ	NK_COMMA,	3
+.equ	NK_COLON,	4
+.equ	NK_QMARK,	5
+.equ	NK_LPAREN,	6
+.equ	NK_RPAREN,	7
+.equ	NK_LBRACE,	8
+.equ	NK_RBRACE,	9
+.equ	NK_LBRACKET,	10
+.equ	NK_RBRACKET,	11
+
+.equ	NK_LOOP,	51
+.equ	NK_BREAK,	52
+
+# Trie node struct (1036 bytes)
+.equ	T_KIND,		0
+.equ	T_LEN,		4
+.equ	T_RESERVED,	8
+.equ	T_CHILDREN,	12
+.equ	T_NODE_SZ,	1036
+
+# Lexer state struct (20 bytes + root trie node)
+.equ	L_IN,		0
+.equ	L_END,		4
+.equ	L_OFF,		8
+.equ	L_LINE,		12
+.equ	L_COL_START,	16
+.equ	L_ROOT,		20
+.equ	L_SZ,		1056
+
+# Node struct (44 bytes)
+.equ	N_KIND,		0
+.equ	N_LOC_OFF,	4
+.equ	N_LOC_LEN,	8
+.equ	N_LOC_LINE,	12
+.equ	N_LOC_COL,	16
+.equ	N_PARENT,	20
+.equ	N_FIRST_CHILD,	24
+.equ	N_LAST_CHILD,	28
+.equ	N_NEXT_SIB,	32
+.equ	N_PREV_SIB,	36
+.equ	N_DATA,		40
+.equ	N_SZ,		44
 
 _start:
 	j	main
