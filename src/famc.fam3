@@ -448,6 +448,21 @@ str_expr:
 str_temp_exhausted:
 	.ascii	"internal compiler error: temp register pool exhausted\n"
 	.zero	2
+str_frame_too_large:
+	.ascii	"internal compiler error: stack frame exceeds 2047-byte offset limit\n"
+	.zero	4
+str_undef_var:
+	.ascii	"undefined variable"
+	.zero	2
+str_compound_todo:
+	.ascii	"compound assignment form not yet supported"
+	.zero	2
+str_binop_unsupported:
+	.ascii	"binary operator not supported (multiply/divide/modulo unavailable)"
+	.zero	2
+str_unknown_kind:
+	.ascii	"internal compiler error: unhandled node kind in gen_expr\n"
+	.zero	3
 
 # expect_tok: consume next token, error if not the expected kind.
 # a0 = lexer, a1 = expected NK_* kind, a2 = description string
@@ -1666,7 +1681,13 @@ px_block_close:
 	li	a1, NK_RBRACE
 	lla	a2, str_rbrace
 	jal	expect_tok
-	j	px_done
+	# Block expressions are not valid LHS for infix/postfix operators.
+	# Without this, `{ }@addr = ...` would parse as a postfix `@` on the
+	# block (NK_AT is registered as a postfix infix operator) and the
+	# whole `addr = ...` would be folded into a single expression with
+	# the block as the address operand. Skipping the infix loop ensures
+	# the block is returned as-is and the next statement starts fresh.
+	j	px_ret
 
 px_closure:
 	# |params| body
@@ -3529,7 +3550,14 @@ scope_add:
 
 # scope_find: look up variable by name
 # a0=ctx, a1=name_off, a2=name_len
-# Returns: a0=reg number (or -1), a1=stack offset
+# Returns:
+#   a0 = reg number (0..31) if the variable is bound to a register, or
+#   a0 = -1 if the variable is bound to a stack slot (a1 = stack offset), or
+#   a0 = -2 if the variable is not found in any enclosing scope.
+# Distinguishing -2 ("not found") from -1 ("stack") is essential: stack-
+# resident variables naturally have SC_REG == -1, so a single sentinel
+# would conflate reassignment of a stack var with declaration of a fresh
+# one, and would make it impossible to report undefined-variable errors.
 scope_find:
 	lw	t0, CG_SCOPE(a0)	# current scope
 	lw	t4, CG_INPUT(a0)	# input base
@@ -3560,7 +3588,7 @@ sf_next:
 	lw	t0, SC_PARENT(t0)
 	j	sf_loop
 sf_notfound:
-	li	a0, -1
+	li	a0, -2
 	ret
 
 # ── Expression codegen ───────────────────────────────────────────────
@@ -3595,7 +3623,11 @@ gen_expr:
 	li	t0, NK_PLUS
 	beq	s6, t0, ge_binop
 	li	t0, NK_MINUS
-	beq	s6, t0, ge_binop
+	beq	s6, t0, ge_minus	# may be unary or binary — disambiguate
+	li	t0, NK_SLASH
+	beq	s6, t0, ge_binop_unsupported
+	li	t0, NK_PERCENT
+	beq	s6, t0, ge_binop_unsupported
 	li	t0, NK_AND
 	beq	s6, t0, ge_binop
 	li	t0, NK_OR
@@ -3631,7 +3663,9 @@ gen_expr:
 	li	t0, NK_SEMI
 	beq	s6, t0, ge_semi
 
-	# Deref read: @expr, #expr, *expr (prefix unary with child = address)
+	# Deref read: @expr, #expr, *expr (prefix unary with child = address).
+	# NK_STAR doubles as binary multiply in source, so ge_deref rejects
+	# two-child nodes.
 	li	t0, NK_AT
 	beq	s6, t0, ge_deref_byte
 	li	t0, NK_HASH
@@ -3639,9 +3673,6 @@ gen_expr:
 	li	t0, NK_STAR
 	beq	s6, t0, ge_deref_word
 
-	# Unary minus: -expr
-	li	t0, NK_MINUS
-	beq	s6, t0, ge_unary_neg
 	# Unary not: !expr
 	li	t0, NK_BANG
 	beq	s6, t0, ge_unary_not
@@ -3649,12 +3680,18 @@ gen_expr:
 	li	t0, NK_TILDE
 	beq	s6, t0, ge_unary_bnot
 
-	# Compound assignment: += -= etc.
+	# Compound assignment: += -= *= /= %= &= |= ^= <<= >>=
+	# Multiply/divide/modulo variants (*= /= %=) reach ge_compound but
+	# are rejected there because the underlying binops aren't wired up.
 	li	t0, NK_PLUS_EQ
 	beq	s6, t0, ge_compound
 	li	t0, NK_MINUS_EQ
 	beq	s6, t0, ge_compound
 	li	t0, NK_STAR_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_SLASH_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_PERCENT_EQ
 	beq	s6, t0, ge_compound
 	li	t0, NK_AMP_EQ
 	beq	s6, t0, ge_compound
@@ -3667,10 +3704,28 @@ gen_expr:
 	li	t0, NK_SHR_EQ
 	beq	s6, t0, ge_compound
 
-	# Unknown — return 0 in x0
-	li	a0, 0
-	li	a1, 0
-	j	ge_ret
+	# Unknown node kind — loud internal compiler error rather than a
+	# silent "return 0". Anything reaching this point represents a
+	# language feature we haven't wired up yet (structs, arrays, ranges,
+	# function calls, etc.), and silently generating zero would be a
+	# nightmare to debug.
+	lla	a0, str_unknown_kind
+	jal	print_str
+	j	exit
+
+# ── NK_MINUS dispatch: unary (`-x`) or binary (`a - b`)? ─────────────
+ge_minus:
+	lw	t0, N_FIRST_CHILD(s0)
+	beqz	t0, ge_binop		# no child at all → let binop handler error
+	lw	t0, N_NEXT_SIB(t0)
+	beqz	t0, ge_unary_neg	# single child → unary minus
+	j	ge_binop		# two children → subtraction
+
+# ── Binary operator not supported (multiply/divide/modulo) ──────────
+ge_binop_unsupported:
+	mv	a0, s0
+	lla	a1, str_binop_unsupported
+	j	err_at
 
 # ── Number literal ───────────────────────────────────────────────────
 ge_number:
@@ -3763,7 +3818,9 @@ ge_ident:
 	lw	a2, N_LOC_LEN(s0)
 	mv	a0, s1
 	jal	scope_find
-	# a0 = reg number (or -1 if on stack), a1 = stack offset
+	# a0 = reg number (>= 0), -1 (stack), or -2 (undefined)
+	li	t0, -2
+	beq	a0, t0, ge_ident_undef
 	li	t0, -1
 	bne	a0, t0, ge_ident_reg
 	# Variable is on stack — load into a temp
@@ -3783,6 +3840,10 @@ ge_ident_reg:
 	# Variable in register
 	li	a1, 0			# not temporary
 	j	ge_ret
+ge_ident_undef:
+	mv	a0, s0			# node with LOC info for err_at
+	lla	a1, str_undef_var
+	j	err_at
 
 # ── Assignment ────────────────────────────────────────────────────────
 ge_assign:
@@ -3806,15 +3867,19 @@ ge_assign:
 	mv	s4, a0			# s4 = RHS reg
 	mv	s6, a1			# s6 = RHS is_temp flag
 
-	# Check if LHS is already in scope (= reassignment)
+	# Check if LHS is already in scope (= reassignment). scope_find returns
+	# -2 for "not found", -1 for "found on stack", or a reg number >= 0.
+	# The old code conflated -1 (stack) with -2 (not found) and incorrectly
+	# routed stack-var reassignment into ge_assign_new, which silently
+	# orphaned the original slot.
 	lw	a1, N_LOC_OFF(s3)
 	lw	a2, N_LOC_LEN(s3)
 	mv	a0, s1
 	jal	scope_find
-	li	t0, -1
+	li	t0, -2
 	beq	a0, t0, ge_assign_new
 
-	# Existing variable
+	# Existing variable: reg if >= 0, stack if -1
 	li	t0, -1
 	beq	a0, t0, ge_assign_exist_stk
 	# In register — move RHS to its register.
@@ -3893,6 +3958,15 @@ ge_an_stack:
 	# ge_assign_new before it jumped here). We reuse s6 as the slot
 	# offset and reload the temp flag from 0(sp) at the return.
 	lw	s6, CG_FRAME_OFF(s1)	# s6 = this slot's positive offset
+	# Enforce the 12-bit signed immediate limit on lw/sw: the new word
+	# slot occupies bytes [s6, s6+3], so s6 itself must fit in a signed
+	# 12-bit imm (max 2047), and s6 must leave room for the 4-byte word
+	# (so max usable offset is 2044). Beyond that, we'd have to emit an
+	# add-to-sp address-computation sequence, which is deferred until
+	# arrays/large structs motivate it. For now, fail loudly rather than
+	# silently miscompile.
+	li	t0, 2044
+	bgt	s6, t0, ge_an_stk_oflo
 	addi	t0, s6, 4		# new used-count
 	sw	t0, CG_FRAME_OFF(s1)
 	lw	t1, CG_FRAME_MAX(s1)
@@ -3920,6 +3994,10 @@ ge_an_stk_nomax:
 	addi	sp, sp, 4
 	mv	a0, s4
 	j	ge_ret
+ge_an_stk_oflo:
+	lla	a0, str_frame_too_large
+	jal	print_str
+	j	exit
 
 ge_assign_deref:
 	# s3 = LHS deref node, s4 = RHS node
@@ -4474,6 +4552,10 @@ ge_deref:
 	# Check if this is a read (has child = address) or has no child (error)
 	lw	a0, N_FIRST_CHILD(s0)
 	beqz	a0, ge_deref_err
+	# Reject two-child cases. NK_STAR doubles as binary multiply in
+	# source and would otherwise silently drop the RHS operand here.
+	lw	t0, N_NEXT_SIB(a0)
+	bnez	t0, ge_binop_unsupported
 	# Codegen address expression
 	mv	a1, s1
 	jal	gen_expr
@@ -4606,10 +4688,161 @@ ge_un3_ret:
 	li	a1, 1
 	j	ge_ret
 
-# ── Compound assignment: += -= etc. ──────────────────────────────────
+# ── Compound assignment: += -= &= |= ^= <<= >>= ─────────────────────
+# Supported shape: <ident> OP= <expr>. The LHS must be an identifier
+# that is already in scope; deref LHS (e.g. *p += 1) is not yet
+# implemented and falls through to a loud "not yet supported" error.
+# NK_STAR_EQ (*=) also errors because we have no multiplication binop
+# in codegen yet.
+#
+# Strategy: resolve LHS to either a register (operate in place) or a
+# stack slot (load → operate → store), codegen RHS, emit the matching
+# R-type op, then clean up. For a register LHS the emitted op writes
+# the result straight back into the variable's register, avoiding an
+# extra mv.
+#
+# Scratch (8 bytes on sp):
+#   0(sp): stack offset of LHS if on stack, or -1 sentinel if in reg
+#   4(sp): RHS temp flag (preserved across the post-emit cleanup)
 ge_compound:
-	# For now, treat like binop + assign (TODO: optimize)
+	# Pull out LHS and RHS nodes
+	lw	t0, N_FIRST_CHILD(s0)	# LHS node
+	lw	s4, N_NEXT_SIB(t0)	# RHS node
+	# LHS must be NK_IDENT for now
+	lw	t1, N_KIND(t0)
+	li	t2, NK_IDENT
+	bne	t1, t2, ge_cmpd_todo
+	# *= /= %= require multiply/divide/modulo, none of which have a
+	# binop in codegen yet — bounce them straight to the todo error.
+	li	t2, NK_STAR_EQ
+	beq	s6, t2, ge_cmpd_todo
+	li	t2, NK_SLASH_EQ
+	beq	s6, t2, ge_cmpd_todo
+	li	t2, NK_PERCENT_EQ
+	beq	s6, t2, ge_cmpd_todo
+	# Reserve scratch and look up LHS
+	addi	sp, sp, -8
+	lw	a1, N_LOC_OFF(t0)
+	lw	a2, N_LOC_LEN(t0)
+	mv	a0, s1
+	jal	scope_find
+	li	t0, -2
+	beq	a0, t0, ge_cmpd_undef
+	li	t0, -1
+	beq	a0, t0, ge_cmpd_loadstk
+	# LHS is a register variable — operate in place
+	mv	s3, a0			# s3 = var reg (dst = src1 of the op)
+	li	t0, -1
+	sw	t0, 0(sp)		# scratch[0] = -1 (not on stack)
+	j	ge_cmpd_got_lhs
+ge_cmpd_loadstk:
+	# LHS on stack — alloc a temp and emit an lw into it
+	sw	a1, 0(sp)		# save the stack offset
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s3, a0			# s3 = loaded-LHS temp (also dst of the op)
+	mv	a0, s3
+	li	a1, 2			# rs1 = sp
+	lw	a2, 0(sp)
+	jal	emit_lw
+ge_cmpd_got_lhs:
+	# Codegen RHS into s4, saving its temp flag to scratch[4]
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s4, a0
+	sw	a1, 4(sp)
+	# Pick (f3, f7) for the R-type op based on the compound kind
+	li	t0, NK_PLUS_EQ
+	bne	s6, t0, ge_cmpd_op1
+	li	a4, 0
+	li	a5, 0
+	j	ge_cmpd_op_emit
+ge_cmpd_op1:
+	li	t0, NK_MINUS_EQ
+	bne	s6, t0, ge_cmpd_op2
+	li	a4, 0
+	li	a5, 0x20
+	j	ge_cmpd_op_emit
+ge_cmpd_op2:
+	li	t0, NK_AMP_EQ
+	bne	s6, t0, ge_cmpd_op3
+	li	a4, 7
+	li	a5, 0
+	j	ge_cmpd_op_emit
+ge_cmpd_op3:
+	li	t0, NK_PIPE_EQ
+	bne	s6, t0, ge_cmpd_op4
+	li	a4, 6
+	li	a5, 0
+	j	ge_cmpd_op_emit
+ge_cmpd_op4:
+	li	t0, NK_CARET_EQ
+	bne	s6, t0, ge_cmpd_op5
+	li	a4, 4
+	li	a5, 0
+	j	ge_cmpd_op_emit
+ge_cmpd_op5:
+	li	t0, NK_SHL_EQ
+	bne	s6, t0, ge_cmpd_op6
+	li	a4, 1
+	li	a5, 0
+	j	ge_cmpd_op_emit
+ge_cmpd_op6:
+	li	t0, NK_SHR_EQ
+	bne	s6, t0, ge_cmpd_todo_pop
+	li	a4, 5
+	li	a5, 0
+ge_cmpd_op_emit:
+	# emit_r: a0=opcode, a1=rd, a2=rs1, a3=rs2, a4=f3, a5=f7
+	mv	a1, s3
+	mv	a2, s3
+	mv	a3, s4
+	li	a0, 0x33
+	jal	emit_r
+	# If LHS was on stack, store the result back and free the temp
+	lw	t0, 0(sp)
+	li	t1, -1
+	beq	t0, t1, ge_cmpd_no_store
+	li	a0, 2
+	mv	a1, s3
+	mv	a2, t0
+	jal	emit_sw
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_cmpd_no_store:
+	# Free RHS if it was a temp
+	lw	t0, 4(sp)
+	beqz	t0, ge_cmpd_done_free
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+ge_cmpd_done_free:
+	# Return value: reg var → return var reg (stable), stack var → x0
+	lw	t0, 0(sp)
+	li	t1, -1
+	addi	sp, sp, 8
+	beq	t0, t1, ge_cmpd_ret_reg
+	li	a0, 0
+	li	a1, 0
 	j	ge_ret
+ge_cmpd_ret_reg:
+	mv	a0, s3
+	li	a1, 0
+	j	ge_ret
+ge_cmpd_undef:
+	addi	sp, sp, 8
+	mv	a0, s0
+	lla	a1, str_undef_var
+	j	err_at
+ge_cmpd_todo_pop:
+	addi	sp, sp, 8
+	j	ge_cmpd_todo
+ge_cmpd_todo:
+	mv	a0, s0
+	lla	a1, str_compound_todo
+	j	err_at
 
 ge_ret:
 	return

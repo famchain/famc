@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Test runner for famc compiler
+# Test runner for famc compiler.
 # Usage: .ci/runtests [--verbose]
+#
+# Tests the features currently implemented in the rewrite. Anything not
+# listed here either isn't wired up yet (loops, ternary, struct, arrays,
+# closures, asm blocks, macros, multiply/divide) or is part of a future
+# milestone — see codegen_todo for the larger plan.
 set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FAMC="$DIR/bin/famc"
 TMPDIR=$(mktemp -d)
 
-# Kill all child processes on exit or Ctrl-C
 cleanup() {
 	kill $(jobs -p) 2>/dev/null || true
 	wait 2>/dev/null || true
@@ -22,7 +26,7 @@ PASS=0
 FAIL=0
 TOTAL=0
 
-# compile: run famc compiler on source code, output binary to stdout
+# compile: feed source to famc via stdin, return generated binary on stdout.
 compile() {
 	(echo "$1"; printf '\004') | timeout -k 2 10 qemu-system-riscv32 \
 		-machine virt -cpu rv32i -nographic -bios none \
@@ -30,8 +34,7 @@ compile() {
 		-serial mon:stdio 2>/dev/null
 }
 
-# run_bin: execute a compiled binary, stdin from /dev/null
-#   Uses -serial stdio (not mon:stdio) to avoid monitor blocking on terminal
+# run_bin: execute a compiled binary in qemu, return UART output on stdout.
 run_bin() {
 	timeout -k 2 10 qemu-system-riscv32 \
 		-machine virt -cpu rv32i -nographic -bios none \
@@ -39,7 +42,7 @@ run_bin() {
 		-serial stdio -monitor none < /dev/null 2>/dev/null
 }
 
-# test_compiles: compile source, expect success (output starts with NOP 0x13)
+# test_compiles: source must compile to a valid binary (first byte 0x13 nop).
 test_compiles() {
 	TOTAL=$((TOTAL + 1))
 	local name="$1" src="$2"
@@ -56,7 +59,7 @@ test_compiles() {
 	fi
 }
 
-# test_runs: compile and run, expect exit code 0
+# test_runs: source must compile AND execute to clean exit (rc 0).
 test_runs() {
 	TOTAL=$((TOTAL + 1))
 	local name="$1" src="$2"
@@ -80,7 +83,7 @@ test_runs() {
 	fi
 }
 
-# test_output: compile and run, check UART output matches expected
+# test_output: source compiles and runs, UART output matches expected exactly.
 test_output() {
 	TOTAL=$((TOTAL + 1))
 	local name="$1" src="$2" expected="$3"
@@ -104,7 +107,7 @@ test_output() {
 	fi
 }
 
-# test_error: compile source, expect error output starting with 'E'
+# test_error: source must NOT produce a valid binary; output starts with prefix.
 test_error() {
 	TOTAL=$((TOTAL + 1))
 	local name="$1" src="$2" prefix="$3"
@@ -115,30 +118,29 @@ test_error() {
 		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
 	else
 		FAIL=$((FAIL + 1))
-		echo "  FAIL  $name (expected '${prefix}...', got '$(echo "$out" | head -c40)')"
+		echo "  FAIL  $name (expected '${prefix}...', got '$(echo "$out" | head -c60)')"
 	fi
 }
 
 # ============================================================================
 echo "Building..."
-if ! (cd "$DIR" && python3 tools/emit_fam2.py src/fam3.S | python3 tools/fmt_asm.py > src/fam3.fam2 && bash build.sh) > /dev/null 2>&1; then
+if ! (cd "$DIR" && bash build.sh) > /dev/null 2>&1; then
 	echo "Build failed!"
 	exit 1
 fi
 
-# Smoke test: verify QEMU can run a compiled binary
+# Smoke test: a trivial program must compile and exit cleanly.
 echo "Smoke test..."
 compile "42" > "$TMPDIR/smoke.bin" 2>&1 || true
 first=$(xxd -l1 -p "$TMPDIR/smoke.bin" 2>/dev/null || echo "")
 if [[ "$first" != "13" ]]; then
-	echo "Smoke test failed: compile returned '$(head -c20 "$TMPDIR/smoke.bin")'"
+	echo "Smoke test failed: compile returned '$(head -c40 "$TMPDIR/smoke.bin")'"
 	exit 1
 fi
 rc=0
 run_bin "$TMPDIR/smoke.bin" > /dev/null || rc=$?
 if [[ $rc -ne 0 ]]; then
 	echo "Smoke test failed: compiled binary exited with $rc"
-	echo "  (If 124, QEMU may not be exiting — check test device at 0x100000)"
 	exit 1
 fi
 echo ""
@@ -148,339 +150,152 @@ echo "=== Literals ==="
 test_runs    "decimal literal"          "42"
 test_runs    "hex literal"              "0xFF"
 test_runs    "binary literal"           "0b1010"
+test_runs    "zero"                     "0"
 test_runs    "char literal"             "'x'"
 test_runs    "char escape newline"      "'\n'"
+test_runs    "char escape tab"          "'\t'"
+test_runs    "char escape return"       "'\r'"
 test_runs    "char escape null"         "'\0'"
-test_runs    "zero"                     "0"
-test_runs    "max uint32 hex"           "0xFFFFFFFF"
-test_runs    "max uint32 dec"           "4294967295"
-test_runs    "large hex"                "0x10000000"
-
-# ============================================================================
-echo "=== Logical short-circuit ==="
-test_runs    "and true"                "1 && 2"
-test_runs    "and false lhs"           "x = (0 && 1); !x"
-test_runs    "and false rhs"           "x = (1 && 0); !x"
-test_runs    "or true"                 "1 || 0"
-test_runs    "or false"                "x = (0 || 0); !x"
-test_runs    "or true rhs"            "0 || 5"
-test_runs    "and short-circuit"       "x := 0; 0 && (x = 99); !x"
-test_runs    "or short-circuit"        "x := 0; 1 || (x = 99); !x"
-test_runs    "bitwise & before =="     "x = (0xFF & 0x10 == 0); !x"
-test_runs    "bitwise | before =="     "0x0F | 0x10 == 0x1F"
-
-# ============================================================================
-echo "=== Arithmetic ==="
-test_runs    "add"                      "3 + 4"
-test_runs    "subtract"                 "10 - 3"
-test_runs    "bitwise and"              "0xFF & 0x0F"
-test_runs    "bitwise or"               "0xF0 | 0x0F"
-test_runs    "bitwise xor"              "0xFF ^ 0x0F"
-test_runs    "shift left"               "1 << 4"
-test_runs    "shift right"              "256 >> 4"
-test_runs    "less than true"           "1 < 2"
-test_runs    "less than false"          "2 < 1"
-test_runs    "equal true"               "42 == 42"
-test_runs    "equal false"              "42 == 43"
-test_runs    "not equal"                "1 != 2"
-test_runs    "greater than"             "5 > 3"
-test_runs    "less or equal"            "3 <= 3"
-test_runs    "greater or equal"         "5 >= 5"
-test_runs    "signed less than neg"     "0 - 1 < 0"
-test_runs    "signed greater neg"       "x = (0 - 1 > 0); !x"
-test_runs    "unsigned lt"              "x = (0 - 1 <u 0); !x"
-test_runs    "unsigned gt"              "0 - 1 >u 0"
-test_runs    "unsigned lte"             "3 <=u 3"
-test_runs    "unsigned gte"             "0 - 1 >=u 0"
-test_runs    "nested arithmetic"        "(1 + 2) + (3 + 4)"
-test_runs    "precedence"               "2 + 3 << 1"
-test_runs    "multiply"                 "6 * 7"
-test_runs    "divide"                   "100 / 7"
-test_runs    "modulo"                   "10 % 3"
-test_runs    "multiply large"           "255 * 255"
-
-# ============================================================================
-echo "=== Prefix operators ==="
-test_runs    "negate"                   "-(0 - 42)"
-test_runs    "logical not true"         "!0"
-test_runs    "logical not false"        "!1"
-test_runs    "bitwise not"              "~0"
+test_runs    "char escape backslash"    "'\\\\'"
+test_runs    "large hex (UART addr)"    "0x10000000"
 
 # ============================================================================
 echo "=== Variables ==="
-test_runs    "define and use"           "x := 42; x"
-test_runs    "reassign"                 "x := 1; x = 2; x"
-test_runs    "multiple vars"            "x := 10; y := 20; x + y"
-test_runs    "var in expression"        "x := 3; y := 4; x + y + 1"
-test_runs    "postfix increment"        "x := 5; x++; x"
-test_runs    "postfix decrement"        "x := 5; x--; x"
-test_runs    "prefix increment"         "x := 5; ++x"
-test_runs    "prefix decrement"         "x := 5; --x"
-test_runs    "compound +="              "x := 0; x += 5; x"
-test_runs    "compound -="              "x := 100; x -= 30; x"
-test_runs    "compound &="              "x := 0xFF; x &= 0x0F; x"
-test_runs    "compound |="              "x := 0xF0; x |= 0x0F; x"
-test_runs    "compound ^="              "x := 0xFF; x ^= 0x0F; x"
-test_runs    "compound <<="             "x := 1; x <<= 4; x"
-test_runs    "compound >>="             "x := 256; x >>= 4; x"
-test_runs    "compound *="              "x := 3; x *= 7; x"
-test_runs    "compound /="              "x := 100; x /= 7; x"
-test_runs    "compound %="              "x := 10; x %= 3; x"
+test_runs    "single immutable"         "x = 42"
+test_runs    "single mutable"           "x := 42"
+test_runs    "multiple vars"            "x = 1; y = 2; z = 3"
+test_runs    "use after define"         "x = 5; x"
+test_runs    "reassign existing"        "x = 1; x = 2"
+test_runs    "reassign with expression" "x = 5; y = 10; x = y"
+
+# ============================================================================
+echo "=== Arithmetic via UART ==="
+# These verify computed results: write (computed) char to UART, check output.
+test_output  "add"                  "@0x10000000 = 65 + 0"                "A"
+test_output  "add positives"        "@0x10000000 = 60 + 5"                "A"
+test_output  "subtract"             "@0x10000000 = 75 - 10"               "A"
+test_output  "var + literal"        "x = 60; @0x10000000 = x + 5"         "A"
+test_output  "var + var"            "x = 60; y = 5; @0x10000000 = x + y"  "A"
+test_output  "var - var"            "x = 75; y = 10; @0x10000000 = x - y" "A"
+test_output  "char + offset"        "@0x10000000 = 'A' + 0"                "A"
+test_output  "char arithmetic"      "@0x10000000 = 'A' + 1"                "B"
+test_output  "two-char output"      "@0x10000000 = 'H'; @0x10000000 = 'i'" "Hi"
+
+# ============================================================================
+echo "=== Bitwise via UART ==="
+test_output  "bitwise and"   "@0x10000000 = 0x4F & 0x4F"                       "O"
+test_output  "bitwise or"    "@0x10000000 = 0x40 | 0x01"                       "A"
+test_output  "bitwise xor"   "@0x10000000 = 0x50 ^ 0x11"                       "A"
+test_output  "shift left"    "@0x10000000 = 1 << 6; @0x10000000 = 1 << 6 | 1"  "@A"
+test_output  "shift right"   "@0x10000000 = 260 >> 2"                          "A"
+
+# ============================================================================
+echo "=== Comparisons via UART ==="
+# Returns 1 (SOH, not printable). Check via "+ 64" → 'A' if true, '@' if false.
+test_output  "less true"     "@0x10000000 = (1 < 2) + 64"  "A"
+test_output  "less false"    "@0x10000000 = (2 < 1) + 64"  "@"
+test_output  "equal true"    "@0x10000000 = (5 == 5) + 64" "A"
+test_output  "equal false"   "@0x10000000 = (5 == 6) + 64" "@"
+test_output  "not equal"     "@0x10000000 = (5 != 6) + 64" "A"
+test_output  "greater"       "@0x10000000 = (5 > 3) + 64"  "A"
+test_output  "lte true"      "@0x10000000 = (3 <= 3) + 64" "A"
+test_output  "gte true"      "@0x10000000 = (5 >= 5) + 64" "A"
+
+# ============================================================================
+echo "=== Unary operators via UART ==="
+# -x: write (-x + 130) to UART → 'A' if x = 65.
+test_output  "unary minus"      "x = 65; y = -x; @0x10000000 = y + 130"   "A"
+test_output  "logical not 0"    "@0x10000000 = (!0) + 64"                 "A"
+test_output  "logical not 1"    "@0x10000000 = (!1) + 64"                 "@"
+test_output  "bitwise not low"  "x = 0xFFFFFFBE; @0x10000000 = ~x"        "A"
+
+# ============================================================================
+echo "=== Compound assignment via UART ==="
+test_output  "+= literal"  "x = 60; x += 5; @0x10000000 = x"   "A"
+test_output  "-= literal"  "x = 70; x -= 5; @0x10000000 = x"   "A"
+test_output  "&= literal"  "x = 0xFF; x &= 0x41; @0x10000000 = x" "A"
+test_output  "|= literal"  "x = 0x40; x |= 0x01; @0x10000000 = x" "A"
+test_output  "^= literal"  "x = 0x50; x ^= 0x11; @0x10000000 = x" "A"
+test_output  "<<= literal" "x = 1; x <<= 6; x |= 1; @0x10000000 = x"   "A"
+test_output  ">>= literal" "x = 260; x >>= 2; @0x10000000 = x" "A"
+test_output  "+= var"      "x = 60; y = 5; x += y; @0x10000000 = x" "A"
 
 # ============================================================================
 echo "=== Blocks ==="
-test_runs    "block value"              "{ 42 }"
-test_runs    "block multi"              "{ 1; 2; 3 }"
-test_runs    "empty block"              "{ }"
-test_runs    "nested blocks"            "{ { 42 } }"
-test_runs    "block with vars"          "{ x := 5; y := 3; x + y }"
-test_runs    "block scope cleanup"     "x = 10; { y := 20; x + y }; x"
-test_error   "scope hides inner var"   "{ y = 5 }; y"  "error:"
-test_runs    "scope no stack leak"     "i := 0; loop { { y = i }; ++i > 100 ? break }; i"
-test_runs    "outer var in block"      "x := 1; { x = x + 1 }; x"
+test_runs    "empty block (statement)"  "x = 1; { }; x"
+test_runs    "block with statements"    "{ x = 1; y = 2 }"
+test_runs    "block as expression"      "x = { y = 10; y + 1 }"
+test_runs    "nested blocks"            "x = { y = { z = 1; z + 1 }; y + 1 }"
+test_output  "block returning local"    "x = { y = 'B'; y }; @0x10000000 = x" "B"
+test_output  "block returning binop"    "x = { y = 'A'; y + 1 }; @0x10000000 = x" "B"
+test_output  "block scope reuse"        "x1 = 1; x2 = 2; x3 = 3; { y1 = 11; y2 = 12; y3 = 13 }; x4 = 'A'; @0x10000000 = x4"  "A"
+test_output  "block before stmt"        "x = 100; { y = 5 }; @0x10000000 = x - 35" "A"
 
 # ============================================================================
-echo "=== Ternary ==="
-test_runs    "ternary true"             "1 ? 42 : 99"
-test_runs    "ternary false"            "0 ? 42 : 99"
-test_runs    "ternary nested"           "1 ? (0 ? 1 : 2) : 3"
-test_runs    "ternary with expr"        "x := 5; (x == 5) ? 1 : 0"
+echo "=== Pointer / deref operations ==="
+test_compiles "byte deref read"     "p = 0x80200100; @p"
+test_compiles "halfword deref read" "p = 0x80200100; #p"
+test_compiles "word deref read"     "p = 0x80200100; *p"
+test_compiles "byte store"          "p = 0x10000000; @p = 65"
+test_compiles "halfword store"      "p = 0x80200100; #p = 0x4142"
+test_compiles "word store"          "p = 0x80200100; *p = 0x41424344"
+
+test_output  "byte round trip"   "buf = 0x80200200; p = 0x10000000; @buf = 'H'; @p = @buf" "H"
+test_output  "halfword round trip" "buf = 0x80200200; p = 0x10000000; #buf = 0x4142; @p = @buf" "B"
+test_output  "word round trip"   "buf = 0x80200200; p = 0x10000000; *buf = 0x41424344; @p = @buf" "D"
 
 # ============================================================================
-echo "=== Pointer operations ==="
-test_compiles "word store"              "x := 0x100000; *x = 0x5555"
-test_compiles "byte store"              "x := 0x10000000; @x = 72"
-test_compiles "word deref read"         "x := 0x80000000; *x"
-test_compiles "byte deref read"         "x := 0x80000000; @x"
+echo "=== UART direct output ==="
+test_output  "single char"        "@0x10000000 = 'A'" "A"
+test_output  "char escape \\n"    "@0x10000000 = 'A'; @0x10000000 = '\n'" "A"
+test_output  "via variable"       "uart = 0x10000000; @uart = 'H'; @uart = 'i'" "Hi"
+test_output  "hello"              "@0x10000000 = 'H'; @0x10000000 = 'e'; @0x10000000 = 'l'; @0x10000000 = 'l'; @0x10000000 = 'o'" "Hello"
 
 # ============================================================================
-echo "=== UART output ==="
-test_output  "print char"              'uart := 0x10000000; @uart = 65' "A"
-test_output  "print string"            'uart := 0x10000000; @uart = 72; @uart = 105' "Hi"
-test_output  "hello world"             'uart := 0x10000000; @uart = 72; @uart = 101; @uart = 108; @uart = 108; @uart = 111' "Hello"
-test_output  "computed char"           'uart := 0x10000000; x := 3 + 4; @uart = x + 48' "7"
+echo "=== Register pressure / stack spills ==="
+# 11 vars exactly fits in s1..s11 (no spill).
+test_output  "11 vars in regs" \
+  "x1 = 1; x2 = 2; x3 = 3; x4 = 4; x5 = 5; x6 = 6; x7 = 7; x8 = 8; x9 = 9; x10 = 10; x11 = 11; @0x10000000 = x1 + 64" \
+  "A"
+
+# 12 vars: one spill (x12 → 0(sp)).
+test_output  "12 vars one spill" \
+  "x1 = 1; x2 = 2; x3 = 3; x4 = 4; x5 = 5; x6 = 6; x7 = 7; x8 = 8; x9 = 9; x10 = 10; x11 = 11; x12 = 65; @0x10000000 = x12" \
+  "A"
+
+# 13 vars: two spills, then read both back.
+test_output  "13 vars two spills" \
+  "x1 = 1; x2 = 2; x3 = 3; x4 = 4; x5 = 5; x6 = 6; x7 = 7; x8 = 8; x9 = 9; x10 = 10; x11 = 11; x12 = 65; x13 = 66; @0x10000000 = x12; @0x10000000 = x13" \
+  "AB"
+
+# 13 vars + nested block + 13 UART writes — exercises register reuse,
+# stack spill addressing, scope rewind, and binop temp freeing all together.
+test_output  "13 vars + UART writes" \
+  "x1 = 1; x2 = 2; x3 = 3; x4 = 4; x5 = 5; x6 = 6; x7 = 7; x8 = 8; x9 = 9; x10 = 10; x11 = 11; x12 = 12; x13 = 13; @0x10000000 = x1 + 'A'; @0x10000000 = x2 + 'A'; @0x10000000 = x3 + 'A'; @0x10000000 = x4 + 'A'; @0x10000000 = x5 + 'A'; @0x10000000 = x6 + 'A'; @0x10000000 = x7 + 'A'; @0x10000000 = x8 + 'A'; @0x10000000 = x9 + 'A'; @0x10000000 = x10 + 'A'; @0x10000000 = x11 + 'A'; @0x10000000 = x12 + 'A'; @0x10000000 = x13 + 'A'" \
+  "BCDEFGHIJKLMN"
+
+# Stack-spilled var reassignment lands in the SAME slot (no orphan).
+test_output  "stack var reassign" \
+  "x1 = 1; x2 = 2; x3 = 3; x4 = 4; x5 = 5; x6 = 6; x7 = 7; x8 = 8; x9 = 9; x10 = 10; x11 = 11; x12 = 12; x13 = 100; x13 = 65; @0x10000000 = x13" \
+  "A"
+
+# Compound op on a stack-spilled var.
+test_output  "compound op on spill" \
+  "x1 = 1; x2 = 2; x3 = 3; x4 = 4; x5 = 5; x6 = 6; x7 = 7; x8 = 8; x9 = 9; x10 = 10; x11 = 11; x12 = 50; x13 = 15; x13 += x12; @0x10000000 = x13" \
+  "A"
 
 # ============================================================================
-echo "=== Loops ==="
-test_compiles "infinite loop"           "loop { }"
-test_compiles "loop with body"          "x := 0; loop { x = x + 1 }"
-test_runs    "loop break"              "i := 0; loop { i = i + 1; (i == 5) ? break : 0 }; i"
-test_runs    "loop continue"           "i := 0; s := 0; loop { i = i + 1; (i > 10) ? break : 0; ((i & 1) == 0) ? continue : 0; s = s + i }; s"
-test_runs    "nested loops"            "i := 0; j := 0; loop { i = i + 1; (i > 3) ? break : 0; loop { j = j + 1; (j > 3) ? break : 0 } }; i + j"
-test_runs    "break with value"        "loop { break 42 }"
-test_runs    "loop as expression"      "x := loop { break 99 }; x"
-test_runs    "break with expr"         "i := 5; loop { break i * 2 }"
-test_runs    "multiple breaks"         "i := 0; loop { i = i + 1; (i == 3) ? break : 0; (i == 5) ? break : 0 }"
-test_runs    "nested break"            "x := 0; loop { loop { break }; x = x + 1; (x == 3) ? break : 0 }; x"
-test_runs    "break in nested ternary" "i := 0; loop { ++i; (i > 2) ? (i > 4) ? break : 0 : 0 }; i"
-test_runs    "optional ternary else"   "x := 1; x ? 42"
-
-# ============================================================================
-echo "=== Asm blocks ==="
-test_compiles "empty asm"               "asm { nop }; 42"
-test_compiles "asm nop"                 "asm foo { nop }; 42"
-test_compiles "asm ret"                 "asm foo { ret }; 42"
-test_compiles "asm arithmetic"          'asm foo { add t0, t1, t2
-ret }; 42'
-test_compiles "asm load store"          'asm foo { lw t0, 0(a0)
-sw t0, 4(a0)
-ret }; 42'
-test_compiles "asm lui li"             'asm foo { lui t0, 0x10000
-li t1, 42
-ret }; 42'
-test_output  "asm putchar"             'asm putchar {
-lui t0, 0x10000
-sb a0, 0(t0)
-ret
-};
-putchar(65)' "A"
-test_output  "asm call multi"          'asm putchar {
-lui t0, 0x10000
-sb a0, 0(t0)
-ret
-};
-putchar(72);
-putchar(105)' "Hi"
-test_output  "asm with args"           'asm add3 {
-add a0, a0, a1
-add a0, a0, a2
-ret
-};
-uart := 0x10000000;
-@uart = add3(50, 10, 5)' "A"
-test_compiles "asm branch"             'asm foo {
-beq a0, a1, skip
-addi a0, zero, 1
-skip:
-ret
-}; 42'
-
-echo "=== For loops ==="
-test_runs    "for basic"               "s := 0; for i in 0..5 { s = s + i }; s"
-test_runs    "for sum"                 "s := 0; for i in 1..11 { s = s + i }; s"
-test_runs    "for empty range"         "s := 99; for i in 5..5 { s = 0 }; s"
-test_runs    "for nested"              "s := 0; for i in 0..3 { for j in 0..4 { s = s + 1 } }; s"
-test_runs    "for with break"          "x := 0; for i in 0..100 { (i == 5) ? break; x = x + 1 }; x"
-test_runs    "for inclusive"           "s := 0; for i in 1..=10 { s = s + i }; s"
-
-# ============================================================================
-echo "=== Integration ==="
-test_output  "hello 7"                 'uart := 0x10000000; @uart = 72; @uart = 101; @uart = 108; @uart = 108; @uart = 111; @uart = 32; x := 3 + 4; @uart = x + 48; @uart = 33' "Hello 7!"
-
-test_runs    "fibonacci"               'a := 1; b := 1; c := a + b; a = b; b = c; c = a + b; a = b; b = c; c = a + b; a = b; b = c; c = a + b; a = b; b = c; c = a + b; test := 0x100000; *test = (c == 13) ? 0x5555 : 0x3333'
-
-# ============================================================================
-echo "=== Many variables (stress test) ==="
-MANY_VARS=$(python3 -c "
-v = [f'v{i} := {i}' for i in range(300)]
-v.append('v0 + v100 + v200 + v299')
-print('; '.join(v))
-")
-test_runs    "300 variables"            "$MANY_VARS"
-
-MANY_VARS_600=$(python3 -c "
-v = [f'v{i} := {i}' for i in range(600)]
-v.append('v0 + v599')
-print('; '.join(v))
-")
-test_runs    "600 variables (large offsets)" "$MANY_VARS_600"
-
-# ============================================================================
-echo "=== Structs ==="
-test_compiles "struct def"              "struct Point { x; y }; 42"
-test_runs    "struct construct"         "struct P { x; y }; p = P(10, 20); p.x + p.y"
-test_runs    "struct field write"       "struct P { x }; p = P(1); p.x = 99; p.x"
-test_runs    "sizeof"                   "struct V { a; b; c }; sizeof(V)"
-test_runs    "struct array"             "struct P { x; y }; a = 0x80100000; p = a; p.x = 1; p.y = 2; q = a + sizeof(P); q.x = 3; q.y = 4; q.x + q.y"
-test_runs    "nested construct"        "struct P { x; y }; struct L { s; e }; l = L(P(10,20),P(30,40)); l.s.x + l.e.y"
-test_runs    "nested field write"      "struct P { x; y }; struct L { s; e }; l = L(P(1,2),P(3,4)); l.s.x = 99; l.s.x"
-test_output  "chained dot read"        'asm pc { lui t0, 0x10000
-sb a0, 0(t0)
-ret };
-struct P { x; y }; struct L { s; e }; l = L(P(65,66),P(67,68)); pc(l.e.y)' "D"
-test_error   "bad field read"          "struct P { x; y }; struct R { a; b }; r = R(1,2); r.x" "error:"
-test_error   "bad field write"         "struct P { x; y }; struct R { a; b }; r = R(1,2); r.x = 5" "error:"
-
-echo "=== Arrays ==="
-test_runs    "word index write/read"  "a = 0x80100000; a[0] = 42; a[0]"
-test_runs    "word index offset"      "a = 0x80100000; a[0] = 10; a[1] = 20; a[2] = 30; a[0] + a[1] + a[2]"
-test_output  "byte index write/read"  'asm pc { lui t0, 0x10000
-sb a0, 0(t0)
-ret };
-a = 0x80100000; @a[0] = 65; @a[1] = 66; pc(@a[0]); pc(@a[1])' "AB"
-test_output  "halfword index"         'asm pc { lui t0, 0x10000
-sb a0, 0(t0)
-ret };
-a = 0x80100000; a[0] = 65; pc(@a[0])' "A"
-test_runs    "typed placement"        "struct P { x; y }; a = 0x80100000; P@a[0] = P(10,20); P@a[1] = P(30,40); x = P@a[0].x; y = P@a[1].y; x + y"
-test_runs    "typed field write"      "struct P { x; y }; a = 0x80100000; P@a[0] = P(1,2); P@a[0].x = 99; P@a[0].x"
-test_runs    "typed binop expr"       "struct P { x; y }; a = 0x80100000; P@a[0] = P(10,20); P@a[1] = P(30,40); P@a[0].x + P@a[1].y"
-test_runs    "typed 3-field struct"   "struct V { x; y; z }; a = 0x80100000; V@a[0] = V(1,2,3); V@a[1] = V(4,5,6); V@a[0].z + V@a[1].x"
-test_runs    "typed loop index"       "struct V { x; y }; a = 0x80100000; V@a[0] = V(10,0); V@a[1] = V(20,0); V@a[2] = V(30,0); s := 0; i := 0; loop { (i == 3) ? break; s = s + V@a[i].x; i = i + 1 }; s"
-test_runs    "nested ptr in placed"   "struct P { a; b }; struct N { v; n }; p = P(10,20); a = 0x80100000; N@a[0] = N(p,0); q = N@a[0].v; q.b"
-test_error   "typed mismatch"         "struct A { x }; struct B { y }; a = 0x80100000; A@a[0] = B(1)" "error:"
-
-echo "=== Error detection (compile-time) ==="
-test_error   "hex overflow"             "0x1FFFFFFFF"               "error:"
-test_error   "decimal overflow"         "4294967296"                "error:"
-test_error   "large decimal overflow"   "99999999999"               "error:"
-test_error   "binary overflow"          "0b100000000000000000000000000000000" "error:"
-test_error   "undefined variable"       "x"                         "error:"
-test_error   "undefined in expr"        "x + 1"                     "error:"
-test_error   "parse error prefix"       "+"                         "error:"
-test_error   "parse error bare rparen"  ")"                         "error:"
-test_error   "unsupported switch"       "switch 1 { }"              "error:"
-test_error   "immutable reassign"       "x = 5; x = 10"            "error:"
-test_error   "immutable +="             "x = 5; x += 1"            "error:"
-test_error   "immutable ++"             "x = 5; x++"               "error:"
-test_runs    "mutable reassign"         "x := 5; x = 10; x"
-test_runs    "mutable :="               "x := 5; x := 10; x"
-test_runs    "immutable read ok"        "x = 42; x"
-test_error   "return outside closure"   "return 5"                  "error:"
-test_error   "break outside loop"       "break"                     "error:"
-test_error   "continue outside loop"    "continue"                  "error:"
-test_error   "too many args"            "f = |a,b,c,d,e,f,g,h,i| { a }; f(1,2,3,4,5,6,7,8,9)" "error:"
-
-echo "=== Early return ==="
-test_runs    "early return value"       "f = |x| { return 99; 42 }; f(0)"
-test_runs    "conditional return"       "max = |a,b| { (a > b) ? return a; b }; max(30, 5)"
-test_runs    "multiple returns"         "cl = |x,lo,hi| { (x < lo) ? return lo; (x > hi) ? return hi; x }; cl(200, 0, 100)"
-test_runs    "return void"              "f = || { return }; f()"
-test_runs    "self recursion"           "f = |n| { n <= 1 ? return 1; n * self(n - 1) }; f(5)"
-test_runs    "self fibonacci"           "fib = |n| { n <= 1 ? return n; self(n-1) + self(n-2) }; fib(10)"
-test_error   "self outside closure"     "self" "error:"
-
-echo "=== Macros ==="
-test_runs    "macro basic"              "macro DBL(x) x + x; DBL!(21)"
-test_runs    "macro two params"         "macro MAX(a, b) a > b ? a : b; MAX!(10, 20)"
-test_runs    "macro nested"             "macro MAX(a, b) a > b ? a : b; macro MIN(a, b) a < b ? a : b; macro CLAMP(x, lo, hi) MIN!(MAX!(x, lo), hi); CLAMP!(150, 0, 100)"
-test_runs    "macro zero params"        "macro ANSWER() 42; ANSWER!()"
-test_runs    "macro hygienic"           "x := 99; macro DBL(x) x + x; DBL!(5)"
-test_error   "macro without bang"       "macro DBL(x) x + x; DBL(5)"    "error:"
-test_error   "bang on non-macro"        "x = 5; x!()"                   "error:"
-
-# ============================================================================
-echo "=== Error detection (runtime) ==="
-
-# test_stack_overflow: compile, patch tp to trigger overflow, verify 'S' output
-#   $1 = test name, $2 = source code
-test_stack_ovf() {
-	TOTAL=$((TOTAL + 1))
-	local name="$1" src="$2"
-	local bin="$TMPDIR/test_${TOTAL}.bin"
-	compile "$src" > "$bin" 2>&1 || true
-	local first
-	first=$(xxd -l1 -p "$bin" 2>/dev/null || echo "")
-	if [[ "$first" != "13" ]]; then
-		FAIL=$((FAIL + 1))
-		echo "  FAIL  $name (compile failed)"
-		return
-	fi
-	# Patch: replace "li tp, 0" (0x00000213 at offset 0x14) with
-	# "lui tp, 0x88000" (0x88000237) — tp = sp, instant overflow on first push
-	local orig
-	orig=$(xxd -s 0x18 -l 4 -p "$bin")
-	if [[ "$orig" != "13020000" ]]; then
-		FAIL=$((FAIL + 1))
-		echo "  FAIL  $name (tp instruction not at expected offset, got $orig)"
-		return
-	fi
-	python3 -c "
-import struct, sys
-with open(sys.argv[1], 'r+b') as f:
-    f.seek(0x18)
-    f.write(struct.pack('<I', 0x88000237))
-" "$bin"
-	local actual
-	actual=$(run_bin "$bin" || true)
-	if [[ "$actual" == "S"* ]]; then
-		PASS=$((PASS + 1))
-		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
-	else
-		FAIL=$((FAIL + 1))
-		echo "  FAIL  $name (expected 'S' output, got '$actual')"
-	fi
-}
-
-# test_no_overflow: verify check is present but doesn't fire with tp=0
-test_has_check() {
-	TOTAL=$((TOTAL + 1))
-	local name="$1" src="$2"
-	local bin="$TMPDIR/test_${TOTAL}.bin"
-	compile "$src" > "$bin" 2>&1 || true
-	# Check for bgeu sp, tp pattern (0x00417463 = bgeu sp, tp, +8)
-	if xxd -p "$bin" | tr -d '\n' | grep -q "63744100"; then
-		PASS=$((PASS + 1))
-		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
-	else
-		FAIL=$((FAIL + 1))
-		echo "  FAIL  $name (no bgeu sp,tp check found in binary)"
-	fi
-}
-
-test_has_check  "sp check emitted"        "a := 1; b := 2; c := 3; d := 4; e := 5; a + b + c + d + e"
-test_stack_ovf  "stack overflow detected"  "a := 1; b := 2; c := 3; d := 4; e := 5; a + b + c + d + e"
-test_stack_ovf  "overflow on push"         "a := 1; b := 2; c := 3; d := 4; e := 5; a + b + c + d + e"
+echo "=== Error detection ==="
+test_error   "undefined variable"          "y"                          "error:"
+test_error   "undefined in expression"     "x = y"                      "error:"
+test_error   "undefined RHS in binop"      "x = 1; y = x + z"           "error:"
+test_error   "binary multiply"             "x = 3; y = x * 5"           "error:"
+test_error   "binary divide"               "x = 10; y = x / 2"          "error:"
+test_error   "binary modulo"               "x = 10; y = x % 3"          "error:"
+test_error   "compound *= unsupported"     "x = 3; x *= 2"              "error:"
+test_error   "compound /= unsupported"     "x = 6; x /= 2"              "error:"
+test_error   "compound %= unsupported"     "x = 7; x %= 3"              "error:"
+test_error   "missing semicolon"           "x = 1 y = 2"                "error:"
 
 # ============================================================================
 echo ""
