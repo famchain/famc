@@ -177,6 +177,12 @@
 .equ	P_UNARY,	26
 .equ	P_POSTFIX,	28
 .equ	P_CALL,		30
+# `..` and `..=` are placed *above* P_CALL so that `parse_expr` at
+# min_prec = P_RANGE can pick them up while still excluding the `{`
+# of a for-loop body (bp_call = 30). Trade-off: range bounds are
+# parsed at this high precedence too, so `n+1..m+1` requires parens
+# around each bound — we accept that for parser simplicity.
+.equ	P_RANGE,	32
 
 _start:
 	j	main
@@ -457,6 +463,15 @@ str_undef_var:
 str_jump_oor:
 	.ascii	"internal compiler error: jump offset out of 1MB range\n"
 	.zero	2
+str_break_outside:
+	.ascii	"break outside loop"
+	.zero	2
+str_continue_outside:
+	.ascii	"continue outside loop"
+	.zero	3
+str_for_iter:
+	.ascii	"for-loop iterator must be a range (.. or ..=)"
+	.zero	3
 str_compound_todo:
 	.ascii	"compound assignment form not yet supported"
 	.zero	2
@@ -1395,11 +1410,12 @@ bp_not_assign_eq:
 	beq	a0, t0, bp_mul
 	li	t0, NK_PERCENT
 	beq	a0, t0, bp_mul
-	# Range: .. ..=
+	# Range: .. ..=  — at P_RANGE (above P_CALL) so that for-loop iter
+	# parsing can include them while excluding the body's `{`.
 	li	t0, NK_DOTDOT
-	beq	a0, t0, bp_cmp
+	beq	a0, t0, bp_range
 	li	t0, NK_DOTDOT_EQ
-	beq	a0, t0, bp_cmp
+	beq	a0, t0, bp_range
 	# Postfix: . @ [ ( { ++ --
 	li	t0, NK_DOT
 	beq	a0, t0, bp_postfix
@@ -1442,6 +1458,11 @@ bp_equal:
 bp_cmp:
 	li	a0, P_COMPARE
 	li	a1, P_COMPARE+1
+	ret
+bp_range:
+	# `..` and `..=` are non-associative; both bps the same.
+	li	a0, P_RANGE
+	li	a1, P_RANGE
 	ret
 bp_bitor:
 	li	a0, P_BIT_OR
@@ -1651,7 +1672,55 @@ px_block_lp:
 	li	a2, 1			# peek
 	jal	lex_next
 	li	t0, NK_SEMI
-	bne	a0, t0, px_block_return	# no semi = return expr
+	beq	a0, t0, px_block_has_semi
+	# No semicolon. Three sub-cases:
+	#   1. next is } or TERM → this is the block's return expression
+	#   2. expression ends with `}` (bare block, or ternary whose last
+	#      branch is a block, possibly chained) → statement-terminated,
+	#      wrap as a NK_SEMI without consuming any `;` and continue
+	#   3. otherwise → error: missing `;`
+	li	t0, NK_RBRACE
+	beq	a0, t0, px_block_return
+	li	t0, NK_TERM
+	beq	a0, t0, px_block_return
+	# Walk down N_LAST_CHILD through statement-terminating compound
+	# nodes (NK_QMARK, NK_LOOP, NK_FOR) — same shape as parse_program.
+	mv	t0, s3
+pxb_btchk:
+	lw	t1, N_KIND(t0)
+	li	t2, NK_LBRACE
+	beq	t1, t2, px_block_wrap_no_semi
+	li	t2, NK_QMARK
+	beq	t1, t2, pxb_btchk_descend
+	li	t2, NK_LOOP
+	beq	t1, t2, pxb_btchk_descend
+	li	t2, NK_FOR
+	beq	t1, t2, pxb_btchk_descend
+	j	px_block_semi_err
+pxb_btchk_descend:
+	lw	t0, N_LAST_CHILD(t0)
+	beqz	t0, px_block_semi_err
+	j	pxb_btchk
+px_block_semi_err:
+	lla	a0, str_semi
+	mv	a1, s4
+	mv	a2, s0
+	j	err_expect
+px_block_wrap_no_semi:
+	# Block-terminated statement: wrap in NK_SEMI without consuming any
+	# `;`, add to block, and continue parsing more statements.
+	jal	node_alloc
+	mv	s4, a0
+	li	t0, NK_SEMI
+	sw	t0, N_KIND(s4)
+	mv	a0, s4
+	mv	a1, s3
+	jal	node_add_child
+	mv	a0, s2
+	mv	a1, s4
+	jal	node_add_child
+	j	px_block_lp
+px_block_has_semi:
 	# Has semicolon — consume it
 	jal	node_alloc
 	mv	s4, a0			# scratch node
@@ -1853,6 +1922,12 @@ px_loop:
 	mv	a1, a0
 	mv	a0, s2
 	jal	node_add_child
+	# If the body is a block, the loop self-terminates — skip the
+	# outer infix loop so a following postfix-shaped token starts a
+	# fresh statement instead of getting folded onto the loop.
+	lw	t0, N_KIND(a1)
+	li	t1, NK_LBRACE
+	beq	t0, t1, px_ret
 	j	px_done
 
 px_for:
@@ -1870,9 +1945,10 @@ px_for:
 	li	a1, NK_IN
 	lla	a2, str_in_kw
 	jal	expect_tok
-	# Parse iterator expr (stop before { body)
+	# Parse iterator expr at P_RANGE so that the `..`/`..=` operator is
+	# included while the body's `{` (bp_call = 30 < P_RANGE) is not.
 	mv	a0, s0
-	li	a1, P_CALL+1
+	li	a1, P_RANGE
 	jal	parse_expr
 	mv	a1, a0
 	mv	a0, s2
@@ -1884,6 +1960,11 @@ px_for:
 	mv	a1, a0
 	mv	a0, s2
 	jal	node_add_child
+	# Same protection as px_loop: if the body is a block, the for-loop
+	# self-terminates so a following postfix doesn't fold onto it.
+	lw	t0, N_KIND(a1)
+	li	t1, NK_LBRACE
+	beq	t0, t1, px_ret
 	j	px_done
 
 px_switch:
@@ -2104,11 +2185,28 @@ ix_tern_done:
 	#     @0x10000000 = '\n';
 	# parses as `(ternary) @ 0x10000000 = '\n'` and the `\n` write
 	# lands at address 0.
-	lw	t0, N_LAST_CHILD(s4)
-	lw	t0, N_KIND(t0)
-	li	t1, NK_LBRACE
-	beq	t0, t1, px_ret
+	#
+	# Walk down N_LAST_CHILD through statement-terminating compound
+	# nodes (NK_QMARK / NK_LOOP / NK_FOR — right-associative chains
+	# and block-bodied loops like `a ? p : b ? q : loop { ... }`)
+	# until we reach either a NK_LBRACE (block-terminated → self-
+	# terminates) or anything else (let infix continue).
+	mv	t0, s4
+ixt_btchk:
+	lw	t1, N_KIND(t0)
+	li	t2, NK_LBRACE
+	beq	t1, t2, px_ret
+	li	t2, NK_QMARK
+	beq	t1, t2, ixt_btchk_descend
+	li	t2, NK_LOOP
+	beq	t1, t2, ixt_btchk_descend
+	li	t2, NK_FOR
+	beq	t1, t2, ixt_btchk_descend
 	j	px_infix
+ixt_btchk_descend:
+	lw	t0, N_LAST_CHILD(t0)
+	beqz	t0, px_infix
+	j	ixt_btchk
 
 ix_dot:
 	# Parse member name (must be identifier)
@@ -2353,7 +2451,13 @@ pp_btchk:
 	li	t2, NK_LBRACE
 	beq	t1, t2, pp_loop
 	li	t2, NK_QMARK
-	bne	t1, t2, pp_semi_err
+	beq	t1, t2, pp_btchk_descend
+	li	t2, NK_LOOP
+	beq	t1, t2, pp_btchk_descend
+	li	t2, NK_FOR
+	beq	t1, t2, pp_btchk_descend
+	j	pp_semi_err
+pp_btchk_descend:
 	lw	t0, N_LAST_CHILD(t0)
 	beqz	t0, pp_semi_err
 	j	pp_btchk
@@ -3234,7 +3338,33 @@ compile:
 				# gen_expr; gen_expr snapshots it into s5 at entry and
 				# immediately clears it so child calls default to "value
 				# used" unless their parent re-sets it.
-.equ	CG_SZ,		36
+.equ	CG_LOOP_STACK,	36	# head of the linked list of LC entries for the
+				# enclosing `loop`/`for`. Used by ge_break/ge_continue
+				# to find their target loop and to attach to its
+				# break-fixup chain. NULL outside any loop.
+.equ	CG_SZ,		40
+
+# ── Loop context (LC) — one heap-allocated entry per active loop ─────
+# Pushed by ge_loop / ge_for on entry, popped on exit. Linked through
+# LC_PARENT so break/continue can walk to the innermost enclosing loop.
+.equ	LC_PARENT,	0
+.equ	LC_BEGIN_OFF,	4	# back-edge target (top of body)
+.equ	LC_CONTINUE_OFF, 8	# where `continue` jumps to. Equals LC_BEGIN_OFF
+				# for `loop`; for `for` it points at the increment
+				# step instead, so the loop variable still advances.
+.equ	LC_BREAKS,	12	# head of the linked list of unpatched `break`
+				# jal placeholders (BF entries).
+.equ	LC_RESULT_REG,	16	# register that holds the loop's value. Either a
+				# temp allocated at loop entry (value mode), or -1
+				# in discard mode where the loop's value is unused
+				# and `break value` should not materialize.
+.equ	LC_SZ,		20
+
+# ── Break fixup (BF) — one entry per unpatched `break` placeholder ────
+# Linked through BF_NEXT, head at LC_BREAKS. Patched on loop exit.
+.equ	BF_NEXT,	0
+.equ	BF_OFF,		4	# byte offset of the placeholder jal in the output
+.equ	BF_SZ,		8
 
 # Scope entry (linked list):
 #   0:  parent scope pointer
@@ -3548,8 +3678,8 @@ emit_jal_fwd:
 # emit_jal_back: emit `jal x0, target` to a known earlier offset.
 # a0 = target byte offset (must be < current cursor).
 # REQUIRES: s1 = codegen ctx.
+# Tail-calling leaf — no prologue (would corrupt sp on the `j` below).
 emit_jal_back:
-	prologue	x0
 	lw	t1, CG_OUT_BASE(s1)
 	sub	t0, s2, t1		# cur off
 	sub	a1, a0, t0		# imm = target - cur (negative)
@@ -3911,6 +4041,22 @@ gen_expr:
 	# Ternary: cond ? then : else  (else optional)
 	li	t0, NK_QMARK
 	beq	s6, t0, ge_ternary
+
+	# Loop / break / continue
+	li	t0, NK_LOOP
+	beq	s6, t0, ge_loop
+	li	t0, NK_FOR
+	beq	s6, t0, ge_for
+	li	t0, NK_BREAK
+	beq	s6, t0, ge_break
+	li	t0, NK_CONTINUE
+	beq	s6, t0, ge_continue
+
+	# Increment / decrement (prefix or postfix; both have the same AST)
+	li	t0, NK_INC
+	beq	s6, t0, ge_incdec
+	li	t0, NK_DEC
+	beq	s6, t0, ge_incdec
 
 	# Block
 	li	t0, NK_LBRACE
@@ -4919,6 +5065,522 @@ gtd_ret:
 	li	a1, 0			# not a temp — nothing to free
 	j	ge_ret
 
+# ── loop { body } ─────────────────────────────────────────────────────
+# AST: NK_LOOP with 1 child = body block (any expression actually).
+#
+# Lowering:
+#     [ alloc result temp; init to 0 ]   ; only if value-producing
+#   Lbegin:
+#     <body, discarded>
+#     jal x0, Lbegin
+#   Lend:                                  ; patched into all `break`s
+#
+# `break value` writes the value into the result temp before branching
+# to Lend. `continue` jumps back to Lbegin (same as the back-edge).
+# Plain `break` leaves the result temp at its initial 0.
+#
+# Register use within ge_loop:
+#   s0 = node (preserved by gen_expr prologue)
+#   s1 = ctx
+#   s3 = LC ptr (heap-allocated)
+#   s4 = result reg, or -1 in discard mode
+#   s5 = discard hint snapshot (set by gen_expr prologue)
+#   s6 = scratch (body result reg, BF iterator)
+ge_loop:
+	# Allocate result temp unless we're discarded.
+	bnez	s5, gl_no_result
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0			# s4 = result reg
+	# Initialize to 0 so plain `break` returns 0.
+	mv	a0, s4
+	li	a1, 0
+	jal	emit_li
+	j	gl_alloc_lc
+gl_no_result:
+	li	s4, -1
+
+gl_alloc_lc:
+	# Push a fresh LC entry onto the loop stack.
+	li	a0, LC_SZ
+	jal	alloc
+	mv	s3, a0			# s3 = LC ptr
+	lw	t0, CG_LOOP_STACK(s1)
+	sw	t0, LC_PARENT(s3)
+	lw	t1, CG_OUT_BASE(s1)
+	sub	t0, s2, t1		# t0 = current byte offset (= Lbegin)
+	sw	t0, LC_BEGIN_OFF(s3)
+	sw	t0, LC_CONTINUE_OFF(s3)	# `loop`: continue == begin
+	sw	zero, LC_BREAKS(s3)
+	sw	s4, LC_RESULT_REG(s3)
+	sw	s3, CG_LOOP_STACK(s1)
+
+	# Generate body in discard mode (its expression value is unused;
+	# only `break value` materializes anything observable).
+	li	t0, 1
+	sw	t0, CG_DISCARD(s1)
+	lw	a0, N_FIRST_CHILD(s0)
+	mv	a1, s1
+	jal	gen_expr
+	mv	s6, a0			# body result reg
+	beqz	a1, gl_body_done
+	mv	a1, s6
+	mv	a0, s1
+	jal	reg_free
+gl_body_done:
+
+	# Back-edge: jal x0, Lbegin.
+	lw	a0, LC_BEGIN_OFF(s3)
+	jal	emit_jal_back
+
+	# Lend lands here. Walk the break-fixup list and patch every
+	# placeholder jal to target this point.
+	lw	s6, LC_BREAKS(s3)
+gl_break_lp:
+	beqz	s6, gl_breaks_done
+	lw	a0, BF_OFF(s6)
+	jal	patch_jal
+	lw	s6, BF_NEXT(s6)
+	j	gl_break_lp
+gl_breaks_done:
+
+	# Pop the loop stack.
+	lw	t0, LC_PARENT(s3)
+	sw	t0, CG_LOOP_STACK(s1)
+
+	# Return the result reg as a temp, or x0 in discard mode.
+	bnez	s5, gl_discard_ret
+	mv	a0, s4
+	li	a1, 1
+	j	ge_ret
+gl_discard_ret:
+	li	a0, 0
+	li	a1, 0
+	j	ge_ret
+
+# ── for ident in lo..hi { body }  /  for ident in lo..=hi { body } ───
+# AST: NK_FOR with 3 children — ident, iter (NK_DOTDOT or NK_DOTDOT_EQ
+# with lo and hi as children), body.
+#
+# Hoisted-increment lowering:
+#
+#     <gen lo> -> i_reg          ; var-bound to ident, scoped
+#     <gen hi> -> hi_reg         ; sticky temp, lives across body
+#     j Lcheck                   ; skip the increment on the first iter
+#   Lcont:                       ; LC_BEGIN_OFF / LC_CONTINUE_OFF
+#     addi i_reg, i_reg, 1
+#   Lcheck:
+#     bge i_reg, hi_reg, Lend    ; for `..` (or blt hi, i for `..=`)
+#     <body, discarded>
+#     j Lcont                    ; back-edge
+#   Lend:                        ; patched into all `break`s + the cond
+#
+# `continue` is a backward jal to Lcont — the existing ge_continue
+# already handles that via LC_CONTINUE_OFF.
+#
+# Stack scratch (32 bytes):
+#    0(sp):  saved CG_SCOPE head (so we can drop the i binding on exit)
+#    4(sp):  result reg, or -1 in discard mode
+#    8(sp):  hi temp flag (0 if hi was a variable, !=0 if it was a temp)
+#   12(sp):  iter kind (NK_DOTDOT vs NK_DOTDOT_EQ — picks the cond f3)
+#   16(sp):  initial `j Lcheck` placeholder offset
+#   20-28(sp): unused / alignment padding
+ge_for:
+	addi	sp, sp, -32
+	lw	t0, CG_SCOPE(s1)
+	sw	t0, 0(sp)
+
+	# Validate iter kind: must be NK_DOTDOT or NK_DOTDOT_EQ.
+	lw	t0, N_FIRST_CHILD(s0)	# ident
+	lw	t1, N_NEXT_SIB(t0)	# iter
+	lw	t2, N_KIND(t1)
+	li	t3, NK_DOTDOT
+	beq	t2, t3, gf_iter_ok
+	li	t3, NK_DOTDOT_EQ
+	beq	t2, t3, gf_iter_ok
+	# Bad iter — error.
+	addi	sp, sp, 32
+	mv	a0, t1
+	lla	a1, str_for_iter
+	j	err_at
+gf_iter_ok:
+	sw	t2, 12(sp)		# stash iter kind
+
+	# Result reg (or -1 in discard mode).
+	bnez	s5, gf_no_result
+	mv	a0, s1
+	jal	temp_alloc
+	sw	a0, 4(sp)
+	mv	a0, a0
+	li	a1, 0
+	jal	emit_li
+	j	gf_have_result
+gf_no_result:
+	li	t0, -1
+	sw	t0, 4(sp)
+gf_have_result:
+
+	# Codegen lo
+	lw	t0, N_FIRST_CHILD(s0)	# ident
+	lw	t0, N_NEXT_SIB(t0)	# iter
+	lw	a0, N_FIRST_CHILD(t0)	# lo
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0			# s3 = lo reg
+	mv	s4, a1			# s4 = lo temp flag
+
+	# Allocate a fresh s-reg for the loop variable.
+	mv	a0, s1
+	jal	var_alloc
+	li	t0, -1
+	beq	a0, t0, gf_no_var_reg
+	mv	s6, a0			# s6 = i_reg
+
+	# mv i_reg, lo_reg
+	mv	a0, s6
+	mv	a1, s3
+	jal	emit_mv
+
+	# Free lo if it was a temp
+	beqz	s4, gf_lo_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+gf_lo_done:
+	mv	s3, s6			# s3 = i_reg (sticky from here on)
+
+	# Bind ident name → i_reg in scope
+	lw	t0, N_FIRST_CHILD(s0)	# ident
+	lw	a1, N_LOC_OFF(t0)
+	lw	a2, N_LOC_LEN(t0)
+	mv	a3, s3
+	mv	a0, s1
+	jal	scope_add
+
+	# Codegen hi (sticky in s4 for the rest of the loop)
+	lw	t0, N_FIRST_CHILD(s0)	# ident
+	lw	t0, N_NEXT_SIB(t0)	# iter
+	lw	t0, N_FIRST_CHILD(t0)	# lo
+	lw	a0, N_NEXT_SIB(t0)	# hi
+	mv	a1, s1
+	jal	gen_expr
+	mv	s4, a0			# s4 = hi reg
+	sw	a1, 8(sp)		# hi temp flag
+
+	# Initial `j Lcheck` (skip the increment on the first iteration).
+	li	a0, 0
+	jal	emit_jal_fwd
+	sw	a0, 16(sp)
+
+	# Lcont = current offset.
+	lw	t0, CG_OUT_BASE(s1)
+	sub	t0, s2, t0		# t0 = Lcont byte offset
+
+	# Allocate LC entry and push.
+	addi	sp, sp, -8
+	sw	t0, 0(sp)		# stash Lcont across alloc
+	li	a0, LC_SZ
+	jal	alloc
+	mv	s6, a0			# s6 = LC ptr
+	lw	t0, 0(sp)
+	addi	sp, sp, 8
+	lw	t1, CG_LOOP_STACK(s1)
+	sw	t1, LC_PARENT(s6)
+	sw	t0, LC_BEGIN_OFF(s6)
+	sw	t0, LC_CONTINUE_OFF(s6)
+	sw	zero, LC_BREAKS(s6)
+	lw	t1, 4(sp)		# result reg (or -1)
+	sw	t1, LC_RESULT_REG(s6)
+	sw	s6, CG_LOOP_STACK(s1)
+
+	# Emit increment: addi i_reg, i_reg, 1
+	li	a0, 0x13
+	mv	a1, s3
+	mv	a2, s3
+	li	a3, 0
+	li	a4, 1
+	jal	emit_i
+
+	# Patch the initial `j Lcheck` to land here (start of cond check).
+	lw	a0, 16(sp)
+	jal	patch_jal
+
+	# Emit cond branch_fwd → Lend. The fixup goes into the same
+	# LC_BREAKS list as user `break`s — patched together at exit.
+	li	a0, BF_SZ
+	jal	alloc
+	mv	t0, a0			# BF for the cond
+	lw	t1, LC_BREAKS(s6)
+	sw	t1, BF_NEXT(t0)
+	sw	t0, LC_BREAKS(s6)
+	# Save the BF ptr across emit_branch_fwd; t-regs are clobberable.
+	addi	sp, sp, -8
+	sw	t0, 0(sp)
+	# Pick (f3, rs1, rs2): for `..` use BGE i, hi (exit-if i >= hi);
+	# for `..=` use BLT hi, i (exit-if hi < i, i.e. i > hi).
+	lw	t1, 12(sp)		# iter kind  (note: sp moved -8 — slot is still 12+8=20 from new sp; recompute)
+	# Wait — after addi sp, -8 above, the offsets changed. Let me reload from the right place.
+	# Old offset 12(sp) is now 20(sp) since we pushed 8 bytes.
+	lw	t1, 20(sp)
+	li	t2, NK_DOTDOT
+	beq	t1, t2, gf_excl
+	# Inclusive: BLT hi, i
+	li	a0, 4			# f3 = BLT
+	mv	a1, s4			# rs1 = hi
+	mv	a2, s3			# rs2 = i
+	j	gf_emit_cond
+gf_excl:
+	# Exclusive: BGE i, hi
+	li	a0, 5			# f3 = BGE
+	mv	a1, s3			# rs1 = i
+	mv	a2, s4			# rs2 = hi
+gf_emit_cond:
+	jal	emit_branch_fwd
+	# a0 = jal placeholder offset
+	lw	t0, 0(sp)
+	addi	sp, sp, 8
+	sw	a0, BF_OFF(t0)
+
+	# Generate body in discard mode.
+	li	t0, 1
+	sw	t0, CG_DISCARD(s1)
+	lw	t0, N_FIRST_CHILD(s0)	# ident
+	lw	t0, N_NEXT_SIB(t0)	# iter
+	lw	a0, N_NEXT_SIB(t0)	# body
+	mv	a1, s1
+	jal	gen_expr
+	# Free body's result if temp.
+	beqz	a1, gf_body_done
+	mv	t0, a0			# save reg before nuking a0
+	mv	a0, s1
+	mv	a1, t0
+	jal	reg_free
+gf_body_done:
+
+	# Back-edge: jal x0, Lcont (= LC_BEGIN_OFF).
+	lw	a0, LC_BEGIN_OFF(s6)
+	jal	emit_jal_back
+
+	# Lend: patch the LC_BREAKS chain (initial cond + user breaks).
+	lw	t0, LC_BREAKS(s6)
+gf_break_lp:
+	beqz	t0, gf_breaks_done
+	# Save iterator across patch_jal call.
+	addi	sp, sp, -8
+	sw	t0, 0(sp)
+	lw	a0, BF_OFF(t0)
+	jal	patch_jal
+	lw	t0, 0(sp)
+	addi	sp, sp, 8
+	lw	t0, BF_NEXT(t0)
+	j	gf_break_lp
+gf_breaks_done:
+
+	# Pop loop stack.
+	lw	t0, LC_PARENT(s6)
+	sw	t0, CG_LOOP_STACK(s1)
+
+	# Free hi if it was a temp.
+	lw	t0, 8(sp)
+	beqz	t0, gf_hi_done
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+gf_hi_done:
+
+	# Free i_reg (it's an s-reg owned by var_alloc).
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+
+	# Restore scope head (drops the ident binding).
+	lw	t0, 0(sp)
+	sw	t0, CG_SCOPE(s1)
+
+	# Return result reg, or x0 in discard mode.
+	lw	a0, 4(sp)
+	addi	sp, sp, 32
+	bnez	s5, gf_discard_ret
+	li	a1, 1			# is a temp
+	j	ge_ret
+gf_discard_ret:
+	li	a0, 0
+	li	a1, 0
+	j	ge_ret
+
+gf_no_var_reg:
+	# Couldn't get an s-reg for the loop variable.
+	addi	sp, sp, 32
+	mv	a0, s0
+	lla	a1, str_temp_exhausted
+	jal	print_str
+	j	exit
+
+# ── break [value] ─────────────────────────────────────────────────────
+# AST: NK_BREAK with 0 or 1 child (the optional value expression).
+# Errors if no enclosing loop. If a value is given AND the enclosing
+# loop has a result reg (i.e. is value-producing), the value is moved
+# into that reg before the jump. Otherwise the value is generated for
+# its side effects only and discarded.
+ge_break:
+	# Find enclosing loop
+	lw	s3, CG_LOOP_STACK(s1)
+	beqz	s3, gb_outside
+
+	# Optional value child
+	lw	s4, N_FIRST_CHILD(s0)
+	beqz	s4, gb_no_value
+
+	# Codegen the value expression
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s4, a0			# value reg
+	mv	s6, a1			# value temp flag
+
+	# If the loop has a result reg (LC_RESULT_REG != -1), mv into it.
+	lw	t0, LC_RESULT_REG(s3)
+	li	t1, -1
+	beq	t0, t1, gb_free_val
+	# emit_mv result_reg, value_reg (skip if same)
+	beq	t0, s4, gb_free_val
+	mv	a0, t0
+	mv	a1, s4
+	jal	emit_mv
+gb_free_val:
+	beqz	s6, gb_emit_jump
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+	j	gb_emit_jump
+
+gb_no_value:
+	# Plain `break` — the result temp keeps its initial 0.
+
+gb_emit_jump:
+	# Allocate a BF entry, push onto LC_BREAKS, emit placeholder jal.
+	li	a0, BF_SZ
+	jal	alloc
+	mv	s4, a0			# s4 = BF ptr
+	lw	t0, LC_BREAKS(s3)
+	sw	t0, BF_NEXT(s4)
+	sw	s4, LC_BREAKS(s3)
+	li	a0, 0			# rd = x0
+	jal	emit_jal_fwd
+	sw	a0, BF_OFF(s4)
+	# break is a jump — return x0
+	li	a0, 0
+	li	a1, 0
+	j	ge_ret
+
+gb_outside:
+	mv	a0, s0
+	lla	a1, str_break_outside
+	j	err_at
+
+# ── ++expr / expr++ / --expr / expr-- ────────────────────────────────
+# AST: NK_INC or NK_DEC with one child = the lvalue. Prefix and postfix
+# forms produce the same AST shape, so this handler implements prefix
+# semantics: mutate the variable and return the *new* value. For the
+# common stmt-only `y++;` case the value is discarded anyway, and for
+# `++y` (the form that drove this in) the new value is exactly what's
+# wanted.
+#
+# Only NK_IDENT operands are supported for now (the form that matters
+# in practice). Deref operands `(*p)++` etc. fall through to the
+# compound-todo error path.
+ge_incdec:
+	# Pick the addi delta.
+	li	t0, NK_INC
+	beq	s6, t0, gid_pos
+	li	s4, -1
+	j	gid_have_delta
+gid_pos:
+	li	s4, 1
+gid_have_delta:
+	# Operand
+	lw	s3, N_FIRST_CHILD(s0)
+	lw	t0, N_KIND(s3)
+	li	t1, NK_IDENT
+	bne	t0, t1, gid_todo
+
+	# Look up
+	lw	a1, N_LOC_OFF(s3)
+	lw	a2, N_LOC_LEN(s3)
+	mv	a0, s1
+	jal	scope_find
+	li	t0, -2
+	beq	a0, t0, gid_undef
+	li	t0, -1
+	beq	a0, t0, gid_stack
+
+	# Reg variable: addi reg, reg, delta — operate in place.
+	mv	s3, a0			# var reg
+	li	a0, 0x13		# addi
+	mv	a1, s3			# rd
+	mv	a2, s3			# rs1
+	li	a3, 0			# f3
+	mv	a4, s4			# imm = delta
+	jal	emit_i
+	# Return the variable's reg (stable, not a temp).
+	mv	a0, s3
+	li	a1, 0
+	j	ge_ret
+
+gid_stack:
+	# Stack variable: load → addi → store, leave new value in a temp.
+	addi	sp, sp, -8
+	sw	a1, 0(sp)		# stack offset
+	sw	s4, 4(sp)		# delta
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0			# s4 = temp
+	# lw temp, off(sp)
+	mv	a0, s4
+	li	a1, 2			# rs1 = sp
+	lw	a2, 0(sp)
+	jal	emit_lw
+	# addi temp, temp, delta
+	li	a0, 0x13
+	mv	a1, s4
+	mv	a2, s4
+	li	a3, 0
+	lw	a4, 4(sp)
+	jal	emit_i
+	# sw temp, off(sp)
+	li	a0, 2
+	mv	a1, s4
+	lw	a2, 0(sp)
+	jal	emit_sw
+	addi	sp, sp, 8
+	mv	a0, s4			# return the temp holding the new value
+	li	a1, 1
+	j	ge_ret
+
+gid_undef:
+	mv	a0, s3
+	lla	a1, str_undef_var
+	j	err_at
+gid_todo:
+	mv	a0, s0
+	lla	a1, str_compound_todo
+	j	err_at
+
+# ── continue ──────────────────────────────────────────────────────────
+# AST: NK_CONTINUE with no children.
+ge_continue:
+	lw	s3, CG_LOOP_STACK(s1)
+	beqz	s3, gc_outside
+	lw	a0, LC_CONTINUE_OFF(s3)
+	jal	emit_jal_back
+	li	a0, 0
+	li	a1, 0
+	j	ge_ret
+gc_outside:
+	mv	a0, s0
+	lla	a1, str_continue_outside
+	j	err_at
+
 # Stack scratch layout (16 bytes):
 #   0(sp):  saved scope head
 #   4(sp):  saved frame offset
@@ -5423,6 +6085,7 @@ gen_program:
 	sw	s5, CG_INPUT(s1)	# input base from compile
 	sw	s3, CG_OUT_BASE(s1)	# output buffer base (s3 holds it here)
 	sw	zero, CG_DISCARD(s1)	# default: result is consumed
+	sw	zero, CG_LOOP_STACK(s1)	# no enclosing loop yet
 	sw	zero, CG_FRAME_OFF(s1)	# no stack slots yet
 	sw	zero, CG_FRAME_MAX(s1)	# high-water mark also starts at 0
 

@@ -288,6 +288,166 @@ test_output  "compound op on spill" \
   "A"
 
 # ============================================================================
+echo "=== Ternary ==="
+
+# Value-producing ternary, both branches.
+test_output  "ternary value true"          "x = 5; @0x10000000 = (x > 3 ? 'A' : 'B')"  "A"
+test_output  "ternary value false"         "x = 1; @0x10000000 = (x > 3 ? 'A' : 'B')"  "B"
+
+# Right-associative chains: cond ? a : c2 ? b : c3 ? c : d
+test_output  "ternary chain false-false"   "@0x10000000 = (0 ? 'A' : 0 ? 'B' : 'C')"   "C"
+test_output  "ternary chain false-true"    "@0x10000000 = (0 ? 'A' : 1 ? 'B' : 'C')"   "B"
+test_output  "ternary chain 3 levels"      "@0x10000000 = (0 ? 'A' : 0 ? 'B' : 0 ? 'C' : 'D')"  "D"
+
+# Side-effect isolation: in `a ? p : b ? q : r`, exactly one of p/q/r
+# must run. Catches a class of bugs (e.g. broken jal patching) that
+# the value-only checks above would miss.
+test_output  "ternary chain side fx 1st"   "x = 5; x > 0 ? @0x10000000 = 'A' : x > 0 ? @0x10000000 = 'B' : @0x10000000 = 'C'"  "A"
+test_output  "ternary chain side fx 2nd"   "x = 5; x < 0 ? @0x10000000 = 'A' : x > 0 ? @0x10000000 = 'B' : @0x10000000 = 'C'"  "B"
+test_output  "ternary chain side fx 3rd"   "x = 5; x < 0 ? @0x10000000 = 'A' : x < 0 ? @0x10000000 = 'B' : @0x10000000 = 'C'"  "C"
+
+# Assignment on the else side — verifies the P_ASSIGN parser fix.
+test_output  "ternary else assignment t"   "x = 5; x > 3 ? @0x10000000 = 'A' : @0x10000000 = 'B'"  "A"
+test_output  "ternary else assignment f"   "x = 1; x > 3 ? @0x10000000 = 'A' : @0x10000000 = 'B'"  "B"
+
+# Discard mode (statement context, value unused) — exercises gtd_* path.
+test_output  "ternary discard noelse t"    "x = 5; x > 3 ? @0x10000000 = 'A'; @0x10000000 = '!'"  "A!"
+test_output  "ternary discard noelse f"    "x = 1; x > 3 ? @0x10000000 = 'A'; @0x10000000 = '!'"  "!"
+test_output  "ternary discard else t"      "x = 5; x > 3 ? @0x10000000 = 'A' : @0x10000000 = 'B'; @0x10000000 = '!'"  "A!"
+test_output  "ternary discard else f"      "x = 1; x > 3 ? @0x10000000 = 'A' : @0x10000000 = 'B'; @0x10000000 = '!'"  "B!"
+
+# Block branches — caught the missing-`;` parser bug after `}`.
+test_output  "ternary block branches t" \
+  "x = 5; x > 3 ? { @0x10000000 = 'A'; @0x10000000 = 'a'; } : { @0x10000000 = 'B'; @0x10000000 = 'b'; } @0x10000000 = '!'" \
+  "Aa!"
+test_output  "ternary block branches f" \
+  "x = 1; x > 3 ? { @0x10000000 = 'A'; @0x10000000 = 'a'; } : { @0x10000000 = 'B'; @0x10000000 = 'b'; } @0x10000000 = '!'" \
+  "Bb!"
+test_output  "ternary block then only t"   "x = 5; x > 3 ? { @0x10000000 = 'A'; } @0x10000000 = '!'"  "A!"
+test_output  "ternary block then only f"   "x = 1; x > 3 ? { @0x10000000 = 'A'; } @0x10000000 = '!'"  "!"
+
+# Empty block branches.
+test_output  "ternary empty then"          "1 ? { } : { @0x10000000 = 'X'; } @0x10000000 = '!'"  "!"
+test_output  "ternary empty else"          "0 ? { } : { @0x10000000 = 'X'; } @0x10000000 = '!'"  "X!"
+
+# Chained ternary whose final branch is a block — exercises the
+# pp_btchk walker descending through NK_QMARK to NK_LBRACE.
+test_output  "ternary chain block tail" \
+  "x = 0; x ? @0x10000000 = 'A' : x ? @0x10000000 = 'B' : { @0x10000000 = 'C'; } @0x10000000 = '!'" \
+  "C!"
+
+# Ternary in arithmetic / as RHS of assignment.
+test_output  "ternary in arith"            "@0x10000000 = (1 ? 30 : 60) + 35"          "A"
+test_output  "ternary as RHS"              "x = (1 ? 'A' : 'B'); @0x10000000 = x"      "A"
+
+# Block-statements inside another block — exercises the px_block fix.
+test_output  "block stmt in block"         "{ { @0x10000000 = 'A'; } @0x10000000 = '!' }"  "A!"
+test_output  "block ternary in block t" \
+  "{ x = 5; x > 3 ? { @0x10000000 = 'A'; } : { @0x10000000 = 'B'; } @0x10000000 = '!' }" \
+  "A!"
+test_output  "block ternary in block f" \
+  "{ x = 1; x > 3 ? { @0x10000000 = 'A'; } : { @0x10000000 = 'B'; } @0x10000000 = '!' }" \
+  "B!"
+
+# ============================================================================
+echo "=== Loops ==="
+
+# Counted loop using a mutable index and a `break` guard.
+test_output  "loop counted ABCDE" \
+  "i := 0; loop { @0x10000000 = 'A' + i; i += 1; i >= 5 ? break; }" "ABCDE"
+
+# `break value` materializes the value into the loop's result temp.
+test_output  "loop break with value"       "x = loop { break 'Z'; }; @0x10000000 = x"  "Z"
+
+# Plain `break` leaves the result temp at its initial 0.
+test_output  "loop plain break is 0"       "x = loop { break; }; @0x10000000 = '0' + x"  "0"
+
+# `continue` jumps to the back-edge: skip even iterations, print odds.
+test_output  "loop continue skips even" \
+  "i := 0; loop { i += 1; i >= 6 ? break; (i & 1) == 0 ? continue; @0x10000000 = '0' + i; }" \
+  "135"
+
+# Discard-mode loop with side effects only — body's result is unused.
+test_output  "loop discard side fx"        "i := 0; loop { i += 1; @0x10000000 = '*'; i >= 3 ? break; }"  "***"
+
+# Nested loops: each `break`/`continue` targets the innermost enclosing
+# loop. Outer runs i=1,2 (breaks at i=3), inner runs once each.
+test_output  "loop nested" \
+  "i := 0; loop { i += 1; i >= 3 ? break; j := 0; loop { j += 1; j >= 2 ? break; @0x10000000 = '*'; } }" \
+  "**"
+
+# break/continue outside any loop must error cleanly.
+test_error   "break outside loop"          "break"      "error:"
+test_error   "continue outside loop"       "continue"   "error:"
+
+# Increment / decrement (prefix and postfix share the same AST; we
+# implement prefix semantics — return the new value).
+test_output  "prefix ++ in expr"           "y := 0; ++y; @0x10000000 = '0' + y"  "1"
+test_output  "prefix ++ in loop cond"      "y := 0; loop { ++y >= 4 ? break; @0x10000000 = '0' + y; }"  "123"
+test_output  "postfix ++ statement"        "y := 0; y++; y++; y++; @0x10000000 = '0' + y"  "3"
+test_output  "prefix -- in expr"           "y := 5; --y; @0x10000000 = '0' + y"  "4"
+
+# The original repro: sum 1..100 via loop+break with a value.
+test_output  "loop sum 1..100" \
+  "y := 0; x := 0; x = loop { ++y > 100 ? break x; x += y; }; @0x10000000 = (x == 5050 ? 'Y' : 'N')" \
+  "Y"
+
+# Block-terminated `loop`/`for` self-terminate so the next statement
+# isn't folded as a postfix on the loop expression.
+test_output  "loop block-terminates"       "loop { break; } @0x10000000 = '!'"  "!"
+test_output  "for top-level + stmt"        "for i in 0..3 { @0x10000000 = 'A' + i; } @0x10000000 = '!'"  "ABC!"
+test_output  "for inside block"            "{ for i in 0..3 { @0x10000000 = 'A' + i; } @0x10000000 = '!' }"  "ABC!"
+
+# ============================================================================
+echo "=== For loops ==="
+
+# Basic exclusive range.
+test_output  "for 0..5 ABCDE"              "for i in 0..5 { @0x10000000 = 'A' + i; }"  "ABCDE"
+
+# Inclusive range.
+test_output  "for 1..=5 12345"             "for i in 1..=5 { @0x10000000 = '0' + i; }"  "12345"
+
+# Empty range — body never executes; the trailing stmt still does.
+test_output  "for empty range"             "for i in 5..5 { @0x10000000 = 'X'; } @0x10000000 = '!'"  "!"
+
+# Variable bounds.
+test_output  "for var bounds"              "lo := 0; hi := 4; for i in lo..hi { @0x10000000 = 'A' + i; }"  "ABCD"
+
+# break inside for.
+test_output  "for break"                   "for i in 0..10 { i >= 3 ? break; @0x10000000 = '0' + i; }"  "012"
+
+# continue inside for: skips even iterations, advances variable.
+test_output  "for continue skips even"     "for i in 0..6 { (i & 1) == 0 ? continue; @0x10000000 = '0' + i; }"  "135"
+
+# Nested for: each level has its own LC entry.
+test_output  "for nested"                  "for i in 0..3 { for j in 0..2 { @0x10000000 = '*'; } }"  "******"
+
+# for as a value-producing expression with `break value`.
+test_output  "for break with value"        "x = for i in 0..10 { i >= 3 ? break i; }; @0x10000000 = '0' + x"  "3"
+
+# Inclusive range last iteration must fire.
+test_output  "for inclusive last fires"    "for i in 0..=2 { @0x10000000 = '0' + i; }"  "012"
+
+# Mixed nesting: for-in-loop and loop-in-for. Inner break/continue must
+# stay bound to the *innermost* enclosing loop.
+test_output  "for inside loop" \
+  "i := 0; loop { i >= 3 ? break; for j in 0..2 { @0x10000000 = '0' + i; } i += 1; }" \
+  "001122"
+test_output  "loop inside for" \
+  "for i in 0..3 { j := 0; loop { j >= 2 ? break; @0x10000000 = '0' + i; j += 1; } }" \
+  "001122"
+test_output  "inner break stays inner" \
+  "for i in 0..3 { for j in 0..3 { j >= 1 ? break; @0x10000000 = '0' + i; } }" \
+  "012"
+test_output  "inner continue stays inner" \
+  "for i in 0..2 { for j in 0..3 { j == 1 ? continue; @0x10000000 = '0' + j; } }" \
+  "0202"
+
+# Braceless single-statement bodies (parser parses any expression).
+test_output  "for braceless body"          "for i in 0..5 @0x10000000 = '0' + i;"  "01234"
+test_output  "for braceless sum body"      "x := 0; for i in 1..=4 x += i; @0x10000000 = '0' + x;"  ":"
+
+# ============================================================================
 echo "=== Error detection ==="
 test_error   "undefined variable"          "y"                          "error:"
 test_error   "undefined in expression"     "x = y"                      "error:"
