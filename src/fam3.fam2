@@ -78,16 +78,32 @@
 #   +0x120000  stack top
 #
 # Token buffer layout (at s10):
-#   0..31     token text (zero-padded, max 31 chars)
-#   32        sticky EOT flag
-#   33..63    reserved
-#   64..103   local label counters (10 words, digits 0-9)
-#   104..107  frame_depth (for prologue/epilogue)
-#   108..407  frame_stack (5 frames × 60 bytes each)
-#   472       eol_flag
-#   476       pushback_flag
-#   480       pending_nl
-#   504       line_count
+#   0..255    token text (zero-padded, max 255 chars)
+#   256       sticky EOT flag
+#   288..327  local label counters (10 words, digits 0-9)
+#   328..331  frame_depth (for prologue/epilogue)
+#   332..631  frame_stack (5 frames × 60 bytes each)
+#   680       input_flag (expansion buffer)
+#   684       input_ptr
+#   688       input_end
+#   696       eol_flag
+#   700       pushback_flag
+#   704       pending_nl
+#   728       line_count
+#
+# Token buffer constants:
+# .equ	TOK_MAX,	256
+# .equ	TB_EOT,		256
+# .equ	TB_LLCNT,	288
+# .equ	TB_FRAMEDEP,	328
+# .equ	TB_FRAMES,	332
+# .equ	TB_INFLAG,	680
+# .equ	TB_INPTR,	684
+# .equ	TB_INEND,	688
+# .equ	TB_EOL,		696
+# .equ	TB_PUSHBACK,	700
+# .equ	TB_PENDING,	704
+# .equ	TB_LINECOUNT,	728
 #
 # Fixup slot types:
 #   1 = J-type (PC-relative 20-bit signed)
@@ -466,15 +482,15 @@ B7 03 12 00	# lui	t2,0x120
 33 01 75 00	# add	sp,a0,t2 ; stack = PC + 0x120000
 
 # Zero: EOT flag, local-label counters, frame depth, flags
-23 00 0D 02	# sb	zero,32(s10) ; sticky EOT
-93 03 0D 04	# addi	t2,s10,64
-13 0E CD 1F	# addi	t3,s10,508
+23 00 0D 10	# sb	zero,256(s10) ; sticky EOT
+93 03 0D 12	# addi	t2,s10,288
+13 0E CD 2D	# addi	t3,s10,732
 
 # init_zero:
 23 A0 03 00	# sw	zero,0(t2)
 93 83 43 00	# addi	t2,t2,4
 E3 9C C3 FF	# bne	t2,t3,init_zero
-23 2C 0D 1E	# sw	zero,504(s10) ; line_count = 0
+23 2C 0D 2C	# sw	zero,728(s10) ; line_count = 0
 6F 00 40 00	# jal	zero,main_loop
 
 # main_loop:
@@ -518,7 +534,7 @@ EF 00 40 41	# jal	ra,find_mnem
 EF 10 80 11	# jal	ra,dispatch
 
 # ml_post:
-83 42 0D 02	# lbu	t0,32(s10) ; sticky EOT flag
+83 42 0D 10	# lbu	t0,256(s10) ; sticky EOT flag
 63 94 02 00	# bne	t0,zero,finish_all
 6F F0 5F F9	# jal	zero,main_loop
 
@@ -560,7 +576,7 @@ EF 00 80 10	# jal	ra,wrch
 EF 00 00 10	# jal	ra,wrch
 
 # Line number (decimal, up to 6 digits)
-83 25 8D 1F	# lw	a1,504(s10)
+83 25 8D 2D	# lw	a1,728(s10)
 13 01 81 FE	# addi	sp,sp,-24
 B7 83 01 00	# lui	t2,0x18
 93 83 03 6A	# addi	t2,t2,1696
@@ -623,21 +639,21 @@ B7 52 00 00	# lui	t0,0x5
 
 # Read one char into t1. Check expansion buffer first.
 # rdch:
-03 2F 8D 1C	# lw	t5,456(s10) ; input_flag
+03 2F 8D 2A	# lw	t5,680(s10) ; input_flag
 63 02 0F 02	# beq	t5,zero,rdch_uart
-03 2F CD 1C	# lw	t5,460(s10) ; input_ptr
-83 2F 0D 1D	# lw	t6,464(s10) ; input_end
+03 2F CD 2A	# lw	t5,684(s10) ; input_ptr
+83 2F 0D 2B	# lw	t6,688(s10) ; input_end
 63 0A FF 01	# beq	t5,t6,rdch_exh
 03 43 0F 00	# lbu	t1,0(t5)
 13 0F 1F 00	# addi	t5,t5,1
-23 26 ED 1D	# sw	t5,460(s10)
+23 26 ED 2B	# sw	t5,684(s10)
 67 80 00 00	# jalr	zero,0(ra)
 
 # rdch_exh:
-23 24 0D 1C	# sw	zero,456(s10) ; clear expansion flag
+23 24 0D 2A	# sw	zero,680(s10) ; clear expansion flag
 
 # rdch_uart:
-03 4F 0D 02	# lbu	t5,32(s10) ; sticky EOT
+03 4F 0D 10	# lbu	t5,256(s10) ; sticky EOT
 63 06 0F 00	# beq	t5,zero,rdch_poll
 13 05 20 00	# addi	a0,zero,2 ; E02: read after EOT
 6F F0 DF ED	# jal	zero,halt_err
@@ -659,23 +675,23 @@ E3 0C 0F FE	# beq	t5,zero,wrch
 
 # Pushback: if active, clear and return with existing token
 # read_token:
-83 22 CD 1D	# lw	t0,476(s10)
+83 22 CD 2B	# lw	t0,700(s10)
 63 86 02 00	# beq	t0,zero,rt_entry
-23 2E 0D 1C	# sw	zero,476(s10)
+23 2E 0D 2A	# sw	zero,700(s10)
 67 80 00 00	# jalr	zero,0(ra)
 
 # Transfer pending_nl → eol_flag
 # rt_entry:
-83 22 0D 1E	# lw	t0,480(s10)
-23 2C 5D 1C	# sw	t0,472(s10)
-23 20 0D 1E	# sw	zero,480(s10)
+83 22 0D 2C	# lw	t0,704(s10)
+23 2C 5D 2A	# sw	t0,696(s10)
+23 20 0D 2C	# sw	zero,704(s10)
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
 13 04 00 00	# addi	s0,zero,0
 
 # Zero token buffer (32 bytes)
 93 02 0D 00	# addi	t0,s10,0
-93 03 0D 02	# addi	t2,s10,32
+93 03 0D 10	# addi	t2,s10,256
 
 # rt_zero:
 23 80 02 00	# sb	zero,0(t0)
@@ -692,10 +708,10 @@ EF F0 5F F6	# jal	ra,rdch
 
 # Newline
 93 02 10 00	# addi	t0,zero,1
-23 2C 5D 1C	# sw	t0,472(s10) ; eol_flag
-83 22 8D 1F	# lw	t0,504(s10)
+23 2C 5D 2A	# sw	t0,696(s10) ; eol_flag
+83 22 8D 2D	# lw	t0,728(s10)
 93 82 12 00	# addi	t0,t0,1
-23 2C 5D 1E	# sw	t0,504(s10) ; line_count++
+23 2C 5D 2C	# sw	t0,728(s10) ; line_count++
 6F F0 5F FD	# jal	zero,rt_skip
 
 # rt_not_nl:
@@ -717,17 +733,17 @@ E3 1A 63 FF	# bne	t1,s6,rt_comment
 
 # Newline ends comment
 93 02 10 00	# addi	t0,zero,1
-23 2C 5D 1C	# sw	t0,472(s10)
-83 22 8D 1F	# lw	t0,504(s10)
+23 2C 5D 2A	# sw	t0,696(s10)
+83 22 8D 2D	# lw	t0,728(s10)
 93 82 12 00	# addi	t0,t0,1
-23 2C 5D 1E	# sw	t0,504(s10)
+23 2C 5D 2C	# sw	t0,728(s10)
 6F F0 9F F8	# jal	zero,rt_skip
 
 # rt_collect:
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 46 54 00	# blt	s0,t0,rt_coll_next
 13 05 30 00	# addi	a0,zero,3 ; E03: token too long
 6F F0 1F DE	# jal	zero,halt_err
@@ -744,10 +760,10 @@ EF F0 DF EC	# jal	ra,rdch
 
 # Newline terminates token
 93 02 10 00	# addi	t0,zero,1
-23 20 5D 1E	# sw	t0,480(s10) ; pending_nl
-83 22 8D 1F	# lw	t0,504(s10)
+23 20 5D 2C	# sw	t0,704(s10) ; pending_nl
+83 22 8D 2D	# lw	t0,728(s10)
 93 82 12 00	# addi	t0,t0,1
-23 2C 5D 1E	# sw	t0,504(s10)
+23 2C 5D 2C	# sw	t0,728(s10)
 6F 00 00 17	# jal	zero,rt_done
 
 # rt_coll_not_nl:
@@ -762,17 +778,17 @@ EF F0 9F E8	# jal	ra,rdch
 63 08 53 14	# beq	t1,t0,rt_eot
 E3 1A 63 FF	# bne	t1,s6,rt_coll_comment
 93 02 10 00	# addi	t0,zero,1
-23 20 5D 1E	# sw	t0,480(s10)
-83 22 8D 1F	# lw	t0,504(s10)
+23 20 5D 2C	# sw	t0,704(s10)
+83 22 8D 2D	# lw	t0,728(s10)
 93 82 12 00	# addi	t0,t0,1
-23 2C 5D 1E	# sw	t0,504(s10)
+23 2C 5D 2C	# sw	t0,728(s10)
 6F 00 C0 13	# jal	zero,rt_done
 
 # rt_str:
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0) ; store opening '"'
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 46 54 00	# blt	s0,t0,rt_str_lp
 13 05 30 00	# addi	a0,zero,3
 6F F0 9F D5	# jal	zero,halt_err
@@ -786,7 +802,7 @@ EF F0 5F E4	# jal	ra,rdch
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 46 54 00	# blt	s0,t0,rt_str_chk
 13 05 30 00	# addi	a0,zero,3
 6F F0 9F D2	# jal	zero,halt_err
@@ -801,7 +817,7 @@ B3 02 8D 00	# add	t0,s10,s0
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 46 54 00	# blt	s0,t0,rt_str_bs2
 13 05 30 00	# addi	a0,zero,3
 6F F0 1F D0	# jal	zero,halt_err
@@ -813,7 +829,7 @@ EF F0 DF DE	# jal	ra,rdch
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 E3 46 54 F8	# blt	s0,t0,rt_str_lp
 13 05 30 00	# addi	a0,zero,3
 6F F0 9F CD	# jal	zero,halt_err
@@ -836,7 +852,7 @@ E3 02 53 FE	# beq	t1,t0,rt_str_eot
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 46 54 00	# blt	s0,t0,rt_chr_chk
 13 05 30 00	# addi	a0,zero,3
 6F F0 5F C9	# jal	zero,halt_err
@@ -850,7 +866,7 @@ B3 02 8D 00	# add	t0,s10,s0
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 46 54 00	# blt	s0,t0,rt_chr_bs2
 13 05 30 00	# addi	a0,zero,3
 6F F0 DF C6	# jal	zero,halt_err
@@ -862,14 +878,14 @@ E3 06 53 F8	# beq	t1,t0,rt_str_eot
 B3 02 8D 00	# add	t0,s10,s0
 23 80 62 00	# sb	t1,0(t0)
 13 04 14 00	# addi	s0,s0,1
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 E3 46 54 F8	# blt	s0,t0,rt_chr_lp
 13 05 30 00	# addi	a0,zero,3
 6F F0 5F C4	# jal	zero,halt_err
 
 # rt_eot:
 93 02 10 00	# addi	t0,zero,1
-23 00 5D 02	# sb	t0,32(s10) ; set sticky EOT
+23 00 5D 10	# sb	t0,256(s10) ; set sticky EOT
 
 # rt_done:
 83 20 01 00	# lw	ra,0(sp)
@@ -1444,11 +1460,11 @@ EF F0 0F F4	# jal	ra,read_token
 6F 00 40 05	# jal	zero,rme_eval ; EOT finishes
 
 # rme_chk_eol:
-83 23 8D 1D	# lw	t2,472(s10) ; eol_flag
+83 23 8D 2B	# lw	t2,696(s10) ; eol_flag
 63 8A 03 00	# beq	t2,zero,rme_accept
 63 02 03 06	# beq	t1,zero,rme_bad
 93 03 10 00	# addi	t2,zero,1
-23 2E 7D 1C	# sw	t2,476(s10) ; pushback
+23 2E 7D 2A	# sw	t2,700(s10) ; pushback
 6F 00 C0 03	# jal	zero,rme_eval
 
 # rme_accept:
@@ -1554,7 +1570,7 @@ EF F0 CF E1	# jal	ra,read_token
 13 8E 02 FD	# addi	t3,t0,-48 ; digit
 93 1E 2E 00	# slli	t4,t3,0x2
 B3 0E DD 01	# add	t4,s10,t4
-03 AF 0E 04	# lw	t5,64(t4) ; counter[digit]
+03 AF 0E 12	# lw	t5,288(t4) ; counter[digit]
 93 03 60 06	# addi	t2,zero,102
 63 16 73 00	# bne	t1,t2,rbt_local_b
 13 0F 1F 00	# addi	t5,t5,1 ; forward: seq = counter+1
@@ -1832,9 +1848,9 @@ E3 16 03 FE	# bne	t1,zero,bln_pop
 23 20 11 00	# sw	ra,0(sp)
 93 12 25 00	# slli	t0,a0,0x2
 B3 02 5D 00	# add	t0,s10,t0
-03 A3 02 04	# lw	t1,64(t0) ; counter[digit]
+03 A3 02 12	# lw	t1,288(t0) ; counter[digit]
 13 03 13 00	# addi	t1,t1,1
-23 A0 62 04	# sw	t1,64(t0) ; counter[digit]++
+23 A0 62 12	# sw	t1,288(t0) ; counter[digit]++
 
 # Build name at sp+4
 93 05 03 00	# addi	a1,t1,0 ; seq
@@ -2136,7 +2152,7 @@ EF F0 9F C8	# jal	ra,record_fixup_arg
 6F 00 C0 36	# jal	zero,do_ps_nop
 
 # d_32:
-93 02 00 02	# addi	t0,zero,32
+93 02 00 10	# addi	t0,zero,256
 63 14 55 00	# bne	a0,t0,d_33
 6F 00 40 4F	# jal	zero,do_ps_neg
 
@@ -2370,7 +2386,7 @@ EF E0 5F F7	# jal	ra,parse_reg
 # Not a register → default rd=ra, pushback
 13 05 10 00	# addi	a0,zero,1
 93 02 10 00	# addi	t0,zero,1
-23 2E 5D 1C	# sw	t0,476(s10)
+23 2E 5D 2A	# sw	t0,700(s10)
 
 # jal_have_rd:
 23 22 A1 00	# sw	a0,4(sp)
@@ -2840,11 +2856,11 @@ EF F0 4F 80	# jal	ra,read_imm_op ; single-token expression per value
 13 09 19 00	# addi	s2,s2,1
 
 # Check if more values: pending_nl or eol_flag means end of line
-83 22 0D 1E	# lw	t0,480(s10) ; pending_nl (set when newline ends token)
+83 22 0D 2C	# lw	t0,704(s10) ; pending_nl (set when newline ends token)
 63 9A 02 00	# bne	t0,zero,byte_done
-83 22 8D 1D	# lw	t0,472(s10) ; eol_flag (set at start of next read_token)
+83 22 8D 2B	# lw	t0,696(s10) ; eol_flag (set at start of next read_token)
 63 96 02 00	# bne	t0,zero,byte_done
-83 42 0D 02	# lbu	t0,32(s10) ; sticky EOT
+83 42 0D 10	# lbu	t0,256(s10) ; sticky EOT
 E3 80 02 FE	# beq	t0,zero,byte_lp
 
 # byte_done:
@@ -2859,11 +2875,11 @@ E3 80 02 FE	# beq	t0,zero,byte_lp
 # word_lp:
 EF E0 DF FC	# jal	ra,read_imm_op
 EF F0 CF BA	# jal	ra,emit_word
-83 22 0D 1E	# lw	t0,480(s10)
+83 22 0D 2C	# lw	t0,704(s10)
 63 9A 02 00	# bne	t0,zero,word_done
-83 22 8D 1D	# lw	t0,472(s10)
+83 22 8D 2B	# lw	t0,696(s10)
 63 96 02 00	# bne	t0,zero,word_done
-83 42 0D 02	# lbu	t0,32(s10)
+83 42 0D 10	# lbu	t0,256(s10)
 E3 82 02 FE	# beq	t0,zero,word_lp
 
 # word_done:
@@ -2992,8 +3008,8 @@ EF E0 9F E6	# jal	ra,read_reg_op
 13 73 03 FF	# andi	t1,t1,-16 ; align to 16
 23 2A 61 02	# sw	t1,52(sp) ; frame_size
 
-# Save frame info at 108 + depth*60 offset in token area
-83 23 8D 06	# lw	t2,104(s10) ; frame_depth
+# Save frame info at TB_FRAMES + depth*60 offset in token area
+83 23 8D 14	# lw	t2,328(s10) ; frame_depth
 13 0E 50 00	# addi	t3,zero,5
 63 DA C3 0D	# bge	t2,t3,prol_bad
 
@@ -3002,7 +3018,7 @@ EF E0 9F E6	# jal	ra,read_reg_op
 93 9E 23 00	# slli	t4,t2,0x2 ; depth*4
 33 0E DE 41	# sub	t3,t3,t4 ; depth*60
 33 0E AE 01	# add	t3,t3,s10
-13 0E CE 06	# addi	t3,t3,108 ; frame base
+13 0E CE 14	# addi	t3,t3,332 ; frame base
 23 20 6E 00	# sw	t1,0(t3) ; frame_size
 23 22 5E 00	# sw	t0,4(t3) ; nregs
 
@@ -3022,7 +3038,7 @@ EF E0 9F E6	# jal	ra,read_reg_op
 
 # prol_cpd:
 93 83 13 00	# addi	t2,t2,1
-23 24 7D 06	# sw	t2,104(s10) ; depth++
+23 24 7D 14	# sw	t2,328(s10) ; depth++
 
 # Emit: addi sp, sp, -frame_size
 03 23 41 03	# lw	t1,52(sp)
@@ -3074,17 +3090,17 @@ EF F0 8F A3	# jal	ra,emit_s_inst
 # do_ps_epilogue:
 13 01 C1 FF	# addi	sp,sp,-4
 23 20 11 00	# sw	ra,0(sp)
-83 22 8D 06	# lw	t0,104(s10) ; frame_depth
+83 22 8D 14	# lw	t0,328(s10) ; frame_depth
 63 8C 02 0C	# beq	t0,zero,epil_bad
 93 82 F2 FF	# addi	t0,t0,-1
-23 24 5D 06	# sw	t0,104(s10)
+23 24 5D 14	# sw	t0,328(s10)
 
 # Load frame info
 13 93 62 00	# slli	t1,t0,0x6
 93 93 22 00	# slli	t2,t0,0x2
 33 03 73 40	# sub	t1,t1,t2 ; depth*60
 33 03 A3 01	# add	t1,t1,s10
-13 03 C3 06	# addi	t1,t1,108
+13 03 C3 14	# addi	t1,t1,332
 83 23 03 00	# lw	t2,0(t1) ; frame_size
 03 2E 43 00	# lw	t3,4(t1) ; nregs
 
@@ -3098,12 +3114,12 @@ EF F0 0F 95	# jal	ra,emit_i_inst
 
 # Recalculate frame pointer (t1 was clobbered by emit)
 # Emit: lw regs[i], (i+1)*4(sp)
-83 22 8D 06	# lw	t0,104(s10) ; current depth (already decremented)
+83 22 8D 14	# lw	t0,328(s10) ; current depth (already decremented)
 93 9E 62 00	# slli	t4,t0,0x6
 13 9F 22 00	# slli	t5,t0,0x2
 B3 8E EE 41	# sub	t4,t4,t5
 B3 8E AE 01	# add	t4,t4,s10
-93 8E CE 06	# addi	t4,t4,108
+93 8E CE 14	# addi	t4,t4,332
 03 AE 4E 00	# lw	t3,4(t4) ; nregs
 13 0F 00 00	# addi	t5,zero,0 ; i
 

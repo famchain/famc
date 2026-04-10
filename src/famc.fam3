@@ -434,7 +434,7 @@ str_comma_pipe:
 	.ascii	", or |"
 	.zero	2
 str_mix_fields:
-	.ascii	"mixed field styles"
+	.ascii	"cannot mix named and positional fields"
 	.zero	2
 str_ident:
 	.ascii	"identifier"

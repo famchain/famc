@@ -78,16 +78,32 @@
 #   +0x120000  stack top
 #
 # Token buffer layout (at s10):
-#   0..31     token text (zero-padded, max 31 chars)
-#   32        sticky EOT flag
-#   33..63    reserved
-#   64..103   local label counters (10 words, digits 0-9)
-#   104..107  frame_depth (for prologue/epilogue)
-#   108..407  frame_stack (5 frames × 60 bytes each)
-#   472       eol_flag
-#   476       pushback_flag
-#   480       pending_nl
-#   504       line_count
+#   0..255    token text (zero-padded, max 255 chars)
+#   256       sticky EOT flag
+#   288..327  local label counters (10 words, digits 0-9)
+#   328..331  frame_depth (for prologue/epilogue)
+#   332..631  frame_stack (5 frames × 60 bytes each)
+#   680       input_flag (expansion buffer)
+#   684       input_ptr
+#   688       input_end
+#   696       eol_flag
+#   700       pushback_flag
+#   704       pending_nl
+#   728       line_count
+#
+# Token buffer constants:
+.equ	TOK_MAX,	256
+.equ	TB_EOT,		256
+.equ	TB_LLCNT,	288
+.equ	TB_FRAMEDEP,	328
+.equ	TB_FRAMES,	332
+.equ	TB_INFLAG,	680
+.equ	TB_INPTR,	684
+.equ	TB_INEND,	688
+.equ	TB_EOL,		696
+.equ	TB_PUSHBACK,	700
+.equ	TB_PENDING,	704
+.equ	TB_LINECOUNT,	728
 #
 # Fixup slot types:
 #   1 = J-type (PC-relative 20-bit signed)
@@ -397,15 +413,15 @@ after_reg_tab:
 	add	sp, a0, t2		# stack = PC + 0x120000
 
 	# Zero: EOT flag, local-label counters, frame depth, flags
-	sb	zero, 32(s10)		# sticky EOT
-	addi	t2, s10, 64
-	addi	t3, s10, 508
+	sb	zero, TB_EOT(s10)		# sticky EOT
+	addi	t2, s10, TB_LLCNT
+	addi	t3, s10, TB_LINECOUNT+4
 init_zero:
 	sw	zero, 0(t2)
 	addi	t2, t2, 4
 	bne	t2, t3, init_zero
 
-	sw	zero, 504(s10)		# line_count = 0
+	sw	zero, TB_LINECOUNT(s10)		# line_count = 0
 	j	main_loop
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -449,7 +465,7 @@ ml_mnem:
 ml_dispatch:
 	jal	ra, dispatch
 ml_post:
-	lbu	t0, 32(s10)		# sticky EOT flag
+	lbu	t0, TB_EOT(s10)		# sticky EOT flag
 	bnez	t0, finish_all
 	j	main_loop
 
@@ -506,7 +522,7 @@ he_tens:
 	li	t0, '@'
 	jal	ra, wrch
 	# Line number (decimal, up to 6 digits)
-	lw	a1, 504(s10)
+	lw	a1, TB_LINECOUNT(s10)
 	addi	sp, sp, -24
 	li	t2, 100000
 	sw	t2, 0(sp)
@@ -563,19 +579,19 @@ halt_hang:
 
 rdch:
 	# Read one char into t1. Check expansion buffer first.
-	lw	t5, 456(s10)		# input_flag
+	lw	t5, TB_INFLAG(s10)		# input_flag
 	beqz	t5, rdch_uart
-	lw	t5, 460(s10)		# input_ptr
-	lw	t6, 464(s10)		# input_end
+	lw	t5, TB_INPTR(s10)		# input_ptr
+	lw	t6, TB_INEND(s10)		# input_end
 	beq	t5, t6, rdch_exh
 	lbu	t1, 0(t5)
 	addi	t5, t5, 1
-	sw	t5, 460(s10)
+	sw	t5, TB_INPTR(s10)
 	ret
 rdch_exh:
-	sw	zero, 456(s10)		# clear expansion flag
+	sw	zero, TB_INFLAG(s10)		# clear expansion flag
 rdch_uart:
-	lbu	t5, 32(s10)		# sticky EOT
+	lbu	t5, TB_EOT(s10)		# sticky EOT
 	beqz	t5, rdch_poll
 	li	a0, 2			# E02: read after EOT
 	j	halt_err
@@ -598,26 +614,26 @@ wrch:
 #  Tokenizer: read_token
 # ══════════════════════════════════════════════════════════════════════════════
 # On exit: s0 = length (0..31), token text at s10 (zero-padded to 32 bytes)
-# Sets sticky EOT flag at 32(s10) on EOT.
+# Sets sticky EOT flag at TB_EOT(s10) on EOT.
 
 read_token:
 	# Pushback: if active, clear and return with existing token
-	lw	t0, 476(s10)
+	lw	t0, TB_PUSHBACK(s10)
 	beqz	t0, rt_entry
-	sw	zero, 476(s10)
+	sw	zero, TB_PUSHBACK(s10)
 	ret
 rt_entry:
 	# Transfer pending_nl → eol_flag
-	lw	t0, 480(s10)
-	sw	t0, 472(s10)
-	sw	zero, 480(s10)
+	lw	t0, TB_PENDING(s10)
+	sw	t0, TB_EOL(s10)
+	sw	zero, TB_PENDING(s10)
 
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
 	li	s0, 0
 	# Zero token buffer (32 bytes)
 	mv	t0, s10
-	addi	t2, s10, 32
+	addi	t2, s10, TOK_MAX
 rt_zero:
 	sb	zero, 0(t0)
 	addi	t0, t0, 1
@@ -632,10 +648,10 @@ rt_skip:
 	bne	t1, s6, rt_not_nl	# s6 = 10 = '\n'
 	# Newline
 	li	t0, 1
-	sw	t0, 472(s10)		# eol_flag
-	lw	t0, 504(s10)
+	sw	t0, TB_EOL(s10)		# eol_flag
+	lw	t0, TB_LINECOUNT(s10)
 	addi	t0, t0, 1
-	sw	t0, 504(s10)		# line_count++
+	sw	t0, TB_LINECOUNT(s10)		# line_count++
 	j	rt_skip
 rt_not_nl:
 	li	t0, ','
@@ -655,17 +671,17 @@ rt_comment:
 	bne	t1, s6, rt_comment
 	# Newline ends comment
 	li	t0, 1
-	sw	t0, 472(s10)
-	lw	t0, 504(s10)
+	sw	t0, TB_EOL(s10)
+	lw	t0, TB_LINECOUNT(s10)
 	addi	t0, t0, 1
-	sw	t0, 504(s10)
+	sw	t0, TB_LINECOUNT(s10)
 	j	rt_skip
 
 rt_collect:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_coll_next
 	li	a0, 3			# E03: token too long
 	j	halt_err
@@ -680,10 +696,10 @@ rt_coll_next:
 	bne	t1, s6, rt_coll_not_nl
 	# Newline terminates token
 	li	t0, 1
-	sw	t0, 480(s10)		# pending_nl
-	lw	t0, 504(s10)
+	sw	t0, TB_PENDING(s10)		# pending_nl
+	lw	t0, TB_LINECOUNT(s10)
 	addi	t0, t0, 1
-	sw	t0, 504(s10)
+	sw	t0, TB_LINECOUNT(s10)
 	j	rt_done
 rt_coll_not_nl:
 	li	t0, 33
@@ -697,10 +713,10 @@ rt_coll_comment:
 	beq	t1, t0, rt_eot
 	bne	t1, s6, rt_coll_comment
 	li	t0, 1
-	sw	t0, 480(s10)
-	lw	t0, 504(s10)
+	sw	t0, TB_PENDING(s10)
+	lw	t0, TB_LINECOUNT(s10)
 	addi	t0, t0, 1
-	sw	t0, 504(s10)
+	sw	t0, TB_LINECOUNT(s10)
 	j	rt_done
 
 # ─── Quoted string token ─────────────────────────────────────────────
@@ -708,7 +724,7 @@ rt_str:
 	add	t0, s10, s0
 	sb	t1, 0(t0)		# store opening '"'
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_str_lp
 	li	a0, 3
 	j	halt_err
@@ -721,7 +737,7 @@ rt_str_lp:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_str_chk
 	li	a0, 3
 	j	halt_err
@@ -734,7 +750,7 @@ rt_str_bs:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_str_bs2
 	li	a0, 3
 	j	halt_err
@@ -745,7 +761,7 @@ rt_str_bs2:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_str_lp
 	li	a0, 3
 	j	halt_err
@@ -767,7 +783,7 @@ rt_chr_lp:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_chr_chk
 	li	a0, 3
 	j	halt_err
@@ -779,7 +795,7 @@ rt_chr_bs:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_chr_bs2
 	li	a0, 3
 	j	halt_err
@@ -790,14 +806,14 @@ rt_chr_bs2:
 	add	t0, s10, s0
 	sb	t1, 0(t0)
 	addi	s0, s0, 1
-	li	t0, 32
+	li	t0, TOK_MAX
 	blt	s0, t0, rt_chr_lp
 	li	a0, 3
 	j	halt_err
 
 rt_eot:
 	li	t0, 1
-	sb	t0, 32(s10)		# set sticky EOT
+	sb	t0, TB_EOT(s10)		# set sticky EOT
 rt_done:
 	lw	ra, 0(sp)
 	addi	sp, sp, 4
@@ -1348,11 +1364,11 @@ rme_lp:
 	beqz	t1, rme_bad		# empty on first iter
 	j	rme_eval		# EOT finishes
 rme_chk_eol:
-	lw	t2, 472(s10)		# eol_flag
+	lw	t2, TB_EOL(s10)		# eol_flag
 	beqz	t2, rme_accept
 	beqz	t1, rme_bad
 	li	t2, 1
-	sw	t2, 476(s10)		# pushback
+	sw	t2, TB_PUSHBACK(s10)		# pushback
 	j	rme_eval
 rme_accept:
 	add	t2, t0, t1
@@ -1457,7 +1473,7 @@ rbt_local:
 	addi	t3, t0, -'0'		# digit
 	slli	t4, t3, 2
 	add	t4, s10, t4
-	lw	t5, 64(t4)		# counter[digit]
+	lw	t5, TB_LLCNT(t4)		# counter[digit]
 	li	t2, 'f'
 	bne	t1, t2, rbt_local_b
 	addi	t5, t5, 1		# forward: seq = counter+1
@@ -1715,9 +1731,9 @@ def_local_label:
 	sw	ra, 0(sp)
 	slli	t0, a0, 2
 	add	t0, s10, t0
-	lw	t1, 64(t0)		# counter[digit]
+	lw	t1, TB_LLCNT(t0)		# counter[digit]
 	addi	t1, t1, 1
-	sw	t1, 64(t0)		# counter[digit]++
+	sw	t1, TB_LLCNT(t0)		# counter[digit]++
 	# Build name at sp+4
 	mv	a1, t1			# seq
 	addi	a2, sp, 4
@@ -2016,7 +2032,7 @@ d_31:
 	bne	a0, t0, d_32
 	j	do_ps_nop
 d_32:
-	li	t0, 32
+	li	t0, TOK_MAX
 	bne	a0, t0, d_33
 	j	do_ps_neg
 d_33:
@@ -2246,7 +2262,7 @@ do_j_jal:
 	# Not a register → default rd=ra, pushback
 	li	a0, 1
 	li	t0, 1
-	sw	t0, 476(s10)
+	sw	t0, TB_PUSHBACK(s10)
 jal_have_rd:
 	sw	a0, 4(sp)
 	li	a0, 1			# slot_type J
@@ -2732,11 +2748,11 @@ byte_lp:
 	sb	a0, 0(s2)
 	addi	s2, s2, 1
 	# Check if more values: pending_nl or eol_flag means end of line
-	lw	t0, 480(s10)		# pending_nl (set when newline ends token)
+	lw	t0, TB_PENDING(s10)		# pending_nl (set when newline ends token)
 	bnez	t0, byte_done
-	lw	t0, 472(s10)		# eol_flag (set at start of next read_token)
+	lw	t0, TB_EOL(s10)		# eol_flag (set at start of next read_token)
 	bnez	t0, byte_done
-	lbu	t0, 32(s10)		# sticky EOT
+	lbu	t0, TB_EOT(s10)		# sticky EOT
 	beqz	t0, byte_lp
 byte_done:
 	lw	ra, 0(sp)
@@ -2750,11 +2766,11 @@ do_ps_word:
 word_lp:
 	jal	ra, read_imm_op
 	jal	ra, emit_word
-	lw	t0, 480(s10)
+	lw	t0, TB_PENDING(s10)
 	bnez	t0, word_done
-	lw	t0, 472(s10)
+	lw	t0, TB_EOL(s10)
 	bnez	t0, word_done
-	lbu	t0, 32(s10)
+	lbu	t0, TB_EOT(s10)
 	beqz	t0, word_lp
 word_done:
 	lw	ra, 0(sp)
@@ -2884,8 +2900,8 @@ prol_build:
 	andi	t1, t1, -16		# align to 16
 	sw	t1, 52(sp)		# frame_size
 
-	# Save frame info at 108 + depth*60 offset in token area
-	lw	t2, 104(s10)		# frame_depth
+	# Save frame info at TB_FRAMES + depth*60 offset in token area
+	lw	t2, TB_FRAMEDEP(s10)		# frame_depth
 	li	t3, 5
 	bge	t2, t3, prol_bad
 	# Compute offset: depth * 60 = depth * 64 - depth * 4
@@ -2893,7 +2909,7 @@ prol_build:
 	slli	t4, t2, 2		# depth*4
 	sub	t3, t3, t4		# depth*60
 	add	t3, t3, s10
-	addi	t3, t3, 108		# frame base
+	addi	t3, t3, TB_FRAMES		# frame base
 	sw	t1, 0(t3)		# frame_size
 	sw	t0, 4(t3)		# nregs
 	# Copy regs
@@ -2910,7 +2926,7 @@ prol_cp:
 	j	prol_cp
 prol_cpd:
 	addi	t2, t2, 1
-	sw	t2, 104(s10)		# depth++
+	sw	t2, TB_FRAMEDEP(s10)		# depth++
 
 	# Emit: addi sp, sp, -frame_size
 	lw	t1, 52(sp)
@@ -2958,16 +2974,16 @@ prol_bad:
 do_ps_epilogue:
 	addi	sp, sp, -4
 	sw	ra, 0(sp)
-	lw	t0, 104(s10)		# frame_depth
+	lw	t0, TB_FRAMEDEP(s10)		# frame_depth
 	beqz	t0, epil_bad
 	addi	t0, t0, -1
-	sw	t0, 104(s10)
+	sw	t0, TB_FRAMEDEP(s10)
 	# Load frame info
 	slli	t1, t0, 6
 	slli	t2, t0, 2
 	sub	t1, t1, t2		# depth*60
 	add	t1, t1, s10
-	addi	t1, t1, 108
+	addi	t1, t1, TB_FRAMES
 	lw	t2, 0(t1)		# frame_size
 	lw	t3, 4(t1)		# nregs
 	# Emit: lw ra, 0(sp)
@@ -2979,12 +2995,12 @@ do_ps_epilogue:
 	jal	ra, emit_i_inst
 	# Emit: lw regs[i], (i+1)*4(sp)
 	# Recalculate frame pointer (t1 was clobbered by emit)
-	lw	t0, 104(s10)		# current depth (already decremented)
+	lw	t0, TB_FRAMEDEP(s10)		# current depth (already decremented)
 	slli	t4, t0, 6
 	slli	t5, t0, 2
 	sub	t4, t4, t5
 	add	t4, t4, s10
-	addi	t4, t4, 108
+	addi	t4, t4, TB_FRAMES
 	lw	t3, 4(t4)		# nregs
 	li	t5, 0			# i
 epil_lp:
