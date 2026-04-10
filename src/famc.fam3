@@ -454,6 +454,9 @@ str_frame_too_large:
 str_undef_var:
 	.ascii	"undefined variable"
 	.zero	2
+str_jump_oor:
+	.ascii	"internal compiler error: jump offset out of 1MB range\n"
+	.zero	2
 str_compound_todo:
 	.ascii	"compound assignment form not yet supported"
 	.zero	2
@@ -2081,13 +2084,30 @@ ix_ternary:
 	li	a2, 0
 	jal	lex_next		# consume :
 	mv	a0, s0
-	li	a1, P_TERNARY		# right-assoc
+	# Else-side is parsed at P_ASSIGN so that  cond ? a : b = c  reads as
+	# cond ? a : (b = c) — matching C. The inner `?` (P_TERNARY = 4) is
+	# still ≥ P_ASSIGN, so right-associative chains  a ? b : c ? d : e
+	# continue to parse correctly as  a ? b : (c ? d : e).
+	li	a1, P_ASSIGN
 	jal	parse_expr
 	mv	a1, a0
 	mv	a0, s4
 	jal	node_add_child
 ix_tern_done:
 	mv	s2, s4
+	# A block-terminated ternary self-terminates the same way a bare
+	# block does: skip the outer infix loop so a following postfix-
+	# shaped token (`@`, `[`, `{`, `++`, `--`, ...) starts a fresh
+	# statement instead of getting folded into the ternary as if it
+	# were a postfix on the whole expression. Without this,
+	#     x > 3 ? { ... } : { ... }
+	#     @0x10000000 = '\n';
+	# parses as `(ternary) @ 0x10000000 = '\n'` and the `\n` write
+	# lands at address 0.
+	lw	t0, N_LAST_CHILD(s4)
+	lw	t0, N_KIND(t0)
+	li	t1, NK_LBRACE
+	beq	t0, t1, px_ret
 	j	px_infix
 
 ix_dot:
@@ -2320,11 +2340,24 @@ pp_loop:
 	beq	a0, t0, pp_done
 	li	t0, NK_RBRACE
 	beq	a0, t0, pp_done
-	# If the just-parsed expression was a block, a trailing ';' is
-	# optional — block statements are self-terminating (like C).
-	lw	t0, N_KIND(s3)
-	li	t1, NK_LBRACE
-	beq	t0, t1, pp_loop
+	# Block-terminated statements are self-terminating (like C):
+	# trailing ';' is optional whenever the expression's textual end is
+	# a `}`. That includes a bare block, but also a ternary whose last
+	# branch is a block (and chained ternaries through their rightmost
+	# branch). Walk down N_LAST_CHILD through NK_QMARK nodes until we
+	# either reach a NK_LBRACE (self-terminating, no `;` needed) or
+	# anything else (a real `;` required).
+	mv	t0, s3
+pp_btchk:
+	lw	t1, N_KIND(t0)
+	li	t2, NK_LBRACE
+	beq	t1, t2, pp_loop
+	li	t2, NK_QMARK
+	bne	t1, t2, pp_semi_err
+	lw	t0, N_LAST_CHILD(t0)
+	beqz	t0, pp_semi_err
+	j	pp_btchk
+pp_semi_err:
 	# Error: missing semicolon
 	lla	a0, str_semi
 	mv	a1, s2
@@ -3191,7 +3224,17 @@ compile:
 .equ	CG_FRAME_OFF,	16	# bytes of frame used so far (grows upward from 0)
 .equ	CG_FRAME_PATCH,	20	# output offset of the frame alloc instruction (for backpatch)
 .equ	CG_FRAME_MAX,	24	# high-water mark of CG_FRAME_OFF (used for final frame size)
-.equ	CG_SZ,		28
+.equ	CG_OUT_BASE,	28	# absolute address of output buffer (offset 0). Read by
+				# patch_jal / emit_jal_* during gen_expr, where s3 is
+				# clobbered as a local and the global "base in s3"
+				# convention does not hold.
+.equ	CG_DISCARD,	32	# "next gen_expr call's value will be discarded" hint.
+				# Set by callers (ge_semi, gen_program loop, the
+				# branches of a discarded ternary) just before calling
+				# gen_expr; gen_expr snapshots it into s5 at entry and
+				# immediately clears it so child calls default to "value
+				# used" unless their parent re-sets it.
+.equ	CG_SZ,		36
 
 # Scope entry (linked list):
 #   0:  parent scope pointer
@@ -3300,9 +3343,13 @@ eli_two:
 	mv	a1, s0
 	mv	a2, t1
 	jal	emit_u
-	# addi rd, rd, lower
+	# Compute the sign-extended low 12 bits.
 	slli	t0, s1, 20
 	srai	t0, t0, 20
+	# Peephole: if the low 12 bits are zero (page-aligned constants such
+	# as MMIO addresses), the trailing addi would be a no-op — skip it.
+	beqz	t0, eli_done
+	# addi rd, rd, lower
 	li	a0, 0x13
 	mv	a1, s0
 	mv	a2, s0
@@ -3381,6 +3428,206 @@ emit_mv:
 	li	a3, 0
 	li	a4, 0
 	j	emit_i
+
+# ── Branch / jump helpers ────────────────────────────────────────────
+#
+# Control-flow strategy: we never use direct B-type branches as the
+# actual branch — their ±4 KB range silently breaks past 2048 bytes of
+# code.  Instead every conditional is a *trampoline*:
+#
+#     Binv  cond, rs1, rs2, +8     # skip the jal if condition is false
+#     jal   x0, target              # the real branch (±1 MB range)
+#
+# This costs 4 bytes per conditional but the patcher only ever has to
+# touch J-type immediates and there are no in-range decisions in the
+# rest of codegen.
+
+# jal_range_err: shared error path for out-of-range J-type immediates.
+# Bails out via the same print/exit pattern as other ICEs. Reached only
+# from emit_j / patch_jal — neither expects to return.
+jal_range_err:
+	lla	a0, str_jump_oor
+	jal	print_str
+	j	exit
+
+# emit_j: emit `jal rd, imm` with sign-extended 21-bit imm.
+# a0 = rd, a1 = imm (signed, multiple of 2, ±1 MB).
+# Encoding (RV32I J-type):
+#   bit 31     = imm[20]
+#   bits 30:21 = imm[10:1]
+#   bit 20     = imm[11]
+#   bits 19:12 = imm[19:12]
+#   bits 11:7  = rd
+#   bits 6:0   = opcode (0x6F)
+emit_j:
+	prologue	x0
+	# Range check: imm must be in [-0x100000, 0x100000).
+	li	t0, 0x100000
+	bge	a1, t0, jal_range_err
+	sub	t0, zero, t0		# -0x100000
+	blt	a1, t0, jal_range_err
+	li	t0, 0x6F		# opcode
+	andi	t1, a0, 0x1F
+	slli	t1, t1, 7		# rd
+	or	t0, t0, t1
+	# imm[19:12] -> bits 19:12
+	srli	t1, a1, 12
+	andi	t1, t1, 0xFF
+	slli	t1, t1, 12
+	or	t0, t0, t1
+	# imm[11] -> bit 20
+	srli	t1, a1, 11
+	andi	t1, t1, 1
+	slli	t1, t1, 20
+	or	t0, t0, t1
+	# imm[10:1] -> bits 30:21
+	srli	t1, a1, 1
+	andi	t1, t1, 0x3FF
+	slli	t1, t1, 21
+	or	t0, t0, t1
+	# imm[20] -> bit 31
+	srli	t1, a1, 20
+	andi	t1, t1, 1
+	slli	t1, t1, 31
+	or	a0, t0, t1
+	jal	emit_w
+	return
+
+# emit_b: emit B-type branch `Bf3 rs1, rs2, imm`.
+# a0 = f3 (0=eq, 1=ne, 4=lt, 5=ge, 6=ltu, 7=geu)
+# a1 = rs1, a2 = rs2, a3 = imm (signed, multiple of 2, ±4 KB).
+# Used only with imm=8 in the trampoline pattern, but kept general.
+emit_b:
+	prologue	x0
+	li	t0, 0x63		# opcode
+	andi	t1, a0, 7
+	slli	t1, t1, 12		# f3
+	or	t0, t0, t1
+	andi	t1, a1, 0x1F
+	slli	t1, t1, 15		# rs1
+	or	t0, t0, t1
+	andi	t1, a2, 0x1F
+	slli	t1, t1, 20		# rs2
+	or	t0, t0, t1
+	# imm[11] -> bit 7
+	srli	t1, a3, 11
+	andi	t1, t1, 1
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	# imm[4:1] -> bits 11:8
+	srli	t1, a3, 1
+	andi	t1, t1, 0xF
+	slli	t1, t1, 8
+	or	t0, t0, t1
+	# imm[10:5] -> bits 30:25
+	srli	t1, a3, 5
+	andi	t1, t1, 0x3F
+	slli	t1, t1, 25
+	or	t0, t0, t1
+	# imm[12] -> bit 31
+	srli	t1, a3, 12
+	andi	t1, t1, 1
+	slli	t1, t1, 31
+	or	a0, t0, t1
+	jal	emit_w
+	return
+
+# emit_jal_fwd: emit `jal rd, 0` placeholder for forward jumps.
+# a0 = rd. Returns a0 = byte offset of the emitted instruction
+# (relative to output base in CG_OUT_BASE(s1)) — feed it back to
+# patch_jal later. REQUIRES: s1 = codegen ctx.
+emit_jal_fwd:
+	prologue	s4 x0
+	lw	t0, CG_OUT_BASE(s1)	# output base
+	sub	s4, s2, t0		# offset before emit
+	li	a1, 0			# placeholder imm
+	jal	emit_j
+	mv	a0, s4
+	return
+
+# emit_jal_back: emit `jal x0, target` to a known earlier offset.
+# a0 = target byte offset (must be < current cursor).
+# REQUIRES: s1 = codegen ctx.
+emit_jal_back:
+	prologue	x0
+	lw	t1, CG_OUT_BASE(s1)
+	sub	t0, s2, t1		# cur off
+	sub	a1, a0, t0		# imm = target - cur (negative)
+	li	a0, 0			# rd = x0
+	j	emit_j
+
+# emit_branch_fwd: emit a forward conditional-branch trampoline.
+# a0 = f3 (uninverted: 0=eq, 1=ne, 4=lt, 5=ge, 6=ltu, 7=geu)
+# a1 = rs1, a2 = rs2
+# Emits  Binv  rs1, rs2, +8   ;  jal x0, 0 (placeholder)
+# Returns a0 = offset of the placeholder jal (use with patch_jal).
+emit_branch_fwd:
+	prologue	s4 s5 s6 x0
+	mv	s4, a1			# save rs1
+	mv	s5, a2			# save rs2
+	xori	s6, a0, 1		# invert f3 (toggles eq/ne, lt/ge, ltu/geu)
+	mv	a0, s6
+	mv	a1, s4
+	mv	a2, s5
+	li	a3, 8
+	jal	emit_b
+	li	a0, 0			# rd = x0
+	jal	emit_jal_fwd
+	return
+
+# patch_jal: backpatch a previously emitted placeholder jal so that it
+# targets the *current* output cursor.  a0 = saved offset returned by
+# emit_jal_fwd / emit_branch_fwd.  The instruction at base+off is
+# assumed to have its imm bits all zero (placeholder), so we can OR the
+# encoded imm bits straight in without masking.
+patch_jal:
+	prologue	x0
+	lw	t4, CG_OUT_BASE(s1)	# output base (REQUIRES s1 = codegen ctx)
+	add	t6, t4, a0		# t6 = absolute address of placeholder
+	sub	t5, s2, t4		# cur byte offset
+	sub	t5, t5, a0		# t5 = imm (target - placeholder PC)
+	# Range check: imm must be in [-0x100000, 0x100000).
+	li	t0, 0x100000
+	bge	t5, t0, jal_range_err
+	sub	t0, zero, t0		# -0x100000
+	blt	t5, t0, jal_range_err
+	# Read existing 4 bytes
+	lbu	t0, 0(t6)
+	lbu	t1, 1(t6)
+	slli	t1, t1, 8
+	or	t0, t0, t1
+	lbu	t1, 2(t6)
+	slli	t1, t1, 16
+	or	t0, t0, t1
+	lbu	t1, 3(t6)
+	slli	t1, t1, 24
+	or	t0, t0, t1
+	# OR in J-type imm bits
+	srli	t1, t5, 12
+	andi	t1, t1, 0xFF
+	slli	t1, t1, 12
+	or	t0, t0, t1
+	srli	t1, t5, 11
+	andi	t1, t1, 1
+	slli	t1, t1, 20
+	or	t0, t0, t1
+	srli	t1, t5, 1
+	andi	t1, t1, 0x3FF
+	slli	t1, t1, 21
+	or	t0, t0, t1
+	srli	t1, t5, 20
+	andi	t1, t1, 1
+	slli	t1, t1, 31
+	or	t0, t0, t1
+	# Write back
+	sb	t0, 0(t6)
+	srli	t1, t0, 8
+	sb	t1, 1(t6)
+	srli	t1, t0, 16
+	sb	t1, 2(t6)
+	srli	t1, t0, 24
+	sb	t1, 3(t6)
+	return
 
 # ── Register allocator ───────────────────────────────────────────────
 
@@ -3596,9 +3843,15 @@ sf_notfound:
 # Returns: a0 = register holding result
 
 gen_expr:
-	prologue	s0 s1 s3 s4 s6 x0
+	prologue	s0 s1 s3 s4 s5 s6 x0
 	mv	s0, a0			# node
 	mv	s1, a1			# ctx
+	# Snapshot+clear the discard hint. s5 = "this call's result is unused"
+	# (1) or "value is consumed" (0). Cleared from the ctx so recursive
+	# gen_expr calls inside handlers default to "value used" unless their
+	# parent re-sets CG_DISCARD just before recursing.
+	lw	s5, CG_DISCARD(s1)
+	sw	zero, CG_DISCARD(s1)
 	lw	s6, N_KIND(s0)		# kind (s6 to avoid clobbering s2=output cursor)
 
 	# Number literal
@@ -3654,6 +3907,10 @@ gen_expr:
 	beq	s6, t0, ge_binop
 	li	t0, NK_GTE
 	beq	s6, t0, ge_binop
+
+	# Ternary: cond ? then : else  (else optional)
+	li	t0, NK_QMARK
+	beq	s6, t0, ge_ternary
 
 	# Block
 	li	t0, NK_LBRACE
@@ -4436,6 +4693,232 @@ ge_bo_free_ret:
 # first detect that case and copy the value into a fresh temp before
 # freeing anything.
 #
+# ── Ternary: cond ? then : else  (else optional) ─────────────────────
+# AST: NK_QMARK with 2 or 3 children — cond, then, [else].
+#
+# Lowering:
+#     <gen cond> -> rc
+#     beqz rc, Lelse              ; emit_branch_fwd f3=eq, rs2=x0
+#     <gen then> -> rt
+#     mv result, rt
+#     jal x0, Lend                ; emit_jal_fwd
+#   Lelse:
+#     <gen else> -> re            ; or `li result, 0` if no else
+#     mv result, re
+#   Lend:
+#
+# `result` is a fresh temp allocated *before* the cond so both branches
+# converge to a single, stable destination register.
+#
+# Stack scratch layout (16 bytes):
+#    0(sp):  then-node ptr
+#    4(sp):  else-node ptr (or 0)
+#    8(sp):  Lelse fixup offset
+#   12(sp):  Lend  fixup offset
+ge_ternary:
+	# Walk children
+	lw	s3, N_FIRST_CHILD(s0)	# cond node
+	lw	s4, N_NEXT_SIB(s3)	# then node
+	lw	s6, N_NEXT_SIB(s4)	# else node (or 0 if absent)
+
+	# If our caller discarded our value (s5 set on entry), take the
+	# discard path: skip the result temp and the per-branch mvs.
+	bnez	s5, ge_ternary_discard
+
+	addi	sp, sp, -16
+	sw	s4, 0(sp)		# stash then node
+	sw	s6, 4(sp)		# stash else node
+
+	# Allocate result reg up front so both branches write to the same dest.
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0			# s4 = result reg (sticky for the rest)
+
+	# Codegen condition
+	mv	a0, s3
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0			# s3 = cond reg
+	mv	s6, a1			# s6 = cond temp flag
+
+	# Emit  beqz cond, Lelse  ≡  branch-eq cond, x0, Lelse
+	li	a0, 0			# f3 = BEQ (uninverted; emit_branch_fwd inverts)
+	mv	a1, s3			# rs1
+	li	a2, 0			# rs2 = x0
+	jal	emit_branch_fwd
+	sw	a0, 8(sp)		# Lelse fixup
+
+	# Free cond reg if temporary
+	beqz	s6, gt_cond_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+gt_cond_done:
+
+	# Codegen then-expr
+	lw	a0, 0(sp)		# then node
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s6, a1
+
+	# mv result, then  (omit no-op if same reg)
+	beq	s4, s3, gt_then_no_mv
+	mv	a0, s4
+	mv	a1, s3
+	jal	emit_mv
+gt_then_no_mv:
+	beqz	s6, gt_then_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+gt_then_done:
+
+	# Emit unconditional jump over the else branch (placeholder)
+	li	a0, 0			# rd = x0
+	jal	emit_jal_fwd
+	sw	a0, 12(sp)		# Lend fixup
+
+	# Lelse: patch the conditional to here
+	lw	a0, 8(sp)
+	jal	patch_jal
+
+	# Codegen else-expr — or default to 0 if none.
+	lw	s3, 4(sp)		# else node
+	beqz	s3, gt_else_zero
+	mv	a0, s3
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s6, a1
+	beq	s4, s3, gt_else_no_mv
+	mv	a0, s4
+	mv	a1, s3
+	jal	emit_mv
+gt_else_no_mv:
+	beqz	s6, gt_else_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+	j	gt_else_done
+gt_else_zero:
+	# No else branch: result = 0
+	mv	a0, s4
+	li	a1, 0
+	jal	emit_li
+gt_else_done:
+
+	# Lend: patch the unconditional jump to here
+	lw	a0, 12(sp)
+	jal	patch_jal
+
+	addi	sp, sp, 16
+	mv	a0, s4			# return result reg
+	li	a1, 1			# as a temporary (caller frees)
+	j	ge_ret
+
+# ── Ternary, discard path ─────────────────────────────────────────────
+# Caller's value is discarded (e.g. `cond ? then : else;` or top-level).
+# We skip the result temp and the two `mv result, val` instructions.
+# Layout differs slightly depending on whether an else-branch exists:
+#
+#   With else:                          Without else:
+#     <gen cond>                          <gen cond>
+#     beqz cond, Lelse                    beqz cond, Lend
+#     <gen then, discarded>               <gen then, discarded>
+#     jal Lend                          Lend:
+#   Lelse:
+#     <gen else, discarded>
+#   Lend:
+#
+# Stack scratch (16 bytes):
+#   0(sp):  then-node ptr
+#   4(sp):  else-node ptr (or 0)
+#   8(sp):  Lelse-or-Lend fixup (the conditional branch)
+#  12(sp):  Lend fixup (only used when an else-branch exists)
+ge_ternary_discard:
+	addi	sp, sp, -16
+	sw	s4, 0(sp)		# then node
+	sw	s6, 4(sp)		# else node (or 0)
+
+	# Codegen condition (its value is used by the branch)
+	mv	a0, s3
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0			# cond reg
+	mv	s4, a1			# cond temp flag
+
+	# Emit branch-if-false to either Lelse (has-else) or Lend (no-else).
+	li	a0, 0			# f3 = BEQ (uninverted; emit_branch_fwd inverts)
+	mv	a1, s3			# rs1 = cond
+	li	a2, 0			# rs2 = x0
+	jal	emit_branch_fwd
+	sw	a0, 8(sp)		# fixup
+
+	# Free cond temp
+	beqz	s4, gtd_cond_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+gtd_cond_done:
+
+	# Codegen then-branch in discard mode
+	li	t0, 1
+	sw	t0, CG_DISCARD(s1)
+	lw	a0, 0(sp)		# then node
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s4, a1
+	beqz	s4, gtd_then_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+gtd_then_done:
+
+	# If there's no else branch, the conditional already targets Lend
+	# directly. Patch it here and we're done.
+	lw	s6, 4(sp)		# else node (or 0)
+	beqz	s6, gtd_no_else
+
+	# Has-else case: emit unconditional jump over the else branch,
+	# then patch the conditional to target the start of the else.
+	li	a0, 0			# rd = x0
+	jal	emit_jal_fwd
+	sw	a0, 12(sp)		# Lend fixup
+
+	lw	a0, 8(sp)		# Lelse fixup
+	jal	patch_jal
+
+	# Codegen else-branch in discard mode
+	li	t0, 1
+	sw	t0, CG_DISCARD(s1)
+	lw	a0, 4(sp)
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s4, a1
+	beqz	s4, gtd_else_done
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+gtd_else_done:
+	# Patch Lend
+	lw	a0, 12(sp)
+	jal	patch_jal
+	j	gtd_ret
+
+gtd_no_else:
+	# No else branch: the conditional jumps straight to here.
+	lw	a0, 8(sp)
+	jal	patch_jal
+
+gtd_ret:
+	addi	sp, sp, 16
+	li	a0, 0			# return x0 (caller will not use it)
+	li	a1, 0			# not a temp — nothing to free
+	j	ge_ret
+
 # Stack scratch layout (16 bytes):
 #   0(sp):  saved scope head
 #   4(sp):  saved frame offset
@@ -4523,6 +5006,9 @@ ge_bd_rest:
 
 # ── Semicolon wrapper (statement — gen child, result = 0) ────────────
 ge_semi:
+	# Tell the child its value will be discarded.
+	li	t0, 1
+	sw	t0, CG_DISCARD(s1)
 	lw	a0, N_FIRST_CHILD(s0)
 	mv	a1, s1
 	jal	gen_expr
@@ -4935,6 +5421,8 @@ gen_program:
 	sw	zero, CG_REG_BITMAP(s1)
 	sw	zero, CG_SCOPE(s1)
 	sw	s5, CG_INPUT(s1)	# input base from compile
+	sw	s3, CG_OUT_BASE(s1)	# output buffer base (s3 holds it here)
+	sw	zero, CG_DISCARD(s1)	# default: result is consumed
 	sw	zero, CG_FRAME_OFF(s1)	# no stack slots yet
 	sw	zero, CG_FRAME_MAX(s1)	# high-water mark also starts at 0
 
@@ -4961,6 +5449,10 @@ gen_program:
 	lw	s4, N_FIRST_CHILD(s0)
 gp_loop:
 	beqz	s4, gp_done
+	# Top-level statements always discard their value — pass the hint so
+	# ternary/etc. can skip materializing it.
+	li	t0, 1
+	sw	t0, CG_DISCARD(s1)
 	mv	a0, s4
 	mv	a1, s1
 	jal	gen_expr

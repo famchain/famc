@@ -1,6 +1,6 @@
 #!/bin/sh
 
-CPU="rv32i"
+CPU="rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false"
 FILE=""
 
 for arg in "$@"; do
@@ -37,5 +37,5 @@ qemu-system-riscv32 \
 	-nographic \
 	-bios none \
 	-device loader,file="$FILE",addr=0x80000000 \
-	-serial \
-	mon:stdio 2>/dev/null
+	-serial stdio \
+	-monitor none 2>/dev/null

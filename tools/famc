@@ -33,7 +33,7 @@ fi
 
 (cat "$SRC"; printf '\004') | qemu-system-riscv32 \
 	-machine virt \
-	-cpu rv32i \
+	-cpu rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false \
 	-nographic \
 	-bios none \
 	-device loader,file="$ASM",addr=0x80000000 \
