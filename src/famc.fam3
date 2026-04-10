@@ -3133,15 +3133,1143 @@ compile:
 	# Parse
 	mv	a0, s0
 	jal	parse_program
-	mv	s4, a0
+	mv	s4, a0			# s4 = program AST
 
-	# Print AST as indented tree
+	# Codegen
 	mv	a0, s4
-	li	a1, 0			# depth = 0
-	jal	print_ast
+	jal	gen_program
 
 	mv	a0, s3
 	mv	a1, s2
+	return
+
+# ══════════════════════════════════════════════════════════════════════
+#  Codegen
+# ══════════════════════════════════════════════════════════════════════
+
+# ── Codegen state (stored at fixed offset in heap) ───────────────────
+# We allocate a codegen context on the heap:
+#   0:   reg_alloc bitmap (32-bit: bit N = sN in use, bits 0-10 for s0-s10)
+#   4:   scope pointer (current scope for variable lookup)
+#   8:   input base (for reading token text from source)
+#   12:  fixup list pointer (for forward branches)
+
+.equ	CG_REG_BITMAP,	0
+.equ	CG_SCOPE,	4
+.equ	CG_INPUT,	8
+.equ	CG_FIXUP,	12
+.equ	CG_FRAME_OFF,	16	# next stack frame offset (grows negative)
+.equ	CG_FRAME_PATCH,	20	# output offset of the frame alloc instruction (for backpatch)
+.equ	CG_SZ,		24
+
+# Scope entry (linked list):
+#   0:  parent scope pointer
+#   4:  name offset (in input)
+#   8:  name length
+#   12: location (register number, or -1 for stack)
+#   16: stack offset (if on stack)
+.equ	SC_PARENT,	0
+.equ	SC_NAME_OFF,	4
+.equ	SC_NAME_LEN,	8
+.equ	SC_REG,		12
+.equ	SC_STK_OFF,	16
+.equ	SC_SZ,		20
+
+# ── emit_w: emit 32-bit word to output buffer ────────────────────────
+# a0 = word. Uses s2 as write cursor.
+emit_w:
+	sb	a0, 0(s2)
+	srli	t0, a0, 8
+	sb	t0, 1(s2)
+	srli	t0, t0, 8
+	sb	t0, 2(s2)
+	srli	t0, t0, 8
+	sb	t0, 3(s2)
+	addi	s2, s2, 4
+	ret
+
+# ── RV32I instruction builders ───────────────────────────────────────
+
+# emit_r: opcode=a0, rd=a1, rs1=a2, rs2=a3, f3=a4, f7=a5
+emit_r:
+	prologue	x0
+	andi	t1, a5, 0x7F
+	slli	t0, t1, 25
+	andi	t1, a3, 0x1F
+	slli	t1, t1, 20
+	or	t0, t0, t1
+	andi	t1, a2, 0x1F
+	slli	t1, t1, 15
+	or	t0, t0, t1
+	andi	t1, a4, 0x7
+	slli	t1, t1, 12
+	or	t0, t0, t1
+	andi	t1, a1, 0x1F
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	andi	t1, a0, 0x7F
+	or	a0, t0, t1
+	jal	emit_w
+	return
+
+# emit_i: opcode=a0, rd=a1, rs1=a2, f3=a3, imm12=a4
+emit_i:
+	prologue	x0
+	slli	t0, a4, 20
+	andi	t1, a2, 0x1F
+	slli	t1, t1, 15
+	or	t0, t0, t1
+	andi	t1, a3, 0x7
+	slli	t1, t1, 12
+	or	t0, t0, t1
+	andi	t1, a1, 0x1F
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	andi	t1, a0, 0x7F
+	or	a0, t0, t1
+	jal	emit_w
+	return
+
+# emit_u: opcode=a0, rd=a1, imm20=a2
+emit_u:
+	prologue	x0
+	slli	t0, a2, 12
+	andi	t1, a1, 0x1F
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	andi	t1, a0, 0x7F
+	or	a0, t0, t1
+	jal	emit_w
+	return
+
+# emit_li: rd=a0, imm=a1. Emits li (addi or lui+addi).
+emit_li:
+	prologue	s0 s1 x0
+	mv	s0, a0			# rd
+	mv	s1, a1			# imm
+	# Check if fits in 12-bit signed
+	li	t0, 2047
+	bgt	s1, t0, eli_two
+	li	t0, -2048
+	blt	s1, t0, eli_two
+	# Single addi rd, x0, imm
+	li	a0, 0x13		# addi
+	mv	a1, s0
+	li	a2, 0			# rs1 = x0
+	li	a3, 0			# f3
+	mv	a4, s1
+	jal	emit_i
+	j	eli_done
+eli_two:
+	# lui rd, upper
+	li	t0, 0x800
+	add	t1, s1, t0
+	srai	t1, t1, 12
+	li	a0, 0x37
+	mv	a1, s0
+	mv	a2, t1
+	jal	emit_u
+	# addi rd, rd, lower
+	slli	t0, s1, 20
+	srai	t0, t0, 20
+	li	a0, 0x13
+	mv	a1, s0
+	mv	a2, s0
+	li	a3, 0
+	mv	a4, t0
+	jal	emit_i
+eli_done:
+	return
+
+# emit_s: opcode=a0, rs1=a1(base), rs2=a2(value), f3=a3, imm12=a4
+emit_s:
+	prologue	x0
+	srli	t1, a4, 5
+	andi	t1, t1, 0x7F
+	slli	t0, t1, 25		# imm[11:5]
+	andi	t1, a2, 0x1F
+	slli	t1, t1, 20		# rs2
+	or	t0, t0, t1
+	andi	t1, a1, 0x1F
+	slli	t1, t1, 15		# rs1
+	or	t0, t0, t1
+	andi	t1, a3, 0x7
+	slli	t1, t1, 12		# f3
+	or	t0, t0, t1
+	andi	t1, a4, 0x1F
+	slli	t1, t1, 7		# imm[4:0]
+	or	t0, t0, t1
+	andi	t1, a0, 0x7F
+	or	a0, t0, t1
+	jal	emit_w
+	return
+
+# emit_sw: rs1=a0(base), rs2=a1(value), imm=a2. Emits sw.
+emit_sw:
+	mv	a4, a2			# imm
+	mv	a2, a1			# rs2
+	mv	a1, a0			# rs1
+	li	a3, 2			# f3 = sw
+	li	a0, 0x23		# store opcode
+	j	emit_s
+
+# emit_lw: rd=a0, rs1=a1(base), imm=a2. Emits lw.
+emit_lw:
+	mv	a4, a2			# imm
+	mv	a2, a1			# rs1
+	mv	a1, a0			# rd
+	li	a3, 2			# f3 = lw
+	li	a0, 0x03		# load opcode
+	j	emit_i
+
+# emit_add: rd=a0, rs1=a1, rs2=a2
+emit_add:
+	mv	a3, a2
+	mv	a2, a1
+	mv	a1, a0
+	li	a4, 0
+	li	a5, 0
+	li	a0, 0x33
+	j	emit_r
+
+# emit_sub: rd=a0, rs1=a1, rs2=a2
+emit_sub:
+	mv	a3, a2
+	mv	a2, a1
+	mv	a1, a0
+	li	a4, 0
+	li	a5, 0x20
+	li	a0, 0x33
+	j	emit_r
+
+# emit_mv: rd=a0, rs=a1. Emits addi rd, rs, 0.
+emit_mv:
+	mv	a2, a1			# rs1
+	mv	a1, a0			# rd
+	li	a0, 0x13
+	li	a3, 0
+	li	a4, 0
+	j	emit_i
+
+# ── Register allocator ───────────────────────────────────────────────
+
+# reg_alloc: allocate a register. Returns reg number in a0.
+# Uses s0-s10 (regs 8-18). Checks CG_REG_BITMAP.
+# a0 = codegen context ptr
+# temp_alloc: allocate a temporary register (t0-t6 = x5-x7, x28-x31)
+# a0=ctx → a0=reg number
+temp_alloc:
+	lw	t0, CG_REG_BITMAP(a0)
+	# Try t0-t2 (x5-x7)
+	li	t1, 5
+ta_loop1:
+	li	t2, 8
+	beq	t1, t2, ta_try2
+	li	t2, 1
+	sll	t2, t2, t1
+	and	t3, t0, t2
+	bnez	t3, ta_next1
+	or	t0, t0, t2
+	sw	t0, CG_REG_BITMAP(a0)
+	mv	a0, t1
+	ret
+ta_next1:
+	addi	t1, t1, 1
+	j	ta_loop1
+ta_try2:
+	# Try t3-t6 (x28-x31)
+	li	t1, 28
+ta_loop2:
+	li	t2, 32
+	beq	t1, t2, ta_fail
+	li	t2, 1
+	sll	t2, t2, t1
+	and	t3, t0, t2
+	bnez	t3, ta_next2
+	or	t0, t0, t2
+	sw	t0, CG_REG_BITMAP(a0)
+	mv	a0, t1
+	ret
+ta_next2:
+	addi	t1, t1, 1
+	j	ta_loop2
+ta_fail:
+	li	a0, -1
+	ret
+
+# var_alloc: allocate a variable register (s0-s10 = x8-x18)
+# a0=ctx → a0=reg number
+var_alloc:
+	lw	t0, CG_REG_BITMAP(a0)
+	li	t1, 8			# s0 = x8
+va_loop:
+	li	t2, 19			# s10 = x18, stop at 19
+	beq	t1, t2, va_fail
+	li	t2, 1
+	sll	t2, t2, t1
+	and	t3, t0, t2
+	bnez	t3, va_next
+	or	t0, t0, t2
+	sw	t0, CG_REG_BITMAP(a0)
+	mv	a0, t1
+	ret
+va_next:
+	addi	t1, t1, 1
+	j	va_loop
+va_fail:
+	# Out of s-regs — return -1 (caller handles stack slot)
+	li	a0, -1
+	ret
+
+# reg_free: free a register (works for both t and s regs)
+# a0=ctx, a1=reg number
+reg_free:
+	beqz	a1, rf_skip		# don't free x0
+	lw	t0, CG_REG_BITMAP(a0)
+	li	t1, 1
+	sll	t1, t1, a1
+	xori	t1, t1, -1
+	and	t0, t0, t1
+	sw	t0, CG_REG_BITMAP(a0)
+rf_skip:
+	ret
+
+# ── Scope / variable lookup ──────────────────────────────────────────
+
+# scope_add: add variable to current scope
+# a0=ctx, a1=name_off, a2=name_len, a3=reg_num
+scope_add:
+	prologue	s0 x0
+	mv	s0, a0			# ctx
+	# Allocate scope entry
+	li	a0, SC_SZ
+	jal	alloc
+	# Fill entry
+	lw	t0, CG_SCOPE(s0)
+	sw	t0, SC_PARENT(a0)	# link to previous
+	sw	a1, SC_NAME_OFF(a0)
+	sw	a2, SC_NAME_LEN(a0)
+	sw	a3, SC_REG(a0)
+	sw	zero, SC_STK_OFF(a0)
+	# Set as current scope
+	sw	a0, CG_SCOPE(s0)
+	return
+
+# scope_find: look up variable by name
+# a0=ctx, a1=name_off, a2=name_len
+# Returns: a0=reg number (or -1), a1=stack offset
+scope_find:
+	lw	t0, CG_SCOPE(a0)	# current scope
+	lw	t4, CG_INPUT(a0)	# input base
+sf_loop:
+	beqz	t0, sf_notfound
+	# Compare name
+	lw	t1, SC_NAME_OFF(t0)
+	lw	t2, SC_NAME_LEN(t0)
+	bne	t2, a2, sf_next		# length mismatch
+	# Compare bytes
+	add	t1, t4, t1		# entry name ptr
+	add	t3, t4, a1		# search name ptr
+	mv	t5, t2			# len
+sf_cmp:
+	beqz	t5, sf_found
+	lbu	t6, 0(t1)
+	lbu	a7, 0(t3)
+	bne	t6, a7, sf_next
+	addi	t1, t1, 1
+	addi	t3, t3, 1
+	addi	t5, t5, -1
+	j	sf_cmp
+sf_found:
+	lw	a0, SC_REG(t0)
+	lw	a1, SC_STK_OFF(t0)
+	ret
+sf_next:
+	lw	t0, SC_PARENT(t0)
+	j	sf_loop
+sf_notfound:
+	li	a0, -1
+	ret
+
+# ── Expression codegen ───────────────────────────────────────────────
+# gen_expr: a0=AST node, a1=codegen ctx
+# Returns: a0 = register holding result
+
+gen_expr:
+	prologue	s0 s1 s3 s4 s6 x0
+	mv	s0, a0			# node
+	mv	s1, a1			# ctx
+	lw	s6, N_KIND(s0)		# kind (s6 to avoid clobbering s2=output cursor)
+
+	# Number literal
+	li	t0, NK_NUMBER
+	beq	s6, t0, ge_number
+
+	# Identifier (variable reference)
+	li	t0, NK_IDENT
+	beq	s6, t0, ge_ident
+
+	# Assignment: = or :=
+	li	t0, NK_ASSIGN
+	beq	s6, t0, ge_assign
+	li	t0, NK_ASSIGN_MUT
+	beq	s6, t0, ge_assign
+
+	# Binary arithmetic: + - * / etc
+	li	t0, NK_PLUS
+	beq	s6, t0, ge_binop
+	li	t0, NK_MINUS
+	beq	s6, t0, ge_binop
+	li	t0, NK_AND
+	beq	s6, t0, ge_binop
+	li	t0, NK_OR
+	beq	s6, t0, ge_binop
+	li	t0, NK_SHL
+	beq	s6, t0, ge_binop
+	li	t0, NK_SHR
+	beq	s6, t0, ge_binop
+	li	t0, NK_AMP
+	beq	s6, t0, ge_binop
+	li	t0, NK_PIPE
+	beq	s6, t0, ge_binop
+	li	t0, NK_CARET
+	beq	s6, t0, ge_binop
+	li	t0, NK_LT
+	beq	s6, t0, ge_binop
+	li	t0, NK_GT
+	beq	s6, t0, ge_binop
+	li	t0, NK_EQ
+	beq	s6, t0, ge_binop
+	li	t0, NK_NEQ
+	beq	s6, t0, ge_binop
+	li	t0, NK_LTE
+	beq	s6, t0, ge_binop
+	li	t0, NK_GTE
+	beq	s6, t0, ge_binop
+
+	# Block
+	li	t0, NK_LBRACE
+	beq	s6, t0, ge_block
+
+	# Semicolon wrapper (statement — discard value)
+	li	t0, NK_SEMI
+	beq	s6, t0, ge_semi
+
+	# TODO: more node types (unary, comparisons, etc.)
+
+	# Unknown — return 0 in x0
+	li	a0, 0
+	j	ge_ret
+
+# ── Number literal ───────────────────────────────────────────────────
+ge_number:
+	# Parse the number text and emit li into a fresh register
+	mv	a0, s1			# ctx
+	jal	temp_alloc
+	mv	s3, a0			# s3 = dest reg
+
+	# Parse number from source text
+	lw	t0, N_LOC_OFF(s0)
+	lw	t1, N_LOC_LEN(s0)
+	lw	t2, CG_INPUT(s1)
+	add	a0, t2, t0		# text ptr
+	mv	a1, t1			# text len
+	jal	parse_num_text		# returns value in a0
+	mv	a1, a0			# imm
+	mv	a0, s3			# rd
+	jal	emit_li
+
+	mv	a0, s3			# return dest reg
+	li	a1, 1			# is temporary
+	j	ge_ret
+
+# ── Identifier (variable reference) ──────────────────────────────────
+ge_ident:
+	lw	a1, N_LOC_OFF(s0)
+	lw	a2, N_LOC_LEN(s0)
+	mv	a0, s1
+	jal	scope_find
+	# a0 = reg number (or -1 if on stack), a1 = stack offset
+	li	t0, -1
+	bne	a0, t0, ge_ident_reg
+	# Variable is on stack — load into a temp
+	mv	s3, a1			# save stack offset
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0			# s4 = temp reg
+	# Emit: lw temp, offset(sp)
+	mv	a0, s4			# rd
+	li	a1, 2			# rs1 = sp
+	mv	a2, s3			# imm = stack offset
+	jal	emit_lw
+	mv	a0, s4
+	li	a1, 1			# temporary (must be freed after use)
+	j	ge_ret
+ge_ident_reg:
+	# Variable in register
+	li	a1, 0			# not temporary
+	j	ge_ret
+
+# ── Assignment ────────────────────────────────────────────────────────
+ge_assign:
+	# LHS = first child (must be ident for now)
+	lw	s3, N_FIRST_CHILD(s0)	# LHS node
+	lw	s4, N_NEXT_SIB(s3)	# RHS node
+
+	# Codegen RHS
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s4, a0			# s4 = RHS reg
+	mv	s6, a1			# s6 = RHS is_temp flag
+
+	# Check if LHS is already in scope (= reassignment)
+	lw	a1, N_LOC_OFF(s3)
+	lw	a2, N_LOC_LEN(s3)
+	mv	a0, s1
+	jal	scope_find
+	li	t0, -1
+	beq	a0, t0, ge_assign_new
+
+	# Existing variable
+	li	t0, -1
+	beq	a0, t0, ge_assign_exist_stk
+	# In register — move RHS to its register
+	mv	s3, a0
+	beq	s3, s4, ge_assign_done
+	mv	a0, s3
+	mv	a1, s4
+	jal	emit_mv
+	# Free RHS reg if temporary
+	beqz	s6, ge_assign_done
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+	j	ge_assign_done
+
+ge_assign_exist_stk:
+	# On stack — store RHS to stack slot
+	mv	s3, a1			# s3 = stack offset
+	li	a0, 2			# rs1 = sp
+	mv	a1, s4			# rs2 = value
+	mv	a2, s3			# imm = offset
+	jal	emit_sw
+	# Free RHS if temporary
+	beqz	s6, ge_assign_done
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+	j	ge_assign_done
+
+ge_assign_new:
+	# New variable — alloc an s-reg, move RHS value into it
+	# s6 = RHS temp flag (saved earlier)
+	addi	sp, sp, -4
+	sw	s6, 0(sp)		# save temp flag
+	mv	a0, s1
+	jal	var_alloc
+	li	t0, -1
+	beq	a0, t0, ge_an_stack
+	# Got an s-reg — move RHS into it
+	mv	s6, a0
+	mv	a0, s6
+	mv	a1, s4
+	jal	emit_mv
+	# Free RHS if temp
+	lw	t0, 0(sp)
+	addi	sp, sp, 4
+	beqz	t0, ge_an_nofree
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+ge_an_nofree:
+	# Bind name to variable reg
+	lw	a1, N_LOC_OFF(s3)
+	lw	a2, N_LOC_LEN(s3)
+	mv	a3, s6
+	mv	a0, s1
+	jal	scope_add
+	mv	s4, s6
+	j	ge_assign_done
+
+ge_an_stack:
+	# No s-regs left — spill to stack frame
+	# Allocate a stack slot (grow frame offset)
+	lw	t0, CG_FRAME_OFF(s1)
+	addi	t0, t0, -4		# next slot
+	sw	t0, CG_FRAME_OFF(s1)
+	mv	s6, t0			# s6 = stack offset (negative)
+	# Emit: sw rhs_reg, offset(sp)
+	li	a0, 2			# rs1 = sp
+	mv	a1, s4			# rs2 = value reg
+	mv	a2, s6			# imm = offset
+	jal	emit_sw
+	# Free RHS if temp
+	lw	t0, 0(sp)
+	addi	sp, sp, 4
+	beqz	t0, ge_an_stk_nofree
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+ge_an_stk_nofree:
+	# Bind name with reg=-1 and stack offset
+	lw	a1, N_LOC_OFF(s3)
+	lw	a2, N_LOC_LEN(s3)
+	li	a3, -1			# reg = -1 means stack
+	mv	a0, s1
+	jal	scope_add
+	# Set stack offset in the scope entry (the one just added)
+	lw	t0, CG_SCOPE(s1)
+	sw	s6, SC_STK_OFF(t0)
+	mv	s4, s6			# return stack offset (negative = on stack)
+
+ge_assign_done:
+	mv	a0, s4			# return the value reg
+	li	a1, 0			# variable, not temp
+	j	ge_ret
+
+# ── Binary operator ──────────────────────────────────────────────────
+# Strategy: codegen LHS and RHS, allocate a fresh result temp,
+# emit the operation into the result, free operand temps.
+# s3 = LHS reg, s4 = RHS reg after codegen.
+# We use s6 for operator kind (already set).
+# We stash temp flags in N_DATA of the operator node (s0).
+
+ge_binop:
+	lw	s3, N_FIRST_CHILD(s0)	# LHS node
+	lw	s4, N_NEXT_SIB(s3)	# RHS node
+
+	# Codegen LHS
+	mv	a0, s3
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0			# s3 = LHS reg
+	sw	a1, N_DATA(s0)		# stash LHS temp flag
+
+	# Codegen RHS
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s4, a0			# s4 = RHS reg
+	sw	a1, N_PARENT(s0)	# stash RHS temp flag (borrow N_PARENT)
+
+	# Allocate result register
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s0, a0			# s0 = result reg (repurpose s0, node no longer needed)
+
+	# Emit instruction: rd=s0, rs1=s3, rs2=s4
+
+	li	t0, NK_PLUS
+	bne	s6, t0, ge_bo_1
+	# add: f3=0, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 0
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_1:
+	li	t0, NK_MINUS
+	bne	s6, t0, ge_bo_2
+	# sub: f3=0, f7=0x20
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 0
+	li	a5, 0x20
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_2:
+	li	t0, NK_AMP
+	bne	s6, t0, ge_bo_3
+	# and: f3=7, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 7
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_3:
+	li	t0, NK_PIPE
+	bne	s6, t0, ge_bo_4
+	# or: f3=6, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 6
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_4:
+	li	t0, NK_CARET
+	bne	s6, t0, ge_bo_5
+	# xor: f3=4, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 4
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_5:
+	li	t0, NK_SHL
+	bne	s6, t0, ge_bo_6
+	# sll: f3=1, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 1
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_6:
+	li	t0, NK_SHR
+	bne	s6, t0, ge_bo_7
+	# srl: f3=5, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 5
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_7:
+	# Comparisons: slt/sltu then branch-based for eq/neq/etc.
+	li	t0, NK_LT
+	bne	s6, t0, ge_bo_8
+	# slt: f3=2, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 2
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_8:
+	li	t0, NK_GTE
+	bne	s6, t0, ge_bo_9
+	# slt then xori 1 (a >= b  ≡  !(a < b))
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 2
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	# xori s3, s3, 1
+	li	a0, 0x13
+	mv	a1, s0
+	mv	a2, s0
+	li	a3, 4
+	li	a4, 1
+	jal	emit_i
+	j	ge_bo_done
+ge_bo_9:
+	li	t0, NK_GT
+	bne	s6, t0, ge_bo_10
+	# slt with swapped operands: a > b ≡ b < a
+	mv	a1, s0
+	mv	a2, s4			# swap: rs1=RHS
+	mv	a3, s3			# rs2=LHS
+	li	a4, 2
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_10:
+	li	t0, NK_LTE
+	bne	s6, t0, ge_bo_11
+	# a <= b ≡ !(b < a) ≡ slt(b,a) then xori 1
+	mv	a1, s0
+	mv	a2, s4
+	mv	a3, s3
+	li	a4, 2
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	li	a0, 0x13
+	mv	a1, s0
+	mv	a2, s0
+	li	a3, 4
+	li	a4, 1
+	jal	emit_i
+	j	ge_bo_done
+ge_bo_11:
+	li	t0, NK_LTU
+	bne	s6, t0, ge_bo_12
+	# sltu: f3=3, f7=0
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_12:
+	li	t0, NK_GTU
+	bne	s6, t0, ge_bo_13
+	# sltu swapped
+	mv	a1, s0
+	mv	a2, s4
+	mv	a3, s3
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_13:
+	li	t0, NK_GTEU
+	bne	s6, t0, ge_bo_14
+	# sltu then xori 1
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	li	a0, 0x13
+	mv	a1, s0
+	mv	a2, s0
+	li	a3, 4
+	li	a4, 1
+	jal	emit_i
+	j	ge_bo_done
+ge_bo_14:
+	li	t0, NK_LTEU
+	bne	s6, t0, ge_bo_15
+	# sltu swapped then xori 1
+	mv	a1, s0
+	mv	a2, s4
+	mv	a3, s3
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	li	a0, 0x13
+	mv	a1, s0
+	mv	a2, s0
+	li	a3, 4
+	li	a4, 1
+	jal	emit_i
+	j	ge_bo_done
+ge_bo_15:
+	li	t0, NK_EQ
+	bne	s6, t0, ge_bo_16
+	# eq: xor then sltiu 1 (result is 1 if xor==0)
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 4
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r			# xor s3, s3, s4
+	# sltiu s3, s3, 1
+	li	a0, 0x13
+	mv	a1, s0
+	mv	a2, s0
+	li	a3, 3
+	li	a4, 1
+	jal	emit_i
+	j	ge_bo_done
+ge_bo_16:
+	li	t0, NK_NEQ
+	bne	s6, t0, ge_bo_17
+	# neq: xor then sltu x0 (result is 1 if xor!=0)
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 4
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r			# xor s3, s3, s4
+	# sltu s3, x0, s3 (0 < result means nonzero)
+	mv	a1, s0
+	li	a2, 0			# x0
+	mv	a3, s0
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_17:
+	# Logical && and ||: for now just bitwise (TODO: short-circuit)
+	li	t0, NK_AND
+	bne	s6, t0, ge_bo_18
+	# snez both then and
+	# snez s3: sltu s3, x0, s3
+	mv	a1, s0
+	li	a2, 0
+	mv	a3, s3
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	# snez s4: sltu s4, x0, s4
+	mv	a1, s4
+	li	a2, 0
+	mv	a3, s4
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	# and s3, s3, s4
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 7
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_18:
+	li	t0, NK_OR
+	bne	s6, t0, ge_bo_end
+	# or s3, s3, s4 then snez
+	mv	a1, s0
+	mv	a2, s3
+	mv	a3, s4
+	li	a4, 6
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	# snez s3: sltu s3, x0, s3
+	mv	a1, s0
+	li	a2, 0
+	mv	a3, s0
+	li	a4, 3
+	li	a5, 0
+	li	a0, 0x33
+	jal	emit_r
+	j	ge_bo_done
+ge_bo_end:
+	# Unknown operator — no-op
+	j	ge_bo_done
+
+ge_bo_done:
+	# We can't recover the temp flags (node pointer s0 was reused).
+	# Instead, DON'T free operand registers here.
+	# The caller (assignment or statement) is responsible for freeing temps.
+	# Since the result is a fresh temp, and operand variable regs remain
+	# alive, this is safe — we just "leak" temp operand regs.
+	# They'll be freed when the expression's temp result is consumed.
+	#
+	# TODO: track temp flags properly to free operand temps here.
+
+	mv	a0, s0			# result in fresh temp reg
+	li	a1, 1			# is temporary
+	j	ge_ret
+
+# ── Block ─────────────────────────────────────────────────────────────
+ge_block:
+	li	s3, 0			# last result reg
+	lw	s4, N_FIRST_CHILD(s0)	# first child
+ge_block_lp:
+	beqz	s4, ge_block_done
+	# Free previous result (if any, and not final)
+	lw	t0, N_NEXT_SIB(s4)
+	beqz	t0, ge_block_last	# last child — keep result
+	# Not last — if we had a result reg, free it
+	beqz	s3, ge_block_gen
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_block_gen:
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	lw	s4, N_NEXT_SIB(s4)
+	j	ge_block_lp
+ge_block_last:
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+ge_block_done:
+	mv	a0, s3
+	j	ge_ret
+
+# ── Semicolon wrapper (statement — gen child, result = 0) ────────────
+ge_semi:
+	lw	a0, N_FIRST_CHILD(s0)
+	mv	a1, s1
+	jal	gen_expr
+	# Free the result register only if temporary
+	beqz	a1, ge_semi_done	# a1=0 means variable, don't free
+	mv	a1, a0
+	mv	a0, s1
+	jal	reg_free
+ge_semi_done:
+	li	a0, 0			# return x0 (no value)
+	li	a1, 0			# not temp
+	j	ge_ret
+
+ge_ret:
+	return
+
+# ── Number text parser ────────────────────────────────────────────────
+# a0=text ptr, a1=text len → a0=value
+parse_num_text:
+	mv	t0, a0
+	mv	t1, a1
+	li	a0, 0
+
+	# Check 0x prefix
+	li	t2, 2
+	blt	t1, t2, pnt_dec
+	lbu	t2, 0(t0)
+	li	t3, '0'
+	bne	t2, t3, pnt_dec
+	lbu	t2, 1(t0)
+	li	t3, 'x'
+	beq	t2, t3, pnt_hex
+	li	t3, 'X'
+	beq	t2, t3, pnt_hex
+	# Check 0b
+	li	t3, 'b'
+	beq	t2, t3, pnt_bin
+	li	t3, 'B'
+	beq	t2, t3, pnt_bin
+	j	pnt_dec
+
+pnt_hex:
+	addi	t0, t0, 2
+	addi	t1, t1, -2
+pnt_hex_lp:
+	beqz	t1, pnt_done
+	lbu	t2, 0(t0)
+	addi	t3, t2, -48
+	li	t4, 10
+	blt	t3, t4, pnt_h_ok
+	addi	t3, t2, -65
+	addi	t3, t3, 10
+	li	t4, 16
+	blt	t3, t4, pnt_h_ok
+	addi	t3, t2, -97
+	addi	t3, t3, 10
+pnt_h_ok:
+	slli	a0, a0, 4
+	or	a0, a0, t3
+	addi	t0, t0, 1
+	addi	t1, t1, -1
+	j	pnt_hex_lp
+
+pnt_bin:
+	addi	t0, t0, 2
+	addi	t1, t1, -2
+pnt_bin_lp:
+	beqz	t1, pnt_done
+	lbu	t2, 0(t0)
+	addi	t2, t2, -48
+	slli	a0, a0, 1
+	or	a0, a0, t2
+	addi	t0, t0, 1
+	addi	t1, t1, -1
+	j	pnt_bin_lp
+
+pnt_dec:
+	beqz	t1, pnt_done
+	lbu	t2, 0(t0)
+	addi	t2, t2, -48
+	slli	t3, a0, 3
+	slli	t4, a0, 1
+	add	a0, t3, t4
+	add	a0, a0, t2
+	addi	t0, t0, 1
+	addi	t1, t1, -1
+	j	pnt_dec
+
+pnt_done:
+	ret
+
+# ── gen_program: top-level codegen driver ─────────────────────────────
+# a0 = program AST node
+gen_program:
+	prologue	s0 s1 s4 x0
+	mv	s0, a0			# program node
+
+	# Allocate codegen context
+	li	a0, CG_SZ
+	jal	alloc
+	mv	s1, a0
+	sw	zero, CG_REG_BITMAP(s1)
+	sw	zero, CG_SCOPE(s1)
+	sw	s5, CG_INPUT(s1)	# input base from compile
+	sw	zero, CG_FRAME_OFF(s1)	# no stack slots yet
+
+	# Emit nop (q32 magic)
+	li	a0, 0x13
+	jal	emit_w
+
+	# Emit placeholder frame allocation (addi sp, sp, 0 — backpatch later)
+	sub	t0, s2, s3		# remember output offset for backpatch
+	sw	t0, CG_FRAME_PATCH(s1)
+	li	a0, 0x00010113		# addi sp, sp, 0 (placeholder)
+	jal	emit_w
+
+	# Generate each child of the program
+	lw	s4, N_FIRST_CHILD(s0)
+gp_loop:
+	beqz	s4, gp_done
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	lw	s4, N_NEXT_SIB(s4)
+	j	gp_loop
+
+gp_done:
+	# Backpatch frame allocation if any stack slots were used
+	lw	t0, CG_FRAME_OFF(s1)	# frame offset (negative or 0)
+	beqz	t0, gp_no_frame
+	# Align frame size to 16 bytes
+	addi	t0, t0, -15
+	andi	t0, t0, -16		# round down (more negative)
+	# Backpatch: addi sp, sp, frame_offset
+	# Instruction = (imm12 << 20) | (sp << 15) | (0 << 12) | (sp << 7) | 0x13
+	slli	t1, t0, 20		# imm in bits 31:20
+	li	t2, 0x00010113		# addi sp, sp, 0
+	or	t1, t1, t2
+	lw	t2, CG_FRAME_PATCH(s1)	# output offset of placeholder
+	add	t2, s3, t2		# absolute address in output
+	sb	t1, 0(t2)
+	srli	t1, t1, 8
+	sb	t1, 1(t2)
+	srli	t1, t1, 8
+	sb	t1, 2(t2)
+	srli	t1, t1, 8
+	sb	t1, 3(t2)
+	# Emit frame deallocation: addi sp, sp, -frame_offset
+	sub	t0, zero, t0		# negate to get positive
+	mv	a4, t0
+	li	a0, 0x13
+	li	a1, 2			# rd = sp
+	li	a2, 2			# rs1 = sp
+	li	a3, 0			# f3
+	jal	emit_i
+gp_no_frame:
+	# Emit exit: lui t0,0x100 / lui t1,5 / addi t1,t1,0x555 / sw t1,0(t0)
+	li	a0, 0x001002B7		# lui t0(x5), 0x100
+	jal	emit_w
+	li	a0, 0x00005337		# lui t1(x6), 0x5
+	jal	emit_w
+	li	a0, 0x55530313		# addi t1, t1, 0x555
+	jal	emit_w
+	li	a0, 0x0062A023		# sw t1, 0(t0)
+	jal	emit_w
+
 	return
 
 # print_dec_inline: a0=value, writes decimal to buffer at s2, advances s2
