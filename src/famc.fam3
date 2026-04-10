@@ -1379,8 +1379,10 @@ bp_not_assign_eq:
 	beq	a0, t0, bp_cmp
 	li	t0, NK_DOTDOT_EQ
 	beq	a0, t0, bp_cmp
-	# Postfix: . [ ( { ++ --
+	# Postfix: . @ [ ( { ++ --
 	li	t0, NK_DOT
+	beq	a0, t0, bp_postfix
+	li	t0, NK_AT
 	beq	a0, t0, bp_postfix
 	li	t0, NK_LBRACKET
 	beq	a0, t0, bp_postfix
@@ -1654,8 +1656,8 @@ px_block_return:
 	mv	a0, s2
 	mv	a1, s3
 	jal	node_add_child
-	# Next must be } (no more expressions without ;)
-	j	px_block_lp
+	# Next must be }
+	j	px_block_close
 px_block_close:
 	mv	a0, s0
 	li	a1, NK_RBRACE
@@ -1686,13 +1688,14 @@ px_clos_params:
 	mv	a2, s0
 	j	err_expect
 px_clos_read_param:
-	# Read param (identifier)
+	# Read param (must be identifier)
 	mv	a0, s0
-	mv	a1, s4
-	li	a2, 0
-	jal	lex_next
-	mv	a1, s4
+	li	a1, NK_IDENT
+	lla	a2, str_ident
+	jal	expect_tok
+	mv	s4, a0
 	mv	a0, s2
+	mv	a1, s4
 	jal	node_add_child
 	# Expect comma or |
 	jal	node_alloc
@@ -1749,13 +1752,12 @@ px_clos_expr:
 px_struct:
 	# struct Name { field, field, ... }
 	# s2 = struct token node. Read name, then fields.
-	# Name
-	jal	node_alloc
-	mv	s4, a0
+	# Name (must be identifier)
 	mv	a0, s0
-	mv	a1, s4
-	li	a2, 0
-	jal	lex_next		# read name ident
+	li	a1, NK_IDENT
+	lla	a2, str_ident
+	jal	expect_tok
+	mv	s4, a0
 	mv	a0, s2
 	mv	a1, s4
 	jal	node_add_child
@@ -1828,13 +1830,12 @@ px_loop:
 
 px_for:
 	# for <binding> in <iter> { body }
-	# Parse binding
-	jal	node_alloc
-	mv	a1, a0
+	# Parse binding (must be identifier)
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next		# read binding ident
-	mv	a1, a1			# the node
+	li	a1, NK_IDENT
+	lla	a2, str_ident
+	jal	expect_tok
+	mv	a1, a0
 	mv	a0, s2
 	jal	node_add_child
 	# Expect 'in'
@@ -1867,13 +1868,11 @@ px_switch:
 	mv	a1, a0
 	mv	a0, s2
 	jal	node_add_child
-	# Expect { — consume it
-	jal	node_alloc
-	mv	s4, a0
+	# Expect {
 	mv	a0, s0
-	mv	a1, s4
-	li	a2, 0
-	jal	lex_next
+	li	a1, NK_LBRACE
+	lla	a2, str_lbrace
+	jal	expect_tok
 	# Parse arms: pattern => expr, ...
 px_sw_arm:
 	jal	node_alloc
@@ -1928,11 +1927,10 @@ px_sw_arm:
 	jal	lex_next		# consume comma
 	j	px_sw_arm
 px_sw_close:
-	jal	node_alloc
-	mv	a1, a0
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next		# consume }
+	li	a1, NK_RBRACE
+	lla	a2, str_rbrace
+	jal	expect_tok
 	j	px_done
 
 px_return:
@@ -2069,13 +2067,12 @@ ix_tern_done:
 	j	px_infix
 
 ix_dot:
-	# Parse member name (just consume next token)
-	jal	node_alloc
-	mv	a1, a0
+	# Parse member name (must be identifier)
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next
-	mv	a1, a1
+	li	a1, NK_IDENT
+	lla	a2, str_ident
+	jal	expect_tok
+	mv	a1, a0
 	mv	a0, s4
 	jal	node_add_child
 	mv	s2, s4
@@ -2198,11 +2195,10 @@ ix_si_comma:
 	jal	lex_next		# consume comma
 	j	ix_si_lp
 ix_si_close:
-	jal	node_alloc
-	mv	a1, a0
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next		# consume }
+	li	a1, NK_RBRACE
+	lla	a2, str_rbrace
+	jal	expect_tok
 	mv	s2, s4
 	j	px_infix
 
@@ -2249,11 +2245,10 @@ ix_call_comma:
 	jal	lex_next		# consume comma
 	j	ix_call_lp
 ix_call_close:
-	jal	node_alloc
-	mv	a1, a0
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next		# consume )
+	li	a1, NK_RPAREN
+	lla	a2, str_rparen
+	jal	expect_tok
 	mv	s2, s4
 	j	px_infix
 
@@ -2633,12 +2628,11 @@ px_asm:
 	mv	a0, s2
 	jal	node_add_child
 px_asm_no_name:
-	# Consume '{'
-	jal	node_alloc
-	mv	a1, a0
+	# Expect '{'
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next
+	li	a1, NK_LBRACE
+	lla	a2, str_lbrace
+	jal	expect_tok
 
 	# Parse asm body until '}'
 px_asm_lp:
@@ -3043,12 +3037,10 @@ px_asm_insn_done:
 	j	px_asm_lp
 
 px_asm_close:
-	# Consume }
-	jal	node_alloc
-	mv	a1, a0
 	mv	a0, s0
-	li	a2, 0
-	jal	lex_next
+	li	a1, NK_RBRACE
+	lla	a2, str_rbrace
+	jal	expect_tok
 	j	px_done
 
 # ── print_ast: indented tree printer ──────────────────────────────────
