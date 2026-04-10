@@ -29,7 +29,9 @@ TOTAL=0
 # compile: feed source to famc via stdin, return generated binary on stdout.
 compile() {
 	(echo "$1"; printf '\004') | timeout -k 2 10 qemu-system-riscv32 \
-		-machine virt -cpu rv32i -nographic -bios none \
+		-machine virt \
+		-cpu rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false \
+		-nographic -bios none \
 		-device loader,file="$FAMC",addr=0x80000000 \
 		-serial mon:stdio 2>/dev/null
 }
@@ -37,7 +39,8 @@ compile() {
 # run_bin: execute a compiled binary in qemu, return UART output on stdout.
 run_bin() {
 	timeout -k 2 10 qemu-system-riscv32 \
-		-machine virt -cpu rv32i -nographic -bios none \
+		-cpu rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false \
+		-machine virt -nographic -bios none \
 		-device loader,file="$1",addr=0x80000000 \
 		-serial stdio -monitor none < /dev/null 2>/dev/null
 }
