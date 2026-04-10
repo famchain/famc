@@ -50,17 +50,19 @@
 .equ	NK_GTU,		40
 .equ	NK_LTEU,	41
 .equ	NK_GTEU,	42
-.equ	NK_ASSIGN_MUT,	43
-.equ	NK_PLUS_EQ,	44
-.equ	NK_MINUS_EQ,	45
-.equ	NK_STAR_EQ,	46
-.equ	NK_SLASH_EQ,	47
-.equ	NK_PERCENT_EQ,	48
-.equ	NK_AMP_EQ,	49
-.equ	NK_PIPE_EQ,	50
-.equ	NK_CARET_EQ,	51
-.equ	NK_SHL_EQ,	52
-.equ	NK_SHR_EQ,	53
+.equ	NK_INC,		43
+.equ	NK_DEC,		44
+.equ	NK_ASSIGN_MUT,	45
+.equ	NK_PLUS_EQ,	46
+.equ	NK_MINUS_EQ,	47
+.equ	NK_STAR_EQ,	48
+.equ	NK_SLASH_EQ,	49
+.equ	NK_PERCENT_EQ,	50
+.equ	NK_AMP_EQ,	51
+.equ	NK_PIPE_EQ,	52
+.equ	NK_CARET_EQ,	53
+.equ	NK_SHL_EQ,	54
+.equ	NK_SHR_EQ,	55
 
 # Keywords
 .equ	NK_LOOP,	60
@@ -81,6 +83,51 @@
 .equ	NK_NUMBER,	81
 .equ	NK_STRING,	82
 .equ	NK_CHAR,	83
+
+# Asm-specific nodes
+.equ	NK_ASM_BIND,	90
+.equ	NK_ASM_INSN,	91
+.equ	NK_ASM_LABEL,	92
+
+# Asm instruction classes (from mnemonic table)
+.equ	AC_R,		1
+.equ	AC_I_ARITH,	2
+.equ	AC_I_SHIFT,	3
+.equ	AC_I_LOAD,	4
+.equ	AC_S,		5
+.equ	AC_B,		6
+.equ	AC_U_LUI,	7
+.equ	AC_U_AUIPC,	8
+.equ	AC_J_JAL,	9
+.equ	AC_JALR,	10
+.equ	AC_PS_LI,	11
+.equ	AC_PS_MV,	12
+.equ	AC_PS_RET,	13
+.equ	AC_PS_J,	14
+.equ	AC_PS_NOP,	15
+.equ	AC_PS_NOT,	16
+.equ	AC_PS_NEG,	17
+.equ	AC_PS_SEQZ,	18
+.equ	AC_PS_SNEZ,	19
+.equ	AC_PS_JR,	20
+.equ	AC_PS_WFI,	21
+.equ	AC_CSR,		22
+.equ	AC_CSRI,	23
+.equ	AC_MRET,	24
+.equ	AC_SRET,	25
+.equ	AC_SFENCE,	26
+.equ	AC_FENCE,	27
+.equ	AC_FENCEI,	28
+.equ	AC_PS_BEQZ,	30
+.equ	AC_PS_BNEZ,	31
+.equ	AC_PS_BGT,	32
+.equ	AC_PS_BLE,	33
+.equ	AC_PS_BGTU,	34
+.equ	AC_PS_BLEU,	35
+.equ	AC_PS_BLTZ,	36
+.equ	AC_PS_BGEZ,	37
+.equ	AC_PS_CALL,	38
+.equ	AC_PS_TAIL,	39
 
 # ── Trie node struct (1036 bytes) ────────────────────────────────────
 .equ	T_KIND,		0
@@ -191,6 +238,236 @@ exit:
 1:
 	wfi
 	j	1b
+
+# ══════════════════════════════════════════════════════════════════════
+#  Error reporting
+# ══════════════════════════════════════════════════════════════════════
+
+# print_str: a0 = null-terminated string ptr. Prints to UART.
+print_str:
+	prologue	s0 x0
+	mv	s0, a0
+1:
+	lbu	a0, 0(s0)
+	beqz	a0, 2f
+	jal	write_byte
+	addi	s0, s0, 1
+	j	1b
+2:
+	return
+
+# print_dec: a0 = unsigned value. Prints decimal to UART.
+print_dec:
+	prologue	s0 s1 x0
+	mv	s0, a0
+	li	s1, 0			# digit count
+	beqz	s0, pd_zero
+pd_loop:
+	beqz	s0, pd_emit
+	li	t0, 10
+	li	t1, 0
+pd_div:
+	blt	s0, t0, pd_rem
+	sub	s0, s0, t0
+	addi	t1, t1, 1
+	j	pd_div
+pd_rem:
+	addi	t2, s0, '0'
+	addi	sp, sp, -4
+	sb	t2, 0(sp)
+	addi	s1, s1, 1
+	mv	s0, t1
+	j	pd_loop
+pd_emit:
+	beqz	s1, pd_done
+	lbu	a0, 0(sp)
+	addi	sp, sp, 4
+	jal	write_byte
+	addi	s1, s1, -1
+	j	pd_emit
+pd_zero:
+	li	a0, '0'
+	jal	write_byte
+pd_done:
+	return
+
+# err_at: report error at a node's location and halt.
+# a0 = node (with N_LOC_LINE/N_LOC_COL), a1 = message (null-terminated string)
+err_at:
+	prologue	s0 s1 x0
+	mv	s0, a0			# node
+	mv	s1, a1			# message
+
+	# "error:"
+	lla	a0, str_error
+	jal	print_str
+
+	# line number
+	lw	a0, N_LOC_LINE(s0)
+	jal	print_dec
+
+	# ":"
+	li	a0, ':'
+	jal	write_byte
+
+	# column
+	lw	a0, N_LOC_COL(s0)
+	jal	print_dec
+
+	# ": "
+	li	a0, ':'
+	jal	write_byte
+	li	a0, ' '
+	jal	write_byte
+
+	# message
+	mv	a0, s1
+	jal	print_str
+
+	# newline
+	li	a0, '\n'
+	jal	write_byte
+
+	j	exit
+
+# err_expect: "expected X, found Y" error at current token
+# a0 = expected description (string), a1 = node with actual token, a2 = lexer
+err_expect:
+	prologue	s0 s1 s2 x0
+	mv	s0, a0			# expected string
+	mv	s1, a1			# actual node
+	mv	s2, a2			# lexer
+
+	lla	a0, str_error
+	jal	print_str
+	lw	a0, N_LOC_LINE(s1)
+	jal	print_dec
+	li	a0, ':'
+	jal	write_byte
+	lw	a0, N_LOC_COL(s1)
+	jal	print_dec
+	li	a0, ':'
+	jal	write_byte
+	li	a0, ' '
+	jal	write_byte
+
+	# "expected "
+	lla	a0, str_expected
+	jal	print_str
+	mv	a0, s0
+	jal	print_str
+
+	# ", found '"
+	lla	a0, str_found
+	jal	print_str
+
+	# print token text from input
+	lw	t0, N_LOC_LEN(s1)
+	beqz	t0, ee_no_text
+	lw	t1, N_LOC_OFF(s1)
+	lw	t2, L_IN(s2)		# input base from lexer
+	add	t1, t2, t1		# text ptr
+ee_text:
+	beqz	t0, ee_close
+	lbu	a0, 0(t1)
+	jal	write_byte
+	addi	t1, t1, 1
+	addi	t0, t0, -1
+	j	ee_text
+ee_no_text:
+	# EOF — print "EOF"
+	lla	a0, str_eof
+	jal	print_str
+ee_close:
+	li	a0, '\''
+	jal	write_byte
+	li	a0, '\n'
+	jal	write_byte
+	j	exit
+
+str_error:
+	.ascii	"error:"
+	.zero	2
+str_expected:
+	.ascii	"expected "
+	.zero	3
+str_found:
+	.ascii	", found '"
+	.zero	3
+str_eof:
+	.ascii	"EOF"
+	.zero	1
+str_rparen:
+	.ascii	")"
+	.zero	3
+str_rbracket:
+	.ascii	"]"
+	.zero	3
+str_rbrace:
+	.ascii	"}"
+	.zero	3
+str_pipe:
+	.ascii	"|"
+	.zero	3
+str_colon:
+	.ascii	":"
+	.zero	3
+str_fat_arrow:
+	.ascii	"=>"
+	.zero	2
+str_lparen:
+	.ascii	"("
+	.zero	3
+str_lbrace:
+	.ascii	"{"
+	.zero	3
+str_assign:
+	.ascii	"="
+	.zero	3
+str_in_kw:
+	.ascii	"in"
+	.zero	2
+str_comma_rparen:
+	.ascii	", or )"
+	.zero	2
+str_comma_pipe:
+	.ascii	", or |"
+	.zero	2
+str_mix_fields:
+	.ascii	"mixed field styles"
+	.zero	2
+str_ident:
+	.ascii	"identifier"
+	.zero	2
+str_semi:
+	.ascii	";"
+	.zero	3
+str_expr:
+	.ascii	"expression"
+	.zero	2
+
+# expect_tok: consume next token, error if not the expected kind.
+# a0 = lexer, a1 = expected NK_* kind, a2 = description string
+# Returns the consumed node in a0.
+expect_tok:
+	prologue	s0 s1 s2 s3 x0
+	mv	s0, a0			# lexer
+	mv	s1, a1			# expected kind
+	mv	s2, a2			# description
+	jal	node_alloc
+	mv	s3, a0			# node
+	mv	a0, s0
+	mv	a1, s3
+	li	a2, 0
+	jal	lex_next
+	bne	a0, s1, et_err
+	mv	a0, s3
+	return
+et_err:
+	mv	a0, s2			# expected description
+	mv	a1, s3			# actual node
+	mv	a2, s0			# lexer
+	j	err_expect		# does not return
 
 read_data:
 	prologue	s0 s1 s2 x0
@@ -786,7 +1063,7 @@ tok_table:
 	.ascii	";"
 	.zero	9
 	.byte	NK_COMMA, 1
-	.ascii	", "
+	.ascii	","
 	.zero	9
 	.byte	NK_COLON, 1
 	.ascii	":"
@@ -864,6 +1141,12 @@ tok_table:
 	.zero	9
 
 # Multi-char operators
+	.byte	NK_INC, 2
+	.ascii	"++"
+	.zero	8
+	.byte	NK_DEC, 2
+	.ascii	"--"
+	.zero	8
 	.byte	NK_FAT_ARROW, 2
 	.ascii	"=>"
 	.zero	8
@@ -986,9 +1269,1864 @@ tok_table:
 	.zero	10
 
 # ══════════════════════════════════════════════════════════════════════
+#  Parser: Pratt expression parser
+# ══════════════════════════════════════════════════════════════════════
+
+# node_alloc: allocate and zero an AST node. Returns a0 = ptr.
+node_alloc:
+	prologue	s0 x0
+	li	a0, N_SZ
+	jal	alloc
+	mv	s0, a0
+	mv	t0, a0
+	addi	t1, a0, N_SZ
+1:
+	beq	t0, t1, 2f
+	sw	zero, 0(t0)
+	addi	t0, t0, 4
+	j	1b
+2:
+	mv	a0, s0
+	return
+
+# node_add_child: a0=parent, a1=child. Appends child to parent's child list.
+node_add_child:
+	sw	a0, N_PARENT(a1)	# child.parent = parent
+	lw	t0, N_LAST_CHILD(a0)	# prev_last = parent.last_child
+	beqz	t0, nac_first
+	# Append after prev_last
+	sw	a1, N_NEXT_SIB(t0)	# prev_last.next = child
+	sw	t0, N_PREV_SIB(a1)	# child.prev = prev_last
+	sw	a1, N_LAST_CHILD(a0)	# parent.last = child
+	ret
+nac_first:
+	sw	a1, N_FIRST_CHILD(a0)
+	sw	a1, N_LAST_CHILD(a0)
+	ret
+
+# get_bp: a0=token_kind → a0=infix binding power (left), a1=right bp
+# Returns 0 for tokens that aren't infix operators.
+get_bp:
+	# Assignment (right-assoc): = := += -= *= /= %= &= |= ^= <<= >>=
+	li	t0, NK_ASSIGN
+	beq	a0, t0, bp_assign
+	li	t0, NK_ASSIGN_MUT
+	beq	a0, t0, bp_assign
+	li	t0, NK_PLUS_EQ
+	blt	a0, t0, bp_not_assign_eq
+	li	t0, NK_SHR_EQ+1
+	blt	a0, t0, bp_assign
+bp_not_assign_eq:
+	# Ternary (right-assoc): ?
+	li	t0, NK_QMARK
+	beq	a0, t0, bp_ternary
+	# Logical or: ||
+	li	t0, NK_OR
+	beq	a0, t0, bp_or
+	# Logical and: &&
+	li	t0, NK_AND
+	beq	a0, t0, bp_and
+	# Equality: == !=
+	li	t0, NK_EQ
+	beq	a0, t0, bp_equal
+	li	t0, NK_NEQ
+	beq	a0, t0, bp_equal
+	# Comparison: < > <= >= <u >u <=u >=u
+	li	t0, NK_LT
+	beq	a0, t0, bp_cmp
+	li	t0, NK_GT
+	beq	a0, t0, bp_cmp
+	li	t0, NK_LTE
+	beq	a0, t0, bp_cmp
+	li	t0, NK_GTE
+	beq	a0, t0, bp_cmp
+	li	t0, NK_LTU
+	beq	a0, t0, bp_cmp
+	li	t0, NK_GTU
+	beq	a0, t0, bp_cmp
+	li	t0, NK_LTEU
+	beq	a0, t0, bp_cmp
+	li	t0, NK_GTEU
+	beq	a0, t0, bp_cmp
+	# Bitwise or: |
+	li	t0, NK_PIPE
+	beq	a0, t0, bp_bitor
+	# Bitwise xor: ^
+	li	t0, NK_CARET
+	beq	a0, t0, bp_bitxor
+	# Bitwise and: &
+	li	t0, NK_AMP
+	beq	a0, t0, bp_bitand
+	# Shift: << >>
+	li	t0, NK_SHL
+	beq	a0, t0, bp_shift
+	li	t0, NK_SHR
+	beq	a0, t0, bp_shift
+	# Add: + -
+	li	t0, NK_PLUS
+	beq	a0, t0, bp_add
+	li	t0, NK_MINUS
+	beq	a0, t0, bp_add
+	# Mul: * / %
+	li	t0, NK_STAR
+	beq	a0, t0, bp_mul
+	li	t0, NK_SLASH
+	beq	a0, t0, bp_mul
+	li	t0, NK_PERCENT
+	beq	a0, t0, bp_mul
+	# Range: .. ..=
+	li	t0, NK_DOTDOT
+	beq	a0, t0, bp_cmp
+	li	t0, NK_DOTDOT_EQ
+	beq	a0, t0, bp_cmp
+	# Postfix: . [ ( { ++ --
+	li	t0, NK_DOT
+	beq	a0, t0, bp_postfix
+	li	t0, NK_LBRACKET
+	beq	a0, t0, bp_postfix
+	li	t0, NK_LPAREN
+	beq	a0, t0, bp_call
+	li	t0, NK_LBRACE
+	beq	a0, t0, bp_call
+	li	t0, NK_INC
+	beq	a0, t0, bp_postfix
+	li	t0, NK_DEC
+	beq	a0, t0, bp_postfix
+	# Not an infix operator
+	li	a0, P_NONE
+	li	a1, P_NONE
+	ret
+bp_assign:
+	li	a0, P_ASSIGN
+	li	a1, P_ASSIGN		# right-assoc: same prec
+	ret
+bp_ternary:
+	li	a0, P_TERNARY
+	li	a1, P_TERNARY		# right-assoc
+	ret
+bp_or:
+	li	a0, P_OR
+	li	a1, P_OR+1
+	ret
+bp_and:
+	li	a0, P_AND
+	li	a1, P_AND+1
+	ret
+bp_equal:
+	li	a0, P_EQUAL
+	li	a1, P_EQUAL+1
+	ret
+bp_cmp:
+	li	a0, P_COMPARE
+	li	a1, P_COMPARE+1
+	ret
+bp_bitor:
+	li	a0, P_BIT_OR
+	li	a1, P_BIT_OR+1
+	ret
+bp_bitxor:
+	li	a0, P_BIT_XOR
+	li	a1, P_BIT_XOR+1
+	ret
+bp_bitand:
+	li	a0, P_BIT_AND
+	li	a1, P_BIT_AND+1
+	ret
+bp_shift:
+	li	a0, P_SHIFT
+	li	a1, P_SHIFT+1
+	ret
+bp_add:
+	li	a0, P_ADD
+	li	a1, P_ADD+1
+	ret
+bp_mul:
+	li	a0, P_MUL
+	li	a1, P_MUL+1
+	ret
+bp_postfix:
+	li	a0, P_POSTFIX
+	li	a1, P_POSTFIX+1
+	ret
+bp_call:
+	li	a0, P_CALL
+	li	a1, P_CALL+1
+	ret
+
+# ── parse_expr: Pratt parser core ────────────────────────────────────
+# a0=lexer, a1=min_prec → a0=AST node
+parse_expr:
+	prologue	s0 s1 s2 s3 s4 s5 x0
+	mv	s0, a0			# lexer
+	mv	s1, a1			# min_prec
+
+	# Allocate token node for prefix
+	jal	node_alloc
+	mv	s2, a0			# s2 = token/node
+
+	# Read next token
+	mv	a0, s0
+	mv	a1, s2
+	li	a2, 0
+	jal	lex_next
+	mv	s3, a0			# s3 = token kind
+
+	# Check for lexer error
+	li	t0, NK_ERROR
+	bne	s3, t0, px_no_err
+	lla	a0, str_expr
+	mv	a1, s2
+	mv	a2, s0
+	j	err_expect
+px_no_err:
+
+	# ── Prefix dispatch ──
+
+	# Literals: ident, number, string, char
+	li	t0, NK_IDENT
+	beq	s3, t0, px_atom
+	li	t0, NK_NUMBER
+	beq	s3, t0, px_atom
+	li	t0, NK_STRING
+	beq	s3, t0, px_atom
+	li	t0, NK_CHAR
+	beq	s3, t0, px_atom
+
+	# Unary prefix: - ! ~ & * @ # ++ --
+	li	t0, NK_MINUS
+	beq	s3, t0, px_unary
+	li	t0, NK_BANG
+	beq	s3, t0, px_unary
+	li	t0, NK_TILDE
+	beq	s3, t0, px_unary
+	li	t0, NK_AMP
+	beq	s3, t0, px_unary
+	li	t0, NK_STAR
+	beq	s3, t0, px_unary
+	li	t0, NK_AT
+	beq	s3, t0, px_unary
+	li	t0, NK_HASH
+	beq	s3, t0, px_unary
+	li	t0, NK_INC
+	beq	s3, t0, px_unary
+	li	t0, NK_DEC
+	beq	s3, t0, px_unary
+
+	# Grouped: ( expr )
+	li	t0, NK_LPAREN
+	beq	s3, t0, px_group
+
+	# Block: { stmts }
+	li	t0, NK_LBRACE
+	beq	s3, t0, px_block
+
+	# Closure: | params | body  OR  || body (empty params)
+	li	t0, NK_PIPE
+	beq	s3, t0, px_closure
+	li	t0, NK_OR
+	beq	s3, t0, px_closure_empty
+
+	# Loop
+	li	t0, NK_LOOP
+	beq	s3, t0, px_loop
+
+	# For
+	li	t0, NK_FOR
+	beq	s3, t0, px_for
+
+	# Switch
+	li	t0, NK_SWITCH
+	beq	s3, t0, px_switch
+
+	# Return / break / continue (with optional value)
+	li	t0, NK_RETURN
+	beq	s3, t0, px_return
+	li	t0, NK_BREAK
+	beq	s3, t0, px_return
+	li	t0, NK_CONTINUE
+	beq	s3, t0, px_atom
+
+	# Self keyword (atom)
+	li	t0, NK_SELF
+	beq	s3, t0, px_atom
+
+	# Struct definition
+	li	t0, NK_STRUCT
+	beq	s3, t0, px_struct
+
+	# Sizeof
+	li	t0, NK_SIZEOF
+	beq	s3, t0, px_unary
+
+	# Macro: macro { body }
+	li	t0, NK_MACRO
+	beq	s3, t0, px_macro
+
+	# Asm block
+	li	t0, NK_ASM
+	beq	s3, t0, px_asm
+
+	# Error: unexpected token
+	lla	a0, str_expr
+	mv	a1, s2			# the unexpected token node
+	mv	a2, s0			# lexer
+	j	err_expect		# does not return
+
+	# ── Prefix handlers ──
+px_atom:
+	# Node already filled by lex_next. Just use it.
+	j	px_done
+
+px_unary:
+	# Parse operand at P_UNARY
+	mv	a0, s0
+	li	a1, P_UNARY
+	jal	parse_expr
+	mv	a1, a0			# child
+	mv	a0, s2			# parent (the unary op node)
+	jal	node_add_child
+	j	px_done
+
+px_group:
+	# ( expr ) — parse inner, consume )
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	s2, a0
+	# Expect closing )
+	mv	a0, s0
+	li	a1, NK_RPAREN
+	lla	a2, str_rparen
+	jal	expect_tok
+	j	px_done
+
+px_block:
+	# { stmt; stmt; ... expr }
+	# Parse statements until }
+px_block_lp:
+	# Peek at next token
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_RBRACE
+	beq	a0, t0, px_block_close
+	li	t0, NK_TERM
+	beq	a0, t0, px_block_close
+	# Parse expression/statement
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	s3, a0			# s3 = parsed expr
+	# Check for semicolon
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_SEMI
+	bne	a0, t0, px_block_return	# no semi = return expr
+	# Has semicolon — consume it
+	jal	node_alloc
+	mv	s4, a0			# scratch node
+	mv	a1, s4
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume ;
+	# Create semi wrapper node
+	jal	node_alloc
+	mv	s4, a0
+	li	t0, NK_SEMI
+	sw	t0, N_KIND(s4)
+	mv	a0, s4
+	mv	a1, s3			# the expression
+	jal	node_add_child
+	# Add wrapped statement to block
+	mv	a0, s2
+	mv	a1, s4
+	jal	node_add_child
+	j	px_block_lp
+px_block_return:
+	# No semicolon — this is the return expression (add unwrapped)
+	mv	a0, s2
+	mv	a1, s3
+	jal	node_add_child
+	# Next must be } (no more expressions without ;)
+	j	px_block_lp
+px_block_close:
+	mv	a0, s0
+	li	a1, NK_RBRACE
+	lla	a2, str_rbrace
+	jal	expect_tok
+	j	px_done
+
+px_closure:
+	# |params| body
+	# s2 already has NK_PIPE node, reuse as closure node
+	# Parse param list until |
+px_clos_params:
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_PIPE
+	beq	a0, t0, px_clos_body
+	li	t0, NK_OR
+	beq	a0, t0, px_clos_empty	# || = empty params + immediate close
+	li	t0, NK_TERM
+	bne	a0, t0, px_clos_read_param
+	# Missing closing | — error
+	lla	a0, str_pipe
+	mv	a1, s4
+	mv	a2, s0
+	j	err_expect
+px_clos_read_param:
+	# Read param (identifier)
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	mv	a1, s4
+	mv	a0, s2
+	jal	node_add_child
+	# Expect comma or |
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COMMA
+	beq	a0, t0, px_clos_comma
+	li	t0, NK_PIPE
+	beq	a0, t0, px_clos_params	# closing | — will be consumed there
+	li	t0, NK_TERM
+	beq	a0, t0, px_clos_params	# EOF — error caught there
+	# Error: expected , or |
+	lla	a0, str_comma_pipe
+	mv	a1, s4
+	mv	a2, s0
+	j	err_expect
+px_clos_comma:
+	# Consume comma
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	j	px_clos_params
+px_closure_empty:
+	# || was consumed as the prefix token (NK_OR). s2 is the node.
+	# Just parse body — no params.
+	j	px_clos_expr
+
+px_clos_empty:
+	# || seen inside |...| parsing — consume it
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	j	px_clos_expr
+px_clos_body:
+	mv	a0, s0
+	li	a1, NK_PIPE
+	lla	a2, str_pipe
+	jal	expect_tok
+px_clos_expr:
+	# Parse body expression
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	j	px_done
+
+px_struct:
+	# struct Name { field, field, ... }
+	# s2 = struct token node. Read name, then fields.
+	# Name
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next		# read name ident
+	mv	a0, s2
+	mv	a1, s4
+	jal	node_add_child
+	# Expect {
+	mv	a0, s0
+	li	a1, NK_LBRACE
+	lla	a2, str_lbrace
+	jal	expect_tok
+	# Read fields until }
+px_struct_lp:
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_RBRACE
+	beq	a0, t0, px_struct_close
+	li	t0, NK_TERM
+	beq	a0, t0, px_struct_close
+	# Read field name (must be identifier)
+	mv	a0, s0
+	li	a1, NK_IDENT
+	lla	a2, str_ident
+	jal	expect_tok
+	mv	s4, a0
+	mv	a0, s2
+	mv	a1, s4
+	jal	node_add_child
+	# Optional comma
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COMMA
+	bne	a0, t0, px_struct_lp
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume comma
+	j	px_struct_lp
+px_struct_close:
+	mv	a0, s0
+	li	a1, NK_RBRACE
+	lla	a2, str_rbrace
+	jal	expect_tok
+	j	px_done
+
+px_macro:
+	# macro { body } — parse body as child expression
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	j	px_done
+
+px_loop:
+	# loop { body }
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr		# parse the block
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	j	px_done
+
+px_for:
+	# for <binding> in <iter> { body }
+	# Parse binding
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# read binding ident
+	mv	a1, a1			# the node
+	mv	a0, s2
+	jal	node_add_child
+	# Expect 'in'
+	mv	a0, s0
+	li	a1, NK_IN
+	lla	a2, str_in_kw
+	jal	expect_tok
+	# Parse iterator expr (stop before { body)
+	mv	a0, s0
+	li	a1, P_CALL+1
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	# Parse body
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	j	px_done
+
+px_switch:
+	# switch <expr> { <arms> }
+	# Parse scrutinee (stop before { which has P_CALL binding power)
+	mv	a0, s0
+	li	a1, P_CALL+1
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	# Expect { — consume it
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	# Parse arms: pattern => expr, ...
+px_sw_arm:
+	jal	node_alloc
+	mv	s4, a0			# fresh scratch for peek
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_RBRACE
+	beq	a0, t0, px_sw_close
+	li	t0, NK_TERM
+	beq	a0, t0, px_sw_close
+	# Create arm node: consume => to use as the arm container
+	# First parse pattern
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	s4, a0			# s4 = pattern node (save temporarily)
+	# Expect => (arm node)
+	mv	a0, s0
+	li	a1, NK_FAT_ARROW
+	lla	a2, str_fat_arrow
+	jal	expect_tok
+	mv	s3, a0			# s3 = arm node (=> token)
+	# Add pattern as first child of arm
+	mv	a0, s3
+	mv	a1, s4
+	jal	node_add_child
+	# Parse value expr
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s3
+	jal	node_add_child
+	# Add arm to switch node
+	mv	a1, s3
+	mv	a0, s2
+	jal	node_add_child
+	# Optional comma
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COMMA
+	bne	a0, t0, px_sw_arm
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume comma
+	j	px_sw_arm
+px_sw_close:
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume }
+	j	px_done
+
+px_return:
+	# return/break with optional value
+	# Peek — if next token can start an expr, parse it
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1
+	jal	lex_next
+	# If next is ; or } or TERM, no value
+	li	t0, NK_SEMI
+	beq	a0, t0, px_done
+	li	t0, NK_RBRACE
+	beq	a0, t0, px_done
+	li	t0, NK_TERM
+	beq	a0, t0, px_done
+	# Parse value
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s2
+	jal	node_add_child
+	j	px_done
+
+px_done:
+	# ── Infix loop ──
+px_infix:
+	# Allocate fresh scratch node for each peek (s4 may be the operator node)
+	jal	node_alloc
+	mv	a1, a0			# scratch for peek
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	mv	s5, a0			# s5 = peeked kind
+
+	# Get binding power
+	mv	a0, s5
+	jal	get_bp
+	mv	s3, a0			# s3 = left bp
+	mv	s5, a1			# s5 = right bp
+
+	# If left bp == 0 (not an infix op) or < min_prec, stop
+	beqz	s3, px_ret
+	blt	s3, s1, px_ret
+
+	# Consume the operator token into a new node
+	jal	node_alloc
+	mv	s4, a0			# s4 = operator node
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	mv	s3, a0			# s3 = operator kind
+	mv	a1, s2			# LHS as first child
+	mv	a0, s4
+	jal	node_add_child
+
+	# ── Special infix handlers ──
+
+	# Postfix ++/--: LHS ++ or LHS -- (no RHS)
+	li	t0, NK_INC
+	beq	s3, t0, ix_postfix_unary
+	li	t0, NK_DEC
+	beq	s3, t0, ix_postfix_unary
+
+	# Ternary: LHS ? then_expr : else_expr
+	li	t0, NK_QMARK
+	beq	s3, t0, ix_ternary
+
+	# Dot: LHS . ident
+	li	t0, NK_DOT
+	beq	s3, t0, ix_dot
+
+	# Index: LHS [ expr ]
+	li	t0, NK_LBRACKET
+	beq	s3, t0, ix_index
+
+	# Struct init: LHS { fields }
+	li	t0, NK_LBRACE
+	beq	s3, t0, ix_struct_init
+
+	# Call: LHS ( args )
+	li	t0, NK_LPAREN
+	beq	s3, t0, ix_call
+
+	# Regular binary: parse RHS
+	mv	a0, s0
+	mv	a1, s5			# right bp
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	node_add_child
+	mv	s2, s4			# operator becomes new LHS
+	j	px_infix
+
+ix_postfix_unary:
+	# LHS is already first child of s4. No RHS to parse.
+	mv	s2, s4
+	j	px_infix
+
+ix_ternary:
+	# Parse then-expr
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	node_add_child
+	# Check for : (else branch)
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_COLON
+	bne	a0, t0, ix_tern_done
+	# Consume : and parse else-expr
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume :
+	mv	a0, s0
+	li	a1, P_TERNARY		# right-assoc
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	node_add_child
+ix_tern_done:
+	mv	s2, s4
+	j	px_infix
+
+ix_dot:
+	# Parse member name (just consume next token)
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+	mv	a1, a1
+	mv	a0, s4
+	jal	node_add_child
+	mv	s2, s4
+	j	px_infix
+
+ix_index:
+	# Parse index expr, consume ]
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	node_add_child
+	# Expect ]
+	mv	a0, s0
+	li	a1, NK_RBRACKET
+	lla	a2, str_rbracket
+	jal	expect_tok
+	mv	s2, s4
+	j	px_infix
+
+ix_struct_init:
+	# LHS { field: value, ... } or LHS { val, val, ... }
+	# s4 = the '{' node (struct init container), LHS already first child
+	# Parse fields until }
+	li	t0, -1
+	sw	t0, N_DATA(s4)		# field mode: -1=unset, 0=positional, 1=named
+ix_si_lp:
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_RBRACE
+	beq	a0, t0, ix_si_close
+	li	t0, NK_TERM
+	beq	a0, t0, ix_si_close
+	# Parse value/field expression
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	# Check if next token is ':' (named field)
+	mv	s3, a0			# save parsed expr
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_COLON
+	bne	a0, t0, ix_si_positional
+	# Named field — verify name is an identifier
+	lw	t0, N_KIND(s3)
+	li	t1, NK_IDENT
+	beq	t0, t1, ix_si_named
+	# Not an identifier before ':'
+	lla	a0, str_ident
+	mv	a1, s3
+	mv	a2, s0
+	j	err_expect
+ix_si_named:
+	# Check mode consistency
+	lw	t0, N_DATA(s4)
+	beqz	t0, ix_si_mix_err	# was positional → error
+	li	t0, 1
+	sw	t0, N_DATA(s4)		# set mode = named
+	# Named field: consume ':', wrap name:value in a colon node
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume ':'
+	# Create colon node with name and value as children
+	jal	node_alloc
+	mv	s5, a0			# s5 = colon pair node
+	li	t0, NK_COLON
+	sw	t0, N_KIND(s5)
+	mv	a0, s5
+	mv	a1, s3			# name (the parsed expr)
+	jal	node_add_child
+	# Parse value
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s5
+	jal	node_add_child
+	# Add colon pair to struct init
+	mv	a1, s5
+	mv	a0, s4
+	jal	node_add_child
+	j	ix_si_comma
+ix_si_mix_err:
+	mv	a0, s3			# node for location
+	lla	a1, str_mix_fields	# message
+	j	err_at
+
+ix_si_positional:
+	# Check mode consistency
+	lw	t0, N_DATA(s4)
+	li	t1, 1
+	beq	t0, t1, ix_si_mix_err	# was named → error
+	sw	zero, N_DATA(s4)	# set mode = positional
+	# Positional: just add the value directly
+	mv	a1, s3
+	mv	a0, s4
+	jal	node_add_child
+ix_si_comma:
+	# Optional comma
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COMMA
+	bne	a0, t0, ix_si_lp
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume comma
+	j	ix_si_lp
+ix_si_close:
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume }
+	mv	s2, s4
+	j	px_infix
+
+ix_call:
+	# Parse args until )
+ix_call_lp:
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_RPAREN
+	beq	a0, t0, ix_call_close
+	li	t0, NK_TERM
+	beq	a0, t0, ix_call_close
+	# Parse arg
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s4
+	jal	node_add_child
+	# Expect comma or )
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COMMA
+	beq	a0, t0, ix_call_comma
+	li	t0, NK_RPAREN
+	beq	a0, t0, ix_call_close
+	li	t0, NK_TERM
+	beq	a0, t0, ix_call_close
+	# Error: expected , or )
+	lla	a0, str_comma_rparen
+	mv	a2, s0
+	j	err_expect
+ix_call_comma:
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume comma
+	j	ix_call_lp
+ix_call_close:
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume )
+	mv	s2, s4
+	j	px_infix
+
+px_ret:
+	mv	a0, s2
+	return
+
+# ── parse_program: parse semicolon-separated top-level expressions ───
+# a0=lexer → a0=program node (NK_LBRACE reused as program)
+parse_program:
+	prologue	s0 s1 s2 x0
+	mv	s0, a0			# lexer
+	jal	node_alloc
+	mv	s1, a0			# program node
+	li	t0, NK_LBRACE		# reuse as "block/program"
+	sw	t0, N_KIND(s1)
+pp_loop:
+	# Peek
+	jal	node_alloc
+	mv	s2, a0
+	mv	a0, s0
+	mv	a1, s2
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_TERM
+	beq	a0, t0, pp_done
+	# Parse expression
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s1
+	jal	node_add_child
+	# Expect semicolon, EOF, or } after expression
+	jal	node_alloc
+	mv	s2, a0
+	mv	a0, s0
+	mv	a1, s2
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_SEMI
+	beq	a0, t0, pp_semi
+	li	t0, NK_TERM
+	beq	a0, t0, pp_done
+	li	t0, NK_RBRACE
+	beq	a0, t0, pp_done
+	# Error: missing semicolon
+	lla	a0, str_semi
+	mv	a1, s2
+	mv	a2, s0
+	j	err_expect
+pp_semi:
+	mv	a0, s0
+	mv	a1, s2
+	li	a2, 0
+	jal	lex_next		# consume ;
+	j	pp_loop
+pp_done:
+	mv	a0, s1
+	return
+
+# ══════════════════════════════════════════════════════════════════════
+#  Asm support: mnemonic table, lookup, register checker, parser
+# ══════════════════════════════════════════════════════════════════════
+
+# asm_mnem_tbl: 12 bytes per entry (8-byte name + class:f3:f7:pad)
+asm_mnem_tbl:
+.ascii	"add"
+.zero	5
+.word	0x000001
+.ascii	"sub"
+.zero	5
+.word	0x200001
+.ascii	"and"
+.zero	5
+.word	0x000701
+.ascii	"or"
+.zero	6
+.word	0x000601
+.ascii	"xor"
+.zero	5
+.word	0x000401
+.ascii	"sll"
+.zero	5
+.word	0x000101
+.ascii	"srl"
+.zero	5
+.word	0x000501
+.ascii	"sra"
+.zero	5
+.word	0x200501
+.ascii	"slt"
+.zero	5
+.word	0x000201
+.ascii	"sltu"
+.zero	4
+.word	0x000301
+.ascii	"addi"
+.zero	4
+.word	0x000002
+.ascii	"andi"
+.zero	4
+.word	0x000702
+.ascii	"ori"
+.zero	5
+.word	0x000602
+.ascii	"xori"
+.zero	4
+.word	0x000402
+.ascii	"slti"
+.zero	4
+.word	0x000202
+.ascii	"sltiu"
+.zero	3
+.word	0x000302
+.ascii	"slli"
+.zero	4
+.word	0x000103
+.ascii	"srli"
+.zero	4
+.word	0x000503
+.ascii	"srai"
+.zero	4
+.word	0x200503
+.ascii	"lw"
+.zero	6
+.word	0x000204
+.ascii	"lh"
+.zero	6
+.word	0x000104
+.ascii	"lhu"
+.zero	5
+.word	0x000504
+.ascii	"lb"
+.zero	6
+.word	0x000004
+.ascii	"lbu"
+.zero	5
+.word	0x000404
+.ascii	"sw"
+.zero	6
+.word	0x000205
+.ascii	"sh"
+.zero	6
+.word	0x000105
+.ascii	"sb"
+.zero	6
+.word	0x000005
+.ascii	"beq"
+.zero	5
+.word	0x000006
+.ascii	"bne"
+.zero	5
+.word	0x000106
+.ascii	"blt"
+.zero	5
+.word	0x000406
+.ascii	"bge"
+.zero	5
+.word	0x000506
+.ascii	"bltu"
+.zero	4
+.word	0x000606
+.ascii	"bgeu"
+.zero	4
+.word	0x000706
+.ascii	"lui"
+.zero	5
+.word	0x000007
+.ascii	"auipc"
+.zero	3
+.word	0x000008
+.ascii	"jal"
+.zero	5
+.word	0x000009
+.ascii	"jalr"
+.zero	4
+.word	0x00000A
+.ascii	"li"
+.zero	6
+.word	0x00000B
+.ascii	"mv"
+.zero	6
+.word	0x00000C
+.ascii	"ret"
+.zero	5
+.word	0x00000D
+.ascii	"j"
+.zero	7
+.word	0x00000E
+.ascii	"nop"
+.zero	5
+.word	0x00000F
+.ascii	"not"
+.zero	5
+.word	0x000010
+.ascii	"neg"
+.zero	5
+.word	0x000011
+.ascii	"seqz"
+.zero	4
+.word	0x000012
+.ascii	"snez"
+.zero	4
+.word	0x000013
+.ascii	"jr"
+.zero	6
+.word	0x000014
+.ascii	"wfi"
+.zero	5
+.word	0x000015
+.ascii	"beqz"
+.zero	4
+.word	0x00001E
+.ascii	"bnez"
+.zero	4
+.word	0x00001F
+.ascii	"bgt"
+.zero	5
+.word	0x000020
+.ascii	"ble"
+.zero	5
+.word	0x000021
+.ascii	"bgtu"
+.zero	4
+.word	0x000022
+.ascii	"bleu"
+.zero	4
+.word	0x000023
+.ascii	"bltz"
+.zero	4
+.word	0x000024
+.ascii	"bgez"
+.zero	4
+.word	0x000025
+.ascii	"call"
+.zero	4
+.word	0x000026
+.ascii	"tail"
+.zero	4
+.word	0x000027
+.ascii	"csrrw"
+.zero	3
+.word	0x000116
+.ascii	"csrrs"
+.zero	3
+.word	0x000216
+.ascii	"csrrc"
+.zero	3
+.word	0x000316
+.ascii	"csrrwi"
+.zero	2
+.word	0x000517
+.ascii	"csrrsi"
+.zero	2
+.word	0x000617
+.ascii	"csrrci"
+.zero	2
+.word	0x000717
+.ascii	"csrw"
+.zero	4
+.word	0x000116
+.ascii	"csrr"
+.zero	4
+.word	0x000216
+.ascii	"mret"
+.zero	4
+.word	0x000018
+.ascii	"sret"
+.zero	4
+.word	0x000019
+.ascii	"sfence"
+.zero	2
+.word	0x00001A
+.ascii	"fence"
+.zero	3
+.word	0x00001B
+.ascii	"fence.i"
+.zero	1
+.word	0x00001C
+.ascii	"mul"
+.zero	5
+.word	0x010001
+.ascii	"mulh"
+.zero	4
+.word	0x010101
+.ascii	"mulhsu"
+.zero	2
+.word	0x010201
+.ascii	"mulhu"
+.zero	3
+.word	0x010301
+.ascii	"div"
+.zero	5
+.word	0x010401
+.ascii	"divu"
+.zero	4
+.word	0x010501
+.ascii	"rem"
+.zero	5
+.word	0x010601
+.ascii	"remu"
+.zero	4
+.word	0x010701
+.byte	0
+.zero	3
+
+# asm_lookup: look up mnemonic in asm table
+# a0=text_ptr (in input), a1=text_len → a0=table_entry_ptr or 0
+# Copies token to a zero-padded 8-byte stack buffer for comparison.
+asm_lookup:
+	# Build zero-padded 8-byte name on stack
+	addi	sp, sp, -8
+	sw	zero, 0(sp)
+	sw	zero, 4(sp)
+	mv	t0, sp
+	mv	t1, a0			# src
+	mv	t2, a1			# len
+al_copy:
+	beqz	t2, al_search
+	lbu	t3, 0(t1)
+	sb	t3, 0(t0)
+	addi	t0, t0, 1
+	addi	t1, t1, 1
+	addi	t2, t2, -1
+	j	al_copy
+al_search:
+	lla	t0, asm_mnem_tbl
+al_next:
+	lbu	t1, 0(t0)
+	beqz	t1, al_fail		# sentinel
+	# Compare 8 bytes
+	mv	t2, sp			# our padded buffer
+	mv	t3, t0			# entry name
+	li	t4, 8
+al_cmp:
+	lbu	t5, 0(t2)
+	lbu	t6, 0(t3)
+	bne	t5, t6, al_skip
+	addi	t2, t2, 1
+	addi	t3, t3, 1
+	addi	t4, t4, -1
+	bnez	t4, al_cmp
+	# Match
+	mv	a0, t0
+	addi	sp, sp, 8
+	ret
+al_skip:
+	addi	t0, t0, 12
+	j	al_next
+al_fail:
+	li	a0, 0
+	addi	sp, sp, 8
+	ret
+
+# is_reg_name: deferred to codegen — parser captures tokens as-is
+
+# ── px_asm: parse asm [name] { body } ────────────────────────────────
+# s2 = the NK_ASM node from lex_next
+px_asm:
+	# Check for optional name (peek for identifier before '{')
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_IDENT
+	bne	a0, t0, px_asm_no_name
+	# Has a name — consume it and add as child
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	mv	a1, s4
+	mv	a0, s2
+	jal	node_add_child
+px_asm_no_name:
+	# Consume '{'
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+
+	# Parse asm body until '}'
+px_asm_lp:
+	# Peek next token
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_RBRACE
+	beq	a0, t0, px_asm_close
+	li	t0, NK_TERM
+	beq	a0, t0, px_asm_close
+
+	# Check for binding: '(' starts a binding
+	li	t0, NK_LPAREN
+	beq	a0, t0, px_asm_bind
+
+	# Check for numeric label: number followed by ':'
+	li	t0, NK_NUMBER
+	beq	a0, t0, px_asm_maybe_label
+
+	# Must be an instruction mnemonic
+	j	px_asm_insn
+
+# ── Asm binding: (reg=expr) or (var=reg) ──
+px_asm_bind:
+	# Consume '('
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+
+	# Create bind node
+	jal	node_alloc
+	mv	s3, a0
+	li	t0, NK_ASM_BIND
+	sw	t0, N_KIND(s3)
+
+	# Read left side (reg or var name)
+	jal	node_alloc
+	mv	s4, a0
+	mv	a0, s0
+	mv	a1, s4
+	li	a2, 0
+	jal	lex_next
+	mv	a1, s4
+	mv	a0, s3
+	jal	node_add_child
+
+	# Expect '='
+	mv	a0, s0
+	li	a1, NK_ASSIGN
+	lla	a2, str_assign
+	jal	expect_tok
+
+	# Read right side — could be simple ident or expression
+	mv	a0, s0
+	li	a1, P_NONE
+	jal	parse_expr
+	mv	a1, a0
+	mv	a0, s3
+	jal	node_add_child
+
+	# Expect ')'
+	mv	a0, s0
+	li	a1, NK_RPAREN
+	lla	a2, str_rparen
+	jal	expect_tok
+
+	# Add bind node to asm
+	mv	a1, s3
+	mv	a0, s2
+	jal	node_add_child
+	j	px_asm_lp
+
+# ── Asm numeric label: N: ──
+px_asm_maybe_label:
+	# Peek at the token AFTER the number to see if it's ':'
+	# First consume the number
+	jal	node_alloc
+	mv	s3, a0
+	mv	a0, s0
+	mv	a1, s3
+	li	a2, 0
+	jal	lex_next		# consume number token
+
+	# Peek for ':'
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COLON
+	bne	a0, t0, px_asm_insn_from_token
+	# It's a label — consume ':'
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+
+	# Create label node with the number as child
+	jal	node_alloc
+	mv	s4, a0
+	li	t0, NK_ASM_LABEL
+	sw	t0, N_KIND(s4)
+	mv	a0, s4
+	mv	a1, s3			# number token
+	jal	node_add_child
+	# Add to asm
+	mv	a1, s4
+	mv	a0, s2
+	jal	node_add_child
+	j	px_asm_lp
+
+# ── Got a token that's not label — treat as instruction start ──
+px_asm_insn_from_token:
+	# s3 has the already-consumed token (was thought to be a number for label)
+	# This shouldn't normally happen (numbers aren't mnemonics)
+	# Just add it as an error/atom
+	mv	a1, s3
+	mv	a0, s2
+	jal	node_add_child
+	j	px_asm_lp
+
+# ── Asm instruction: mnemonic [operands] ──
+px_asm_insn:
+	# Consume mnemonic token
+	jal	node_alloc
+	mv	s3, a0
+	mv	a0, s0
+	mv	a1, s3
+	li	a2, 0
+	jal	lex_next
+
+	# Create instruction node
+	jal	node_alloc
+	mv	s4, a0
+	li	t0, NK_ASM_INSN
+	sw	t0, N_KIND(s4)
+	# Copy mnemonic location info
+	lw	t0, N_LOC_OFF(s3)
+	sw	t0, N_LOC_OFF(s4)
+	lw	t0, N_LOC_LEN(s3)
+	sw	t0, N_LOC_LEN(s4)
+	lw	t0, N_LOC_LINE(s3)
+	sw	t0, N_LOC_LINE(s4)
+	lw	t0, N_LOC_COL(s3)
+	sw	t0, N_LOC_COL(s4)
+
+	# Add mnemonic as first child
+	mv	a0, s4
+	mv	a1, s3
+	jal	node_add_child
+
+	# Look up mnemonic to determine operand count/format
+	lw	t0, N_LOC_OFF(s3)	# token offset
+	lw	t1, L_IN(s0)		# input base from lexer
+	add	a0, t1, t0		# text ptr
+	lw	a1, N_LOC_LEN(s3)	# text len
+	jal	asm_lookup
+	beqz	a0, px_asm_insn_done	# unknown mnemonic — no operands
+
+	# a0 = table entry. Load class byte
+	lbu	a3, 8(a0)		# class (low byte of word at offset 8)
+
+	# Dispatch on class to read operands
+	# R-type (class 1): rd, rs1, rs2
+	li	t0, AC_R
+	beq	a3, t0, px_ai_3reg
+
+	# I-arith (class 2): rd, rs1, imm
+	li	t0, AC_I_ARITH
+	beq	a3, t0, px_ai_2reg_imm
+
+	# I-shift (class 3): rd, rs1, shamt
+	li	t0, AC_I_SHIFT
+	beq	a3, t0, px_ai_2reg_imm
+
+	# I-load (class 4): rd, imm(rs1)
+	li	t0, AC_I_LOAD
+	beq	a3, t0, px_ai_reg_mem
+
+	# S-type (class 5): rs2, imm(rs1)
+	li	t0, AC_S
+	beq	a3, t0, px_ai_reg_mem
+
+	# B-type (class 6): rs1, rs2, target
+	li	t0, AC_B
+	beq	a3, t0, px_ai_2reg_imm
+
+	# U-type lui/auipc (class 7,8): rd, imm
+	li	t0, AC_U_LUI
+	beq	a3, t0, px_ai_reg_imm
+	li	t0, AC_U_AUIPC
+	beq	a3, t0, px_ai_reg_imm
+
+	# J-type jal (class 9): rd, target  OR just target
+	li	t0, AC_J_JAL
+	beq	a3, t0, px_ai_reg_imm
+
+	# jalr (class 10): rd, rs1, imm  OR rd, imm(rs1)
+	li	t0, AC_JALR
+	beq	a3, t0, px_ai_2reg_imm
+
+	# Pseudos with 2 operands: li rd,imm / mv rd,rs / not / neg / seqz / snez
+	li	t0, AC_PS_LI
+	beq	a3, t0, px_ai_reg_imm
+	li	t0, AC_PS_MV
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_NOT
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_NEG
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_SEQZ
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_SNEZ
+	beq	a3, t0, px_ai_2reg
+
+	# Pseudos with 1 operand: j target / jr rs
+	li	t0, AC_PS_J
+	beq	a3, t0, px_ai_1op
+	li	t0, AC_PS_JR
+	beq	a3, t0, px_ai_1op
+
+	# Pseudos with 0 operands: ret nop wfi mret sret
+	li	t0, AC_PS_RET
+	beq	a3, t0, px_asm_insn_done
+	li	t0, AC_PS_NOP
+	beq	a3, t0, px_asm_insn_done
+	li	t0, AC_PS_WFI
+	beq	a3, t0, px_asm_insn_done
+	li	t0, AC_MRET
+	beq	a3, t0, px_asm_insn_done
+	li	t0, AC_SRET
+	beq	a3, t0, px_asm_insn_done
+
+	# CSR: csrrw/csrrs/csrrc rd, csr, rs1
+	li	t0, AC_CSR
+	beq	a3, t0, px_ai_3reg
+	# CSRI: csrrwi/csrrsi/csrrci rd, csr, uimm
+	li	t0, AC_CSRI
+	beq	a3, t0, px_ai_2reg_imm
+
+	# Branch pseudos with 2 ops: beqz/bnez/bltz/bgez rs, target
+	li	t0, AC_PS_BEQZ
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_BNEZ
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_BLTZ
+	beq	a3, t0, px_ai_2reg
+	li	t0, AC_PS_BGEZ
+	beq	a3, t0, px_ai_2reg
+
+	# Branch pseudos with 3 ops: bgt/ble/bgtu/bleu rs1, rs2, target
+	li	t0, AC_PS_BGT
+	beq	a3, t0, px_ai_3reg
+	li	t0, AC_PS_BLE
+	beq	a3, t0, px_ai_3reg
+	li	t0, AC_PS_BGTU
+	beq	a3, t0, px_ai_3reg
+	li	t0, AC_PS_BLEU
+	beq	a3, t0, px_ai_3reg
+
+	# call/tail: 1 operand (label)
+	li	t0, AC_PS_CALL
+	beq	a3, t0, px_ai_1op
+	li	t0, AC_PS_TAIL
+	beq	a3, t0, px_ai_1op
+
+	# fence/sfence — read remaining tokens on this line
+	j	px_asm_insn_done
+
+# ── Helper: read one asm operand, skip leading comma ──
+# Reads next token (skipping comma if present), adds to s4
+asm_read_op:
+	prologue	s3 x0
+	# Peek for comma, skip it
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1
+	jal	lex_next
+	li	t0, NK_COMMA
+	bne	a0, t0, aro_read
+	# Consume comma
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+aro_read:
+	# Read actual operand
+	jal	node_alloc
+	mv	s3, a0
+	mv	a0, s0
+	mv	a1, s3
+	li	a2, 0
+	jal	lex_next
+
+	# Check for label ref: number followed by 'b' or 'f' (adjacent)
+	li	t0, NK_NUMBER
+	bne	a0, t0, aro_add
+	# Peek next — if it's ident "b" or "f" at adjacent column, merge
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 1			# peek
+	jal	lex_next
+	li	t0, NK_IDENT
+	bne	a0, t0, aro_add
+	# Check if it's exactly "b" or "f" (len=1)
+	lw	t0, N_LOC_LEN(a1)
+	li	t1, 1
+	bne	t0, t1, aro_add
+	# Check adjacency: ident col == number col + number len
+	lw	t0, N_LOC_COL(s3)	# number col
+	lw	t1, N_LOC_LEN(s3)	# number len
+	add	t0, t0, t1		# expected ident col
+	lw	t1, N_LOC_COL(a1)	# actual ident col
+	bne	t0, t1, aro_add
+	# It's a label ref — consume the direction and extend the number's length
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next		# consume 'b' or 'f'
+	# Extend s3's length by 1 to include the direction char
+	lw	t0, N_LOC_LEN(s3)
+	addi	t0, t0, 1
+	sw	t0, N_LOC_LEN(s3)
+
+aro_add:
+	mv	a0, s4
+	mv	a1, s3
+	jal	node_add_child
+	return
+
+# ── Operand parsers for asm instructions ──
+# All use asm_read_op to read tokens and add as children of s4
+
+# 1 operand
+px_ai_1op:
+	jal	asm_read_op
+	j	px_asm_insn_done
+
+# 2 registers
+px_ai_2reg:
+	jal	asm_read_op
+	jal	asm_read_op
+	j	px_asm_insn_done
+
+# 3 registers (R-type, CSR)
+px_ai_3reg:
+	jal	asm_read_op
+	jal	asm_read_op
+	jal	asm_read_op
+	j	px_asm_insn_done
+
+# reg, imm (lui, li, jal, U-type)
+px_ai_reg_imm:
+	jal	asm_read_op
+	jal	asm_read_op
+	j	px_asm_insn_done
+
+# 2 reg + imm (I-arith, I-shift, B-type, jalr)
+px_ai_2reg_imm:
+	jal	asm_read_op
+	jal	asm_read_op
+	jal	asm_read_op
+	j	px_asm_insn_done
+
+# reg, mem: rd, imm(rs1)
+# Reads: reg, comma, imm, (, reg, )
+px_ai_reg_mem:
+	jal	asm_read_op		# rd or rs2
+	jal	asm_read_op		# imm (skips comma)
+	# Consume (
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+	# Read base reg
+	jal	asm_read_op
+	# Consume )
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+	j	px_asm_insn_done
+
+px_asm_insn_done:
+	# Add instruction node to asm
+	mv	a1, s4
+	mv	a0, s2
+	jal	node_add_child
+	j	px_asm_lp
+
+px_asm_close:
+	# Consume }
+	jal	node_alloc
+	mv	a1, a0
+	mv	a0, s0
+	li	a2, 0
+	jal	lex_next
+	j	px_done
+
+# ── print_ast: indented tree printer ──────────────────────────────────
+# a0=node, a1=depth. Uses s2 as write cursor, s5 as input base.
+print_ast:
+	prologue	s0 s1 s3 x0
+	mv	s0, a0			# node
+	mv	s3, a1			# depth
+
+	# Print indent (2 spaces per depth level)
+	mv	t0, s3
+pa_indent:
+	beqz	t0, pa_kind
+	li	t1, ' '
+	sb	t1, 0(s2)
+	sb	t1, 1(s2)
+	addi	s2, s2, 2
+	addi	t0, t0, -1
+	j	pa_indent
+
+pa_kind:
+	# Print kind as decimal
+	lw	a0, N_KIND(s0)
+	jal	print_dec_inline
+
+	# Print token text if it has length
+	lw	t0, N_LOC_LEN(s0)
+	beqz	t0, pa_loc
+	li	t0, ':'
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+	# Copy text
+	lw	t0, N_LOC_OFF(s0)
+	lw	t1, N_LOC_LEN(s0)
+	add	t0, s5, t0
+pa_text:
+	beqz	t1, pa_loc
+	lbu	t2, 0(t0)
+	sb	t2, 0(s2)
+	addi	t0, t0, 1
+	addi	s2, s2, 1
+	addi	t1, t1, -1
+	j	pa_text
+
+pa_loc:
+	# Print location: pad then line:col
+	li	t0, ' '
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+	lw	a0, N_LOC_LINE(s0)
+	jal	print_dec_inline
+	li	t0, ':'
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+	lw	a0, N_LOC_COL(s0)
+	jal	print_dec_inline
+
+	# Newline
+	li	t0, '\n'
+	sb	t0, 0(s2)
+	addi	s2, s2, 1
+
+	# Recurse on children with depth+1
+	lw	s1, N_FIRST_CHILD(s0)
+pa_child_lp:
+	beqz	s1, pa_done
+	mv	a0, s1
+	addi	a1, s3, 1
+	jal	print_ast
+	lw	s1, N_NEXT_SIB(s1)
+	j	pa_child_lp
+
+pa_done:
+	return
+
+# ══════════════════════════════════════════════════════════════════════
 #  compile: a0=input_start, a1=input_end
-#  Debug mode: lex all tokens and print:
-#    token='<text>',type=<kind>,<line>:<col>\n
+#  Debug mode: parse and print AST as S-expression.
 #  Returns a0=out_start, a1=out_end.
 # ══════════════════════════════════════════════════════════════════════
 compile:
@@ -1000,126 +3138,16 @@ compile:
 	jal	lexer_init
 	mv	s0, a0			# s0 = lexer
 
-	# Allocate a node on the heap
-	li	a0, N_SZ
-	jal	alloc
-	mv	s1, a0			# s1 = node
-
-	# Lex loop
-compile_loop:
+	# Parse
 	mv	a0, s0
-	mv	a1, s1
-	li	a2, 0			# not peeking
-	jal	lex_next
-	lw	s4, N_KIND(s1)		# save kind
+	jal	parse_program
+	mv	s4, a0
 
-	# "token='"
-	li	t0, 't'
-	sb	t0, 0(s2)
-	li	t0, 'o'
-	sb	t0, 1(s2)
-	li	t0, 'k'
-	sb	t0, 2(s2)
-	li	t0, 'e'
-	sb	t0, 3(s2)
-	li	t0, 'n'
-	sb	t0, 4(s2)
-	li	t0, '='
-	sb	t0, 5(s2)
-	li	t0, '\''
-	sb	t0, 6(s2)
-	addi	s2, s2, 7
-
-	# Copy token text from input + pad to 20 chars total (including quotes)
-	lw	t0, N_LOC_OFF(s1)	# offset
-	lw	t1, N_LOC_LEN(s1)	# length
-	add	t0, s5, t0		# ptr into input
-	mv	t3, t1			# save len for padding
-cp_tok:
-	beqz	t1, cp_tok_done
-	lbu	t2, 0(t0)
-	sb	t2, 0(s2)
-	addi	t0, t0, 1
-	addi	s2, s2, 1
-	addi	t1, t1, -1
-	j	cp_tok
-cp_tok_done:
-	# Close quote
-	li	t0, '\''
-	sb	t0, 0(s2)
-	addi	s2, s2, 1
-	# Pad with spaces: total field = 20 chars ("token='" = 7, text, "'", spaces)
-	# Already wrote 7 + len + 1 = 8 + len. Pad to 28.
-	addi	t3, t3, 8		# chars written so far
-	li	t4, 28			# target width
-cp_pad:
-	bge	t3, t4, cp_pad_done
-	li	t0, ' '
-	sb	t0, 0(s2)
-	addi	s2, s2, 1
-	addi	t3, t3, 1
-	j	cp_pad
-cp_pad_done:
-
-	# ",type="
-	li	t0, ', '
-	sb	t0, 0(s2)
-	li	t0, 't'
-	sb	t0, 1(s2)
-	li	t0, 'y'
-	sb	t0, 2(s2)
-	li	t0, 'p'
-	sb	t0, 3(s2)
-	li	t0, 'e'
-	sb	t0, 4(s2)
-	li	t0, '='
-	sb	t0, 5(s2)
-	addi	s2, s2, 6
-
-	# Print kind as decimal (pad to 3 chars)
-	mv	t3, s2			# remember start
+	# Print AST as indented tree
 	mv	a0, s4
-	jal	print_dec_inline
-	sub	t3, s2, t3		# chars written
-	li	t4, 3
-cp_type_pad:
-	bge	t3, t4, cp_type_done
-	li	t0, ' '
-	sb	t0, 0(s2)
-	addi	s2, s2, 1
-	addi	t3, t3, 1
-	j	cp_type_pad
-cp_type_done:
+	li	a1, 0			# depth = 0
+	jal	print_ast
 
-	# ","
-	li	t0, ', '
-	sb	t0, 0(s2)
-	addi	s2, s2, 1
-
-	# Print line number
-	lw	a0, N_LOC_LINE(s1)
-	jal	print_dec_inline
-
-	# ":"
-	li	t0, ':'
-	sb	t0, 0(s2)
-	addi	s2, s2, 1
-
-	# Print column
-	lw	a0, N_LOC_COL(s1)
-	jal	print_dec_inline
-
-	# newline
-	li	t0, '\n'
-	sb	t0, 0(s2)
-	addi	s2, s2, 1
-
-	# Stop on NK_TERM
-	li	t0, NK_TERM
-	beq	s4, t0, compile_done
-	j	compile_loop
-
-compile_done:
 	mv	a0, s3
 	mv	a1, s2
 	return

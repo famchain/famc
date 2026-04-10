@@ -16,5 +16,6 @@ cmp ./bin/fam0 ./fam0.seed || { echo "fam0: binaries don't match!"; exit 1; }
 run bin/fam0 src/fam1.fam0 > bin/fam1
 run bin/fam1 src/fam2.fam1 > bin/fam2
 run bin/fam2 src/fam3.fam2 > bin/fam3
+run bin/fam3 src/famc.fam3 > bin/famc
 
 echo "Success!";
