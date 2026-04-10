@@ -2259,7 +2259,7 @@ px_ret:
 # ── parse_program: parse semicolon-separated top-level expressions ───
 # a0=lexer → a0=program node (NK_LBRACE reused as program)
 parse_program:
-	prologue	s0 s1 s2 x0
+	prologue	s0 s1 s2 s3 x0
 	mv	s0, a0			# lexer
 	jal	node_alloc
 	mv	s1, a0			# program node
@@ -2279,6 +2279,7 @@ pp_loop:
 	mv	a0, s0
 	li	a1, P_NONE
 	jal	parse_expr
+	mv	s3, a0			# save expr node for kind check below
 	mv	a1, a0
 	mv	a0, s1
 	jal	node_add_child
@@ -2295,6 +2296,11 @@ pp_loop:
 	beq	a0, t0, pp_done
 	li	t0, NK_RBRACE
 	beq	a0, t0, pp_done
+	# If the just-parsed expression was a block, a trailing ';' is
+	# optional — block statements are self-terminating (like C).
+	lw	t0, N_KIND(s3)
+	li	t1, NK_LBRACE
+	beq	t0, t1, pp_loop
 	# Error: missing semicolon
 	lla	a0, str_semi
 	mv	a1, s2
@@ -3158,9 +3164,10 @@ compile:
 .equ	CG_SCOPE,	4
 .equ	CG_INPUT,	8
 .equ	CG_FIXUP,	12
-.equ	CG_FRAME_OFF,	16	# next stack frame offset (grows negative)
+.equ	CG_FRAME_OFF,	16	# bytes of frame used so far (grows upward from 0)
 .equ	CG_FRAME_PATCH,	20	# output offset of the frame alloc instruction (for backpatch)
-.equ	CG_SZ,		24
+.equ	CG_FRAME_MAX,	24	# high-water mark of CG_FRAME_OFF (used for final frame size)
+.equ	CG_SZ,		28
 
 # Scope entry (linked list):
 #   0:  parent scope pointer
@@ -3397,25 +3404,46 @@ ta_fail:
 	li	a0, -1
 	ret
 
-# var_alloc: allocate a variable register (s0-s10 = x8-x18)
-# a0=ctx → a0=reg number
+# var_alloc: allocate a variable register from the callee-saved set.
+# The RISC-V saved regs are s0..s11 = x8, x9, x18..x27 (12 total), but
+# we reserve s0 (x8) as a future frame pointer — do NOT hand it out.
+# Note the gap at x10..x17: those are argument registers (a0..a7) and
+# must not be used either, since any future call or asm block will
+# clobber them. Walk x9 (just s1), then x18..x27.
+# a0=ctx → a0=reg number (or -1 if all taken)
 var_alloc:
 	lw	t0, CG_REG_BITMAP(a0)
-	li	t1, 8			# s0 = x8
-va_loop:
-	li	t2, 19			# s10 = x18, stop at 19
-	beq	t1, t2, va_fail
+	li	t1, 9			# start at x9 (s1); s0/x8 reserved for fp
+va_lo_loop:
+	li	t2, 10			# after x9, jump to x18
+	beq	t1, t2, va_hi_init
 	li	t2, 1
 	sll	t2, t2, t1
 	and	t3, t0, t2
-	bnez	t3, va_next
+	bnez	t3, va_lo_next
 	or	t0, t0, t2
 	sw	t0, CG_REG_BITMAP(a0)
 	mv	a0, t1
 	ret
-va_next:
+va_lo_next:
 	addi	t1, t1, 1
-	j	va_loop
+	j	va_lo_loop
+va_hi_init:
+	li	t1, 18			# continue at x18 (s2)
+va_hi_loop:
+	li	t2, 28			# stop at x28 (t3)
+	beq	t1, t2, va_fail
+	li	t2, 1
+	sll	t2, t2, t1
+	and	t3, t0, t2
+	bnez	t3, va_hi_next
+	or	t0, t0, t2
+	sw	t0, CG_REG_BITMAP(a0)
+	mv	a0, t1
+	ret
+va_hi_next:
+	addi	t1, t1, 1
+	j	va_hi_loop
 va_fail:
 	# Out of s-regs — return -1 (caller handles stack slot)
 	li	a0, -1
@@ -3505,6 +3533,10 @@ gen_expr:
 	li	t0, NK_NUMBER
 	beq	s6, t0, ge_number
 
+	# Char literal
+	li	t0, NK_CHAR
+	beq	s6, t0, ge_char
+
 	# Identifier (variable reference)
 	li	t0, NK_IDENT
 	beq	s6, t0, ge_ident
@@ -3555,10 +3587,45 @@ gen_expr:
 	li	t0, NK_SEMI
 	beq	s6, t0, ge_semi
 
-	# TODO: more node types (unary, comparisons, etc.)
+	# Deref read: @expr, #expr, *expr (prefix unary with child = address)
+	li	t0, NK_AT
+	beq	s6, t0, ge_deref_byte
+	li	t0, NK_HASH
+	beq	s6, t0, ge_deref_half
+	li	t0, NK_STAR
+	beq	s6, t0, ge_deref_word
+
+	# Unary minus: -expr
+	li	t0, NK_MINUS
+	beq	s6, t0, ge_unary_neg
+	# Unary not: !expr
+	li	t0, NK_BANG
+	beq	s6, t0, ge_unary_not
+	# Bitwise not: ~expr
+	li	t0, NK_TILDE
+	beq	s6, t0, ge_unary_bnot
+
+	# Compound assignment: += -= etc.
+	li	t0, NK_PLUS_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_MINUS_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_STAR_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_AMP_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_PIPE_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_CARET_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_SHL_EQ
+	beq	s6, t0, ge_compound
+	li	t0, NK_SHR_EQ
+	beq	s6, t0, ge_compound
 
 	# Unknown — return 0 in x0
 	li	a0, 0
+	li	a1, 0
 	j	ge_ret
 
 # ── Number literal ───────────────────────────────────────────────────
@@ -3581,6 +3648,69 @@ ge_number:
 
 	mv	a0, s3			# return dest reg
 	li	a1, 1			# is temporary
+	j	ge_ret
+
+# ── Char literal ─────────────────────────────────────────────────────
+# N_LOC points at source text including surrounding quotes.
+# Len is 3 for 'x' or 4 for '\e' where e is an escape char.
+ge_char:
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s3, a0			# dest reg
+	lw	t0, N_LOC_OFF(s0)
+	lw	t1, N_LOC_LEN(s0)
+	lw	t2, CG_INPUT(s1)
+	add	t2, t2, t0		# text ptr at opening quote
+	li	t3, 3
+	beq	t1, t3, gc_simple
+	# Escape: text[1] = '\\', text[2] = escape char
+	lbu	t0, 2(t2)
+	li	t1, 'n'
+	beq	t0, t1, gc_nl
+	li	t1, 't'
+	beq	t0, t1, gc_tab
+	li	t1, 'r'
+	beq	t0, t1, gc_cr
+	li	t1, '0'
+	beq	t0, t1, gc_nul
+	li	t1, '\\'
+	beq	t0, t1, gc_bs
+	li	t1, '\''
+	beq	t0, t1, gc_sq
+	li	t1, '"'
+	beq	t0, t1, gc_dq
+	# Unknown escape: pass through the char as-is
+	mv	a1, t0
+	j	gc_emit
+gc_simple:
+	lbu	t0, 1(t2)
+	mv	a1, t0
+	j	gc_emit
+gc_nl:
+	li	a1, 10
+	j	gc_emit
+gc_tab:
+	li	a1, 9
+	j	gc_emit
+gc_cr:
+	li	a1, 13
+	j	gc_emit
+gc_nul:
+	li	a1, 0
+	j	gc_emit
+gc_bs:
+	li	a1, 92
+	j	gc_emit
+gc_sq:
+	li	a1, 39
+	j	gc_emit
+gc_dq:
+	li	a1, 34
+gc_emit:
+	mv	a0, s3
+	jal	emit_li
+	mv	a0, s3
+	li	a1, 1
 	j	ge_ret
 
 # ── Identifier (variable reference) ──────────────────────────────────
@@ -3612,9 +3742,18 @@ ge_ident_reg:
 
 # ── Assignment ────────────────────────────────────────────────────────
 ge_assign:
-	# LHS = first child (must be ident for now)
+	# LHS = first child
 	lw	s3, N_FIRST_CHILD(s0)	# LHS node
 	lw	s4, N_NEXT_SIB(s3)	# RHS node
+
+	# Deref on LHS → store through pointer
+	lw	t0, N_KIND(s3)
+	li	t1, NK_STAR
+	beq	t0, t1, ge_assign_deref
+	li	t1, NK_AT
+	beq	t0, t1, ge_assign_deref
+	li	t1, NK_HASH
+	beq	t0, t1, ge_assign_deref
 
 	# Codegen RHS
 	mv	a0, s4
@@ -3693,16 +3832,23 @@ ge_an_nofree:
 	j	ge_assign_done
 
 ge_an_stack:
-	# No s-regs left — spill to stack frame
-	# Allocate a stack slot (grow frame offset)
-	lw	t0, CG_FRAME_OFF(s1)
-	addi	t0, t0, -4		# next slot
+	# No s-regs left — spill to stack frame.
+	# Slots grow upward from 0. CG_FRAME_OFF holds bytes used; the next
+	# slot's offset from (post-prologue) sp is the current value, and we
+	# bump CG_FRAME_OFF by 4 afterward. Also update the high-water mark
+	# CG_FRAME_MAX so the epilogue allocates a frame large enough for the
+	# peak, even if a later block scope exit rewinds CG_FRAME_OFF.
+	lw	s6, CG_FRAME_OFF(s1)	# s6 = this slot's positive offset
+	addi	t0, s6, 4		# new used-count
 	sw	t0, CG_FRAME_OFF(s1)
-	mv	s6, t0			# s6 = stack offset (negative)
+	lw	t1, CG_FRAME_MAX(s1)
+	bge	t1, t0, ge_an_stk_nomax
+	sw	t0, CG_FRAME_MAX(s1)
+ge_an_stk_nomax:
 	# Emit: sw rhs_reg, offset(sp)
 	li	a0, 2			# rs1 = sp
 	mv	a1, s4			# rs2 = value reg
-	mv	a2, s6			# imm = offset
+	mv	a2, s6			# imm = positive offset
 	jal	emit_sw
 	# Free RHS if temp
 	lw	t0, 0(sp)
@@ -3721,7 +3867,65 @@ ge_an_stk_nofree:
 	# Set stack offset in the scope entry (the one just added)
 	lw	t0, CG_SCOPE(s1)
 	sw	s6, SC_STK_OFF(t0)
-	mv	s4, s6			# return stack offset (negative = on stack)
+	mv	s4, s6			# return stack offset (positive = on stack)
+
+ge_assign_deref:
+	# s3 = LHS deref node, s4 = RHS node
+	# Stash LHS kind (for f3 selection) on stack.
+	addi	sp, sp, -16
+	lw	t0, N_KIND(s3)
+	sw	t0, 0(sp)		# LHS kind
+	# Codegen address expression (child of deref)
+	lw	a0, N_FIRST_CHILD(s3)
+	beqz	a0, ge_ad_err
+	mv	a1, s1
+	jal	gen_expr
+	sw	a0, 4(sp)		# addr reg
+	sw	a1, 8(sp)		# addr temp flag
+	# Codegen RHS value
+	mv	a0, s4
+	mv	a1, s1
+	jal	gen_expr
+	mv	s4, a0			# val reg
+	mv	s6, a1			# val temp flag
+	# Reload address info
+	lw	s3, 4(sp)		# addr reg
+	lw	t0, 0(sp)		# LHS kind
+	# Pick f3 from kind: @→sb(0), #→sh(1), *→sw(2)
+	li	t1, NK_STAR
+	beq	t0, t1, ge_ad_sw
+	li	t1, NK_HASH
+	beq	t0, t1, ge_ad_sh
+	li	a3, 0			# sb
+	j	ge_ad_emit
+ge_ad_sh:
+	li	a3, 1
+	j	ge_ad_emit
+ge_ad_sw:
+	li	a3, 2
+ge_ad_emit:
+	# emit_s: a0=opcode, a1=rs1(addr), a2=rs2(val), a3=f3, a4=imm
+	li	a0, 0x23
+	mv	a1, s3
+	mv	a2, s4
+	li	a4, 0
+	jal	emit_s
+	# Free addr reg if it was a temp
+	lw	t0, 8(sp)
+	beqz	t0, ge_ad_ret
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_ad_ret:
+	addi	sp, sp, 16
+	mv	a0, s4			# return value reg
+	mv	a1, s6			# with its original temp flag
+	j	ge_ret
+ge_ad_err:
+	addi	sp, sp, 16
+	li	a0, 0
+	li	a1, 0
+	j	ge_ret
 
 ge_assign_done:
 	mv	a0, s4			# return the value reg
@@ -3753,10 +3957,15 @@ ge_binop:
 	mv	s4, a0			# s4 = RHS reg
 	sw	a1, N_PARENT(s0)	# stash RHS temp flag (borrow N_PARENT)
 
+	# Save node ptr before clobbering s0 with the result reg, so we can
+	# reload it at ge_bo_done and free the operand temps.
+	addi	sp, sp, -8
+	sw	s0, 0(sp)
+
 	# Allocate result register
 	mv	a0, s1
 	jal	temp_alloc
-	mv	s0, a0			# s0 = result reg (repurpose s0, node no longer needed)
+	mv	s0, a0			# s0 = result reg (node saved on stack)
 
 	# Emit instruction: rd=s0, rs1=s3, rs2=s4
 
@@ -4059,21 +4268,56 @@ ge_bo_end:
 	j	ge_bo_done
 
 ge_bo_done:
-	# We can't recover the temp flags (node pointer s0 was reused).
-	# Instead, DON'T free operand registers here.
-	# The caller (assignment or statement) is responsible for freeing temps.
-	# Since the result is a fresh temp, and operand variable regs remain
-	# alive, this is safe — we just "leak" temp operand regs.
-	# They'll be freed when the expression's temp result is consumed.
-	#
-	# TODO: track temp flags properly to free operand temps here.
-
+	# Free operand temps. Node ptr is saved at 0(sp), flags live in
+	# N_DATA (LHS) and N_PARENT (RHS) on the node. s0 holds the result reg.
+	# Stash result reg so reg_free calls can't clobber it via a-regs.
+	sw	s0, 4(sp)
+	lw	t0, 0(sp)		# node ptr
+	lw	t1, N_DATA(t0)		# LHS temp flag
+	beqz	t1, ge_bo_free_rhs
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_bo_free_rhs:
+	lw	t0, 0(sp)		# re-read node (reg_free may clobber t-regs)
+	lw	t1, N_PARENT(t0)	# RHS temp flag
+	beqz	t1, ge_bo_free_ret
+	mv	a0, s1
+	mv	a1, s4
+	jal	reg_free
+ge_bo_free_ret:
+	lw	s0, 4(sp)		# reload result reg
+	addi	sp, sp, 8
 	mv	a0, s0			# result in fresh temp reg
 	li	a1, 1			# is temporary
 	j	ge_ret
 
 # ── Block ─────────────────────────────────────────────────────────────
+# On entry, snapshot the current scope head and frame offset so that
+# variables declared inside the block can be freed on exit. Registers
+# tied to those variables go back to the allocator, and the frame
+# offset rewinds — CG_FRAME_MAX retains the peak so the prologue still
+# reserves enough space.
+#
+# The block's value is the result of its final child (either a trailing
+# expression or a `;`-wrapped statement whose value is x0). If that
+# result sits in a register owned by a block-local variable, the
+# cleanup walk below would free it out from under the caller, so we
+# first detect that case and copy the value into a fresh temp before
+# freeing anything.
+#
+# Stack scratch layout (16 bytes):
+#   0(sp):  saved scope head
+#   4(sp):  saved frame offset
+#   8(sp):  result temp flag (a1 returned to caller)
+#  12(sp):  unused (keeps sp 16-byte aligned)
 ge_block:
+	addi	sp, sp, -16
+	lw	t0, CG_SCOPE(s1)
+	sw	t0, 0(sp)		# saved scope head
+	lw	t0, CG_FRAME_OFF(s1)
+	sw	t0, 4(sp)		# saved frame offset
+	sw	zero, 8(sp)		# default result flag = 0
 	li	s3, 0			# last result reg
 	lw	s4, N_FIRST_CHILD(s0)	# first child
 ge_block_lp:
@@ -4098,7 +4342,52 @@ ge_block_last:
 	mv	a1, s1
 	jal	gen_expr
 	mv	s3, a0
+	sw	a1, 8(sp)		# remember last child's temp flag
 ge_block_done:
+	# Scan the scope chain to see if s3 (the return value) lives in a
+	# register owned by a block-local variable. s4 = walk pointer,
+	# s6 = loop sentinel (saved head).
+	lw	s6, 0(sp)
+	lw	s4, CG_SCOPE(s1)
+ge_bd_scan:
+	beq	s4, s6, ge_bd_free_init
+	lw	t0, SC_REG(s4)
+	beq	t0, s3, ge_bd_copy
+	lw	s4, SC_PARENT(s4)
+	j	ge_bd_scan
+ge_bd_copy:
+	# s3 is about to be freed by the cleanup walk. Copy it into a fresh
+	# temp first, then the cleanup can reclaim the old register safely.
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s0, a0			# repurpose s0 (block node no longer needed)
+	mv	a0, s0			# rd = new temp
+	mv	a1, s3			# rs = old result
+	jal	emit_mv
+	mv	s3, s0			# result reg is now the fresh temp
+	li	t0, 1
+	sw	t0, 8(sp)		# result is now a temp — update flag
+ge_bd_free_init:
+	# Free the register each block-local entry holds. Use s4 as the
+	# walk pointer again and s6 as the stop sentinel.
+	lw	s6, 0(sp)
+	lw	s4, CG_SCOPE(s1)
+ge_bd_loop:
+	beq	s4, s6, ge_bd_rest
+	lw	a1, SC_REG(s4)
+	li	t0, -1
+	beq	a1, t0, ge_bd_next	# stack var — no register to free
+	mv	a0, s1
+	jal	reg_free
+ge_bd_next:
+	lw	s4, SC_PARENT(s4)
+	j	ge_bd_loop
+ge_bd_rest:
+	sw	s6, CG_SCOPE(s1)	# restore scope head
+	lw	t0, 4(sp)
+	sw	t0, CG_FRAME_OFF(s1)	# rewind frame offset (MAX keeps peak)
+	lw	a1, 8(sp)		# saved / possibly-upgraded temp flag
+	addi	sp, sp, 16
 	mv	a0, s3
 	j	ge_ret
 
@@ -4115,6 +4404,159 @@ ge_semi:
 ge_semi_done:
 	li	a0, 0			# return x0 (no value)
 	li	a1, 0			# not temp
+	j	ge_ret
+
+# ── Deref read: @expr=lbu, #expr=lhu, *expr=lw ──────────────────────
+ge_deref_byte:
+	li	s3, 0			# f3 = 0 (lb → lbu for unsigned)
+	li	s4, 4			# f3 = 4 (lbu)
+	j	ge_deref
+ge_deref_half:
+	li	s3, 1			# f3 = 1 (lh)
+	li	s4, 5			# f3 = 5 (lhu)
+	j	ge_deref
+ge_deref_word:
+	li	s3, 2			# f3 = 2 (lw)
+	li	s4, 2
+ge_deref:
+	# Check if this is a read (has child = address) or has no child (error)
+	lw	a0, N_FIRST_CHILD(s0)
+	beqz	a0, ge_deref_err
+	# Codegen address expression
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0			# s3 = addr reg
+	mv	s6, a1			# s6 = addr temp flag
+	# Alloc result temp
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0			# s4 = result reg
+	# Emit load: lbu/lhu/lw result, 0(addr)
+	# Use unsigned loads for byte/half
+	lw	t0, N_KIND(s0)
+	li	t1, NK_AT
+	beq	t0, t1, ge_dr_byte
+	li	t1, NK_HASH
+	beq	t0, t1, ge_dr_half
+	# word: lw
+	li	a0, 0x03
+	mv	a1, s4			# rd
+	mv	a2, s3			# rs1 = addr
+	li	a3, 2			# f3 = lw
+	li	a4, 0			# imm = 0
+	jal	emit_i
+	j	ge_dr_done
+ge_dr_byte:
+	li	a0, 0x03
+	mv	a1, s4
+	mv	a2, s3
+	li	a3, 4			# f3 = lbu
+	li	a4, 0
+	jal	emit_i
+	j	ge_dr_done
+ge_dr_half:
+	li	a0, 0x03
+	mv	a1, s4
+	mv	a2, s3
+	li	a3, 5			# f3 = lhu
+	li	a4, 0
+	jal	emit_i
+ge_dr_done:
+	# Free addr reg if temp
+	beqz	s6, ge_dr_ret
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_dr_ret:
+	mv	a0, s4			# result
+	li	a1, 1			# temp
+	j	ge_ret
+ge_deref_err:
+	li	a0, 0
+	li	a1, 0
+	j	ge_ret
+
+# ── Unary operators ──────────────────────────────────────────────────
+ge_unary_neg:
+	# -expr → sub rd, x0, expr
+	lw	a0, N_FIRST_CHILD(s0)
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s6, a1
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0
+	# sub s4, x0, s3
+	mv	a1, s4
+	li	a2, 0			# x0
+	mv	a3, s3
+	li	a4, 0
+	li	a5, 0x20
+	li	a0, 0x33
+	jal	emit_r
+	beqz	s6, ge_un_ret
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_un_ret:
+	mv	a0, s4
+	li	a1, 1
+	j	ge_ret
+
+ge_unary_not:
+	# !expr → seqz rd, expr (sltiu rd, expr, 1)
+	lw	a0, N_FIRST_CHILD(s0)
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s6, a1
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0
+	li	a0, 0x13
+	mv	a1, s4
+	mv	a2, s3
+	li	a3, 3			# sltiu
+	li	a4, 1
+	jal	emit_i
+	beqz	s6, ge_un2_ret
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_un2_ret:
+	mv	a0, s4
+	li	a1, 1
+	j	ge_ret
+
+ge_unary_bnot:
+	# ~expr → xori rd, expr, -1
+	lw	a0, N_FIRST_CHILD(s0)
+	mv	a1, s1
+	jal	gen_expr
+	mv	s3, a0
+	mv	s6, a1
+	mv	a0, s1
+	jal	temp_alloc
+	mv	s4, a0
+	li	a0, 0x13
+	mv	a1, s4
+	mv	a2, s3
+	li	a3, 4			# xori
+	li	a4, -1
+	jal	emit_i
+	beqz	s6, ge_un3_ret
+	mv	a0, s1
+	mv	a1, s3
+	jal	reg_free
+ge_un3_ret:
+	mv	a0, s4
+	li	a1, 1
+	j	ge_ret
+
+# ── Compound assignment: += -= etc. ──────────────────────────────────
+ge_compound:
+	# For now, treat like binop + assign (TODO: optimize)
 	j	ge_ret
 
 ge_ret:
@@ -4209,9 +4651,15 @@ gen_program:
 	sw	zero, CG_SCOPE(s1)
 	sw	s5, CG_INPUT(s1)	# input base from compile
 	sw	zero, CG_FRAME_OFF(s1)	# no stack slots yet
+	sw	zero, CG_FRAME_MAX(s1)	# high-water mark also starts at 0
 
 	# Emit nop (q32 magic)
 	li	a0, 0x13
+	jal	emit_w
+
+	# Initialize sp to a fixed address high in DRAM so spill slots are valid.
+	# lui sp, 0x80200 → sp = 0x80200000 (2 MB into the virt 128 MB DRAM region).
+	li	a0, 0x80200137
 	jal	emit_w
 
 	# Emit placeholder frame allocation (addi sp, sp, 0 — backpatch later)
@@ -4231,15 +4679,18 @@ gp_loop:
 	j	gp_loop
 
 gp_done:
-	# Backpatch frame allocation if any stack slots were used
-	lw	t0, CG_FRAME_OFF(s1)	# frame offset (negative or 0)
+	# Backpatch frame allocation if any stack slots were used.
+	# CG_FRAME_MAX is the peak bytes of frame ever in use (>= 0). Round up
+	# to 16 and encode the prologue as `addi sp, sp, -aligned` and the
+	# epilogue as `addi sp, sp, +aligned`.
+	lw	t0, CG_FRAME_MAX(s1)	# peak bytes used
 	beqz	t0, gp_no_frame
-	# Align frame size to 16 bytes
-	addi	t0, t0, -15
-	andi	t0, t0, -16		# round down (more negative)
-	# Backpatch: addi sp, sp, frame_offset
-	# Instruction = (imm12 << 20) | (sp << 15) | (0 << 12) | (sp << 7) | 0x13
-	slli	t1, t0, 20		# imm in bits 31:20
+	# Align up to 16 bytes
+	addi	t0, t0, 15
+	andi	t0, t0, -16		# t0 = aligned frame size (positive)
+	# Backpatch: addi sp, sp, -t0
+	sub	t1, zero, t0		# t1 = -t0 (negative imm12)
+	slli	t1, t1, 20		# imm in bits 31:20 (sign-extended)
 	li	t2, 0x00010113		# addi sp, sp, 0
 	or	t1, t1, t2
 	lw	t2, CG_FRAME_PATCH(s1)	# output offset of placeholder
@@ -4251,8 +4702,7 @@ gp_done:
 	sb	t1, 2(t2)
 	srli	t1, t1, 8
 	sb	t1, 3(t2)
-	# Emit frame deallocation: addi sp, sp, -frame_offset
-	sub	t0, zero, t0		# negate to get positive
+	# Emit frame deallocation: addi sp, sp, +t0
 	mv	a4, t0
 	li	a0, 0x13
 	li	a1, 2			# rd = sp
