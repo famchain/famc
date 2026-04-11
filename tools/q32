@@ -1,5 +1,6 @@
 #!/bin/sh
 
+SMP=1
 CPU="rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false"
 FILE=""
 
@@ -34,6 +35,7 @@ fi
 qemu-system-riscv32 \
 	-machine virt \
 	-cpu "$CPU" \
+	-smp $SMP \
 	-nographic \
 	-bios none \
 	-device loader,file="$FILE",addr=0x80000000 \

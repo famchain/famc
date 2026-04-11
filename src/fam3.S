@@ -429,7 +429,9 @@ init_zero:
 # ══════════════════════════════════════════════════════════════════════════════
 
 main_loop:
-	jal	ra, read_token
+	li	gp, 0
+	j	read_token
+read_token_rs0:
 	beqz	s0, ml_post		# empty token
 
 	# Check for ':' suffix → label definition
@@ -449,21 +451,29 @@ ml_label:
 	li	t1, '9'+1
 	bge	t0, t1, ml_named
 	addi	a0, t0, -'0'
-	jal	ra, def_local_label
+	li	gp, 0
+	j	def_local_label
+def_local_label_rs0:
 	j	ml_post
 ml_named:
-	jal	ra, define_label
+	li	gp, 0
+	j	define_label
+define_label_rs0:
 	j	ml_post
 
 ml_mnem:
-	jal	ra, find_mnem
+	li	gp, 0
+	j	find_mnem
+find_mnem_rs0:
 	li	t0, -1
 	bne	a0, t0, ml_dispatch
 	# Unknown mnemonic → error
 	li	a0, 1
 	j	halt_err
 ml_dispatch:
-	jal	ra, dispatch
+	li	gp, 0
+	j	dispatch
+dispatch_rs0:
 ml_post:
 	lbu	t0, TB_EOT(s10)		# sticky EOT flag
 	bnez	t0, finish_all
@@ -474,8 +484,12 @@ ml_post:
 # ══════════════════════════════════════════════════════════════════════════════
 
 finish_all:
-	jal	ra, fixup_pass
-	jal	ra, dump_output
+	li	gp, 0
+	j	fixup_pass
+fixup_pass_rs0:
+	li	gp, 0
+	j	dump_output
+dump_output_rs0:
 	# fall through to poweroff
 poweroff:
 	lui	s5, 0x100
@@ -504,7 +518,9 @@ poweroff_hang:
 halt_err:
 	mv	a1, a0
 	li	t0, 'E'
-	jal	ra, wrch
+	li	gp, 0
+	j	wrch
+wrch_rs0:
 	# Tens digit
 	li	t2, 10
 	mv	a2, a1
@@ -516,11 +532,17 @@ he_div:
 	j	he_div
 he_tens:
 	addi	t0, a3, '0'
-	jal	ra, wrch
+	li	gp, 1
+	j	wrch
+wrch_rs1:
 	addi	t0, a2, '0'
-	jal	ra, wrch
+	li	gp, 2
+	j	wrch
+wrch_rs2:
 	li	t0, '@'
-	jal	ra, wrch
+	li	gp, 3
+	j	wrch
+wrch_rs3:
 	# Line number (decimal, up to 6 digits)
 	lw	a1, TB_LINECOUNT(s10)
 	addi	sp, sp, -24
@@ -558,14 +580,18 @@ he_dec_skip:
 	bnez	a2, he_dec_nx		# still suppressing
 he_dec_pr:
 	addi	t0, a3, '0'
-	jal	ra, wrch
+	li	gp, 4
+	j	wrch
+wrch_rs4:
 he_dec_nx:
 	addi	t3, t3, 4
 	j	he_dec
 he_dec_done:
 	addi	sp, sp, 24
 	li	t0, '\n'
-	jal	ra, wrch
+	li	gp, 5
+	j	wrch
+wrch_rs5:
 	lui	s5, 0x100
 	lui	t0, 5
 	addi	t0, t0, 0x555
@@ -587,7 +613,7 @@ rdch:
 	lbu	t1, 0(t5)
 	addi	t5, t5, 1
 	sw	t5, TB_INPTR(s10)
-	ret
+	j	rdch_disp
 rdch_exh:
 	sw	zero, TB_INFLAG(s10)		# clear expansion flag
 rdch_uart:
@@ -600,7 +626,38 @@ rdch_poll:
 	andi	t5, t5, 1
 	beqz	t5, rdch_poll
 	lbu	t1, 0(s5)
-	ret
+	j	rdch_disp
+
+rdch_disp:
+	bnez	gp, rdch_d1
+	j	rdch_rs0
+rdch_d1:
+	addi	gp, gp, -1
+	bnez	gp, rdch_d2
+	j	rdch_rs1
+rdch_d2:
+	addi	gp, gp, -1
+	bnez	gp, rdch_d3
+	j	rdch_rs2
+rdch_d3:
+	addi	gp, gp, -1
+	bnez	gp, rdch_d4
+	j	rdch_rs3
+rdch_d4:
+	addi	gp, gp, -1
+	bnez	gp, rdch_d5
+	j	rdch_rs4
+rdch_d5:
+	addi	gp, gp, -1
+	bnez	gp, rdch_d6
+	j	rdch_rs5
+rdch_d6:
+	addi	gp, gp, -1
+	bnez	gp, rdch_d7
+	j	rdch_rs6
+rdch_d7:
+	addi	gp, gp, -1
+	j	rdch_rs7
 
 wrch:
 	# Write t0 to UART
@@ -608,7 +665,7 @@ wrch:
 	andi	t5, t5, 0x20
 	beqz	t5, wrch
 	sb	t0, 0(s5)
-	ret
+	j	wrch_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Tokenizer: read_token
@@ -616,12 +673,51 @@ wrch:
 # On exit: s0 = length (0..31), token text at s10 (zero-padded to 32 bytes)
 # Sets sticky EOT flag at TB_EOT(s10) on EOT.
 
+wrch_disp:
+	bnez	gp, wrch_d1
+	j	wrch_rs0
+wrch_d1:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d2
+	j	wrch_rs1
+wrch_d2:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d3
+	j	wrch_rs2
+wrch_d3:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d4
+	j	wrch_rs3
+wrch_d4:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d5
+	j	wrch_rs4
+wrch_d5:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d6
+	j	wrch_rs5
+wrch_d6:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d7
+	j	wrch_rs6
+wrch_d7:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d8
+	j	wrch_rs7
+wrch_d8:
+	addi	gp, gp, -1
+	bnez	gp, wrch_d9
+	j	wrch_rs8
+wrch_d9:
+	addi	gp, gp, -1
+	j	wrch_rs9
+
 read_token:
 	# Pushback: if active, clear and return with existing token
 	lw	t0, TB_PUSHBACK(s10)
 	beqz	t0, rt_entry
 	sw	zero, TB_PUSHBACK(s10)
-	ret
+	j	read_token_disp
 rt_entry:
 	# Transfer pending_nl → eol_flag
 	lw	t0, TB_PENDING(s10)
@@ -629,7 +725,7 @@ rt_entry:
 	sw	zero, TB_PENDING(s10)
 
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	li	s0, 0
 	# Zero token buffer (32 bytes)
 	mv	t0, s10
@@ -640,7 +736,9 @@ rt_zero:
 	bne	t0, t2, rt_zero
 
 rt_skip:
-	jal	ra, rdch
+	li	gp, 0
+	j	rdch
+rdch_rs0:
 	li	t0, 4			# EOT
 	beq	t1, t0, rt_eot
 	li	t0, '#'
@@ -665,7 +763,9 @@ rt_not_nl:
 	j	rt_collect
 
 rt_comment:
-	jal	ra, rdch
+	li	gp, 1
+	j	rdch
+rdch_rs1:
 	li	t0, 4
 	beq	t1, t0, rt_eot
 	bne	t1, s6, rt_comment
@@ -686,7 +786,9 @@ rt_collect:
 	li	a0, 3			# E03: token too long
 	j	halt_err
 rt_coll_next:
-	jal	ra, rdch
+	li	gp, 2
+	j	rdch
+rdch_rs2:
 	li	t0, 4
 	beq	t1, t0, rt_eot
 	li	t0, '#'
@@ -708,7 +810,9 @@ rt_coll_not_nl:
 
 rt_coll_comment:
 	# Comment after token — skip to newline
-	jal	ra, rdch
+	li	gp, 3
+	j	rdch
+rdch_rs3:
 	li	t0, 4
 	beq	t1, t0, rt_eot
 	bne	t1, s6, rt_coll_comment
@@ -729,7 +833,9 @@ rt_str:
 	li	a0, 3
 	j	halt_err
 rt_str_lp:
-	jal	ra, rdch
+	li	gp, 4
+	j	rdch
+rdch_rs4:
 	li	t0, 4
 	beq	t1, t0, rt_str_eot
 	li	t0, '\\'
@@ -755,7 +861,9 @@ rt_str_bs:
 	li	a0, 3
 	j	halt_err
 rt_str_bs2:
-	jal	ra, rdch
+	li	gp, 5
+	j	rdch
+rdch_rs5:
 	li	t0, 4
 	beq	t1, t0, rt_str_eot
 	add	t0, s10, s0
@@ -775,7 +883,9 @@ rt_chr:
 	sb	t1, 0(t0)		# store opening '\''
 	addi	s0, s0, 1
 rt_chr_lp:
-	jal	ra, rdch
+	li	gp, 6
+	j	rdch
+rdch_rs6:
 	li	t0, 4
 	beq	t1, t0, rt_str_eot
 	li	t0, '\\'
@@ -800,7 +910,9 @@ rt_chr_bs:
 	li	a0, 3
 	j	halt_err
 rt_chr_bs2:
-	jal	ra, rdch
+	li	gp, 7
+	j	rdch
+rdch_rs7:
 	li	t0, 4
 	beq	t1, t0, rt_str_eot
 	add	t0, s10, s0
@@ -815,14 +927,57 @@ rt_eot:
 	li	t0, 1
 	sb	t0, TB_EOT(s10)		# set sticky EOT
 rt_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	read_token_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  find_mnem: token in buf at s10 (zero-padded).
 #  Returns: a0 = class, a1 = f3, a2 = f7, or a0 = -1 if not found.
 # ══════════════════════════════════════════════════════════════════════════════
+
+read_token_disp:
+	bnez	gp, read_token_d1
+	j	read_token_rs0
+read_token_d1:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d2
+	j	read_token_rs1
+read_token_d2:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d3
+	j	read_token_rs2
+read_token_d3:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d4
+	j	read_token_rs3
+read_token_d4:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d5
+	j	read_token_rs4
+read_token_d5:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d6
+	j	read_token_rs5
+read_token_d6:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d7
+	j	read_token_rs6
+read_token_d7:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d8
+	j	read_token_rs7
+read_token_d8:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d9
+	j	read_token_rs8
+read_token_d9:
+	addi	gp, gp, -1
+	bnez	gp, read_token_d10
+	j	read_token_rs9
+read_token_d10:
+	addi	gp, gp, -1
+	j	read_token_rs10
 
 find_mnem:
 	mv	t0, s9
@@ -843,17 +998,20 @@ fm_cmp:
 	lbu	a0, 8(t0)		# class
 	lbu	a1, 9(t0)		# f3
 	lbu	a2, 10(t0)		# f7
-	ret
+	j	find_mnem_disp
 fm_skip:
 	addi	t0, t0, 12
 	j	fm_next
 fm_notfound:
 	li	a0, -1
-	ret
+	j	find_mnem_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  parse_reg: a0=ptr, a1=len → a0=reg num (0..31) or -1
 # ══════════════════════════════════════════════════════════════════════════════
+
+find_mnem_disp:
+	j	find_mnem_rs0
 
 parse_reg:
 	mv	t0, a0			# save ptr (a0 gets clobbered in cmp)
@@ -875,7 +1033,7 @@ pr_x1:
 	li	t3, 10
 	bge	t2, t3, pr_bad
 	mv	a0, t2
-	ret
+	j	parse_reg_disp
 pr_x2:
 	lbu	t2, 1(t0)
 	addi	t2, t2, -'0'
@@ -892,7 +1050,7 @@ pr_x2:
 	add	a0, t5, t4
 	li	t3, 32
 	bge	a0, t3, pr_bad
-	ret
+	j	parse_reg_disp
 
 pr_abi:
 	li	t2, 5
@@ -924,18 +1082,33 @@ pr_a_pad:
 	bnez	t6, pr_a_pad
 pr_a_found:
 	lbu	a0, 4(t2)		# reg number at offset 4
-	ret
+	j	parse_reg_disp
 pr_a_skip:
 	addi	t2, t2, 8
 	j	pr_a_next
 pr_bad:
 	li	a0, -1
-	ret
+	j	parse_reg_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  parse_imm: a0=ptr, a1=len → a0=value. Halts on error.
 #  Handles: decimal, 0xHEX, negative, char literals ('x', '\n')
 # ══════════════════════════════════════════════════════════════════════════════
+
+parse_reg_disp:
+	bnez	gp, parse_reg_d1
+	j	parse_reg_rs0
+parse_reg_d1:
+	addi	gp, gp, -1
+	bnez	gp, parse_reg_d2
+	j	parse_reg_rs1
+parse_reg_d2:
+	addi	gp, gp, -1
+	bnez	gp, parse_reg_d3
+	j	parse_reg_rs2
+parse_reg_d3:
+	addi	gp, gp, -1
+	j	parse_reg_rs3
 
 parse_imm:
 	mv	t0, a0			# ptr
@@ -979,22 +1152,22 @@ parse_imm:
 	j	pi_bad
 pi_esc_n:
 	li	a0, 10
-	ret
+	j	parse_imm_disp
 pi_esc_t:
 	li	a0, 9
-	ret
+	j	parse_imm_disp
 pi_esc_r:
 	li	a0, 13
-	ret
+	j	parse_imm_disp
 pi_esc_0:
 	li	a0, 0
-	ret
+	j	parse_imm_disp
 pi_esc_lit:
 	mv	a0, t3
-	ret
+	j	parse_imm_disp
 pi_char_plain:
 	lbu	a0, 1(t0)
-	ret
+	j	parse_imm_disp
 
 pi_not_char:
 	# Sign
@@ -1078,7 +1251,7 @@ pi_done:
 	beq	t2, t3, pi_ret
 	sub	a0, zero, a0
 pi_ret:
-	ret
+	j	parse_imm_disp
 pi_bad:
 	li	a0, 5			# E05: bad immediate
 	j	halt_err
@@ -1087,9 +1260,20 @@ pi_bad:
 #  parse_mem: a0=ptr, a1=len → a0=imm, a1=reg. Expects imm(rs).
 # ══════════════════════════════════════════════════════════════════════════════
 
+parse_imm_disp:
+	bnez	gp, parse_imm_d1
+	j	parse_imm_rs0
+parse_imm_d1:
+	addi	gp, gp, -1
+	bnez	gp, parse_imm_d2
+	j	parse_imm_rs1
+parse_imm_d2:
+	addi	gp, gp, -1
+	j	parse_imm_rs2
+
 parse_mem:
 	addi	sp, sp, -20
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a0, 4(sp)		# ptr
 	sw	a1, 8(sp)		# len
 	mv	t0, a0
@@ -1108,7 +1292,9 @@ pm_found:
 	# Parse immediate: ptr..ptr+t2 (use eval_expr for symbol support)
 	mv	a0, t0
 	add	a1, t0, t2		# end ptr = start + paren offset
-	jal	ra, eval_expr
+	li	gp, 0
+	j	eval_expr
+eval_expr_rs0:
 	bne	a2, a1, pm_bad		# must consume everything before '('
 	sw	a0, 16(sp)		# imm value
 	# Parse register: ptr+t2+1 .. ptr+len-1 (excluding closing ')')
@@ -1126,14 +1312,16 @@ pm_found:
 	addi	a0, a0, 1
 	sub	a1, t1, t2
 	addi	a1, a1, -2
-	jal	ra, parse_reg
+	li	gp, 0
+	j	parse_reg
+parse_reg_rs0:
 	li	t3, -1
 	beq	a0, t3, pm_bad
 	mv	a1, a0			# reg
 	lw	a0, 16(sp)		# imm
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 20
-	ret
+	j	parse_mem_disp
 pm_bad:
 	li	a0, 6			# E06: bad memory operand
 	j	halt_err
@@ -1145,11 +1333,20 @@ pm_bad:
 #   Parses: primary (('+' | '-') primary)*
 #   primary: number | symbol_lookup | '(' expr ')'
 
+parse_mem_disp:
+	bnez	gp, parse_mem_d1
+	j	parse_mem_rs0
+parse_mem_d1:
+	addi	gp, gp, -1
+	j	parse_mem_rs1
+
 eval_expr:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 8(sp)		# save end ptr (eval_primary clobbers a1)
-	jal	ra, eval_primary
+	li	gp, 0
+	j	eval_primary
+eval_primary_rs0:
 	lw	a1, 8(sp)		# restore end
 ee_lp:
 	beq	a2, a1, ee_done
@@ -1162,7 +1359,9 @@ ee_lp:
 ee_add:
 	sw	a0, 4(sp)
 	addi	a0, a2, 1
-	jal	ra, eval_primary
+	li	gp, 1
+	j	eval_primary
+eval_primary_rs1:
 	lw	a1, 8(sp)		# restore end
 	lw	t0, 4(sp)
 	add	a0, t0, a0
@@ -1170,19 +1369,36 @@ ee_add:
 ee_sub:
 	sw	a0, 4(sp)
 	addi	a0, a2, 1
-	jal	ra, eval_primary
+	li	gp, 2
+	j	eval_primary
+eval_primary_rs2:
 	lw	a1, 8(sp)		# restore end
 	lw	t0, 4(sp)
 	sub	a0, t0, a0
 	j	ee_lp
 ee_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
-	ret
+	j	eval_expr_disp
+
+eval_expr_disp:
+	bnez	gp, eval_expr_d1
+	j	eval_expr_rs0
+eval_expr_d1:
+	addi	gp, gp, -1
+	bnez	gp, eval_expr_d2
+	j	eval_expr_rs1
+eval_expr_d2:
+	addi	gp, gp, -1
+	bnez	gp, eval_expr_d3
+	j	eval_expr_rs2
+eval_expr_d3:
+	addi	gp, gp, -1
+	j	eval_expr_rs3
 
 eval_primary:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	beq	a0, a1, ep_bad
 	lbu	t0, 0(a0)
 
@@ -1236,7 +1452,9 @@ ep_num_go:
 ep_num_end:
 	mv	a2, t2			# save new_ptr
 	sub	a1, t2, a0		# len
-	jal	ra, parse_imm		# a0 = value
+	li	gp, 0		# a0 = value
+	j	parse_imm
+parse_imm_rs0:
 	j	ep_ret
 
 ep_ident_chk:
@@ -1260,7 +1478,9 @@ ep_us:
 	j	ep_bad
 
 ep_sym:
-	jal	ra, find_sym_ident
+	li	gp, 0
+	j	find_sym_ident
+find_sym_ident_rs0:
 	j	ep_ret
 
 ep_char:
@@ -1279,30 +1499,45 @@ ep_char_3:
 ep_char_go:
 	mv	a2, t2			# new_ptr past closing quote
 	sub	a1, t2, a0		# len
-	jal	ra, parse_imm
+	li	gp, 1
+	j	parse_imm
+parse_imm_rs1:
 	j	ep_ret
 
 ep_paren:
 	addi	a0, a0, 1		# skip '('
-	jal	ra, eval_expr
+	li	gp, 1
+	j	eval_expr
+eval_expr_rs1:
 	beq	a2, a1, ep_bad
 	lbu	t0, 0(a2)
 	li	t1, ')'
 	bne	t0, t1, ep_bad
 	addi	a2, a2, 1		# skip ')'
 ep_ret:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	eval_primary_disp
 ep_bad:
 	li	a0, 5
 	j	halt_err
 
 # find_sym_ident: scan identifier at a0, look up in symtab
 #   a0=ptr, a1=end → a0=value, a2=new_ptr
+eval_primary_disp:
+	bnez	gp, eval_primary_d1
+	j	eval_primary_rs0
+eval_primary_d1:
+	addi	gp, gp, -1
+	bnez	gp, eval_primary_d2
+	j	eval_primary_rs1
+eval_primary_d2:
+	addi	gp, gp, -1
+	j	eval_primary_rs2
+
 find_sym_ident:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)		# save end
 	mv	t0, a0
 fsi_scan:
@@ -1330,12 +1565,14 @@ fsi_end:
 	sw	t0, 8(sp)		# save new_ptr
 	sub	a1, t0, a0		# len
 	beqz	a1, fsi_bad
-	jal	ra, find_sym		# a0=val, a1=kind, a2=found
+	li	gp, 0		# a0=val, a1=kind, a2=found
+	j	find_sym
+find_sym_rs0:
 	beqz	a2, fsi_bad		# not found
 	lw	a2, 8(sp)		# restore new_ptr
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
-	ret
+	j	find_sym_ident_disp
 fsi_bad:
 	li	a0, 17			# E17: unresolved symbol
 	j	halt_err
@@ -1345,9 +1582,12 @@ fsi_bad:
 #  Returns: a0 = value. Uses pushback for lookahead.
 # ══════════════════════════════════════════════════════════════════════════════
 
+find_sym_ident_disp:
+	j	find_sym_ident_rs0
+
 read_multi_expr:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	li	t0, 14624
 	add	t0, s10, t0		# buf base (14624 offset in token area)
 	sw	t0, 4(sp)
@@ -1356,7 +1596,9 @@ rme_lp:
 	addi	sp, sp, -12
 	sw	t0, 0(sp)
 	sw	t1, 4(sp)
-	jal	ra, read_token
+	li	gp, 1
+	j	read_token
+read_token_rs1:
 	lw	t0, 0(sp)
 	lw	t1, 4(sp)
 	addi	sp, sp, 12
@@ -1390,11 +1632,13 @@ rme_cpd:
 rme_eval:
 	mv	a0, t0
 	add	a1, t0, t1
-	jal	ra, eval_expr
+	li	gp, 2
+	j	eval_expr
+eval_expr_rs2:
 	bne	a2, a1, rme_bad
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
-	ret
+	j	read_multi_expr_disp
 rme_bad:
 	li	a0, 5
 	j	halt_err
@@ -1403,55 +1647,285 @@ rme_bad:
 #  Operand readers
 # ══════════════════════════════════════════════════════════════════════════════
 
+read_multi_expr_disp:
+	bnez	gp, read_multi_expr_d1
+	j	read_multi_expr_rs0
+read_multi_expr_d1:
+	addi	gp, gp, -1
+	j	read_multi_expr_rs1
+
 read_reg_op:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_token
+	sw	gp, 0(sp)
+	li	gp, 2
+	j	read_token
+read_token_rs2:
 	mv	a0, s10
 	mv	a1, s0
-	jal	ra, parse_reg
+	li	gp, 1
+	j	parse_reg
+parse_reg_rs1:
 	li	t0, -1
 	bne	a0, t0, rro_ok
 	li	a0, 8			# E08: bad register
 	j	halt_err
 rro_ok:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	read_reg_op_disp
+
+read_reg_op_disp:
+	bnez	gp, read_reg_op_d1
+	j	read_reg_op_rs0
+read_reg_op_d1:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d2
+	j	read_reg_op_rs1
+read_reg_op_d2:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d3
+	j	read_reg_op_rs2
+read_reg_op_d3:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d4
+	j	read_reg_op_rs3
+read_reg_op_d4:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d5
+	j	read_reg_op_rs4
+read_reg_op_d5:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d6
+	j	read_reg_op_rs5
+read_reg_op_d6:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d7
+	j	read_reg_op_rs6
+read_reg_op_d7:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d8
+	j	read_reg_op_rs7
+read_reg_op_d8:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d9
+	j	read_reg_op_rs8
+read_reg_op_d9:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d10
+	j	read_reg_op_rs9
+read_reg_op_d10:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d11
+	j	read_reg_op_rs10
+read_reg_op_d11:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d12
+	j	read_reg_op_rs11
+read_reg_op_d12:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d13
+	j	read_reg_op_rs12
+read_reg_op_d13:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d14
+	j	read_reg_op_rs13
+read_reg_op_d14:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d15
+	j	read_reg_op_rs14
+read_reg_op_d15:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d16
+	j	read_reg_op_rs15
+read_reg_op_d16:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d17
+	j	read_reg_op_rs16
+read_reg_op_d17:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d18
+	j	read_reg_op_rs17
+read_reg_op_d18:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d19
+	j	read_reg_op_rs18
+read_reg_op_d19:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d20
+	j	read_reg_op_rs19
+read_reg_op_d20:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d21
+	j	read_reg_op_rs20
+read_reg_op_d21:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d22
+	j	read_reg_op_rs21
+read_reg_op_d22:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d23
+	j	read_reg_op_rs22
+read_reg_op_d23:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d24
+	j	read_reg_op_rs23
+read_reg_op_d24:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d25
+	j	read_reg_op_rs24
+read_reg_op_d25:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d26
+	j	read_reg_op_rs25
+read_reg_op_d26:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d27
+	j	read_reg_op_rs26
+read_reg_op_d27:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d28
+	j	read_reg_op_rs27
+read_reg_op_d28:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d29
+	j	read_reg_op_rs28
+read_reg_op_d29:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d30
+	j	read_reg_op_rs29
+read_reg_op_d30:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d31
+	j	read_reg_op_rs30
+read_reg_op_d31:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d32
+	j	read_reg_op_rs31
+read_reg_op_d32:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d33
+	j	read_reg_op_rs32
+read_reg_op_d33:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d34
+	j	read_reg_op_rs33
+read_reg_op_d34:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d35
+	j	read_reg_op_rs34
+read_reg_op_d35:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d36
+	j	read_reg_op_rs35
+read_reg_op_d36:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d37
+	j	read_reg_op_rs36
+read_reg_op_d37:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d38
+	j	read_reg_op_rs37
+read_reg_op_d38:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d39
+	j	read_reg_op_rs38
+read_reg_op_d39:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d40
+	j	read_reg_op_rs39
+read_reg_op_d40:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d41
+	j	read_reg_op_rs40
+read_reg_op_d41:
+	addi	gp, gp, -1
+	bnez	gp, read_reg_op_d42
+	j	read_reg_op_rs41
+read_reg_op_d42:
+	addi	gp, gp, -1
+	j	read_reg_op_rs42
 
 read_imm_op:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_token
+	sw	gp, 0(sp)
+	li	gp, 3
+	j	read_token
+read_token_rs3:
 	mv	a0, s10
 	add	a1, s10, s0
-	jal	ra, eval_expr
+	li	gp, 3
+	j	eval_expr
+eval_expr_rs3:
 	bne	a2, a1, rio_bad
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	read_imm_op_disp
 rio_bad:
 	li	a0, 5
 	j	halt_err
 
+read_imm_op_disp:
+	bnez	gp, read_imm_op_d1
+	j	read_imm_op_rs0
+read_imm_op_d1:
+	addi	gp, gp, -1
+	bnez	gp, read_imm_op_d2
+	j	read_imm_op_rs1
+read_imm_op_d2:
+	addi	gp, gp, -1
+	bnez	gp, read_imm_op_d3
+	j	read_imm_op_rs2
+read_imm_op_d3:
+	addi	gp, gp, -1
+	bnez	gp, read_imm_op_d4
+	j	read_imm_op_rs3
+read_imm_op_d4:
+	addi	gp, gp, -1
+	bnez	gp, read_imm_op_d5
+	j	read_imm_op_rs4
+read_imm_op_d5:
+	addi	gp, gp, -1
+	bnez	gp, read_imm_op_d6
+	j	read_imm_op_rs5
+read_imm_op_d6:
+	addi	gp, gp, -1
+	bnez	gp, read_imm_op_d7
+	j	read_imm_op_rs6
+read_imm_op_d7:
+	addi	gp, gp, -1
+	j	read_imm_op_rs7
+
 read_mem_op:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_token
+	sw	gp, 0(sp)
+	li	gp, 4
+	j	read_token
+read_token_rs4:
 	mv	a0, s10
 	mv	a1, s0
-	jal	ra, parse_mem
-	lw	ra, 0(sp)
+	li	gp, 0
+	j	parse_mem
+parse_mem_rs0:
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	read_mem_op_disp
 
 # read_br_target: a0=slot_type (0=B, 1=J)
 #   Returns: a0 = offset (or 0 if label fixup recorded)
+read_mem_op_disp:
+	bnez	gp, read_mem_op_d1
+	j	read_mem_op_rs0
+read_mem_op_d1:
+	addi	gp, gp, -1
+	j	read_mem_op_rs1
+
 read_br_target:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a0, 4(sp)		# slot_type
-	jal	ra, read_token
+	li	gp, 5
+	j	read_token
+read_token_rs5:
 
 	# Local label ref? (len=2, digit + 'f'/'b')
 	li	t2, 2
@@ -1485,7 +1959,9 @@ rbt_local_build:
 	mv	a0, t3			# digit
 	mv	a1, t5			# seq
 	mv	a2, sp			# buf
-	jal	ra, build_local_name
+	li	gp, 0
+	j	build_local_name
+build_local_name_rs0:
 	mv	a0, sp			# name_ptr
 	li	a1, 9			# name_len
 	sub	a2, s2, s1		# patch_offset
@@ -1495,7 +1971,9 @@ rbt_local_build:
 	addi	a2, a2, 4
 	li	a3, 1			# J-type
 rbt_local_j:
-	jal	ra, record_fixup_arg
+	li	gp, 0
+	j	record_fixup_arg
+record_fixup_arg_rs0:
 	addi	sp, sp, 16
 	li	a0, 0
 	j	rbt_done
@@ -1517,7 +1995,9 @@ rbt_chk_us:
 	# Must be numeric immediate
 	mv	a0, s10
 	mv	a1, s0
-	jal	ra, parse_imm
+	li	gp, 2
+	j	parse_imm
+parse_imm_rs2:
 	j	rbt_done
 
 rbt_label:
@@ -1527,17 +2007,21 @@ rbt_label:
 	sub	a0, s2, s1
 	addi	a0, a0, 4
 	li	a1, 1			# J-type
-	jal	ra, record_fixup
+	li	gp, 0
+	j	record_fixup
+record_fixup_rs0:
 	li	a0, 0
 	j	rbt_done
 rbt_label_j:
 	sub	a0, s2, s1		# patch_offset
-	jal	ra, record_fixup
+	li	gp, 1
+	j	record_fixup
+record_fixup_rs1:
 	li	a0, 0
 rbt_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
-	ret
+	j	read_br_target_disp
 rbt_bad:
 	li	a0, 10			# E10: bad branch target
 	j	halt_err
@@ -1547,6 +2031,49 @@ rbt_bad:
 # ══════════════════════════════════════════════════════════════════════════════
 
 # define_label: token "name:" in buf, length s0. Strip colon, store in symtab.
+read_br_target_disp:
+	bnez	gp, read_br_target_d1
+	j	read_br_target_rs0
+read_br_target_d1:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d2
+	j	read_br_target_rs1
+read_br_target_d2:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d3
+	j	read_br_target_rs2
+read_br_target_d3:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d4
+	j	read_br_target_rs3
+read_br_target_d4:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d5
+	j	read_br_target_rs4
+read_br_target_d5:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d6
+	j	read_br_target_rs5
+read_br_target_d6:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d7
+	j	read_br_target_rs6
+read_br_target_d7:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d8
+	j	read_br_target_rs7
+read_br_target_d8:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d9
+	j	read_br_target_rs8
+read_br_target_d9:
+	addi	gp, gp, -1
+	bnez	gp, read_br_target_d10
+	j	read_br_target_rs9
+read_br_target_d10:
+	addi	gp, gp, -1
+	j	read_br_target_rs10
+
 define_label:
 	li	t0, 33			# max s0 = 32 (31 chars + colon)
 	blt	s0, t0, dl_ok
@@ -1559,11 +2086,13 @@ dl_ok:
 
 	# Duplicate check
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	mv	a0, s10
 	addi	a1, s0, -1
-	jal	ra, find_sym
-	lw	ra, 0(sp)
+	li	gp, 1
+	j	find_sym
+find_sym_rs1:
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
 	beqz	a2, dl_new		# not found → OK
 	li	a0, 12			# E12: duplicate label
@@ -1593,9 +2122,16 @@ dl_store:
 	sw	t5, 32(s4)		# value
 	sw	zero, 36(s4)		# kind = 0 (code label)
 	addi	s4, s4, 40
-	ret
+	j	define_label_disp
 
 # find_sym: a0=name_ptr, a1=name_len → a0=value, a1=kind, a2=1 if found (0=not)
+define_label_disp:
+	bnez	gp, define_label_d1
+	j	define_label_rs0
+define_label_d1:
+	addi	gp, gp, -1
+	j	define_label_rs1
+
 find_sym:
 	mv	t0, s3			# symtab scan ptr
 fs_lp:
@@ -1629,23 +2165,44 @@ fs_found:
 	lw	a0, 32(t0)		# value
 	lw	a1, 36(t0)		# kind
 	li	a2, 1			# found
-	ret
+	j	find_sym_disp
 fs_next:
 	addi	t0, t0, 40
 	j	fs_lp
 fs_notfound:
 	li	a2, 0
-	ret
+	j	find_sym_disp
 
 # record_fixup: a0=patch_offset, a1=slot_type. Name from token buf s10/s0.
+find_sym_disp:
+	bnez	gp, find_sym_d1
+	j	find_sym_rs0
+find_sym_d1:
+	addi	gp, gp, -1
+	j	find_sym_rs1
+
 record_fixup:
 	mv	a2, a0
 	mv	a3, a1
 	mv	a0, s10
 	mv	a1, s0
-	# fall through to record_fixup_arg
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 1
+	j	record_fixup_arg
+record_fixup_arg_rs1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	record_fixup_disp
 
 # record_fixup_arg: a0=name_ptr, a1=name_len, a2=patch_offset, a3=slot_type
+record_fixup_disp:
+	bnez	gp, record_fixup_d1
+	j	record_fixup_rs0
+record_fixup_d1:
+	addi	gp, gp, -1
+	j	record_fixup_rs1
+
 record_fixup_arg:
 	# Zero 40 bytes at s8
 	mv	t1, s8
@@ -1670,7 +2227,7 @@ rfa_fields:
 	sw	a2, 32(s8)		# patch_offset
 	sw	a3, 36(s8)		# slot_type
 	addi	s8, s8, 40
-	ret
+	j	record_fixup_arg_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Local Labels
@@ -1678,6 +2235,21 @@ rfa_fields:
 
 # build_local_name: a0=digit, a1=seq, a2=buf_ptr
 #   Writes 9-byte name ".Ldigitseq" zero-padded
+record_fixup_arg_disp:
+	bnez	gp, record_fixup_arg_d1
+	j	record_fixup_arg_rs0
+record_fixup_arg_d1:
+	addi	gp, gp, -1
+	bnez	gp, record_fixup_arg_d2
+	j	record_fixup_arg_rs1
+record_fixup_arg_d2:
+	addi	gp, gp, -1
+	bnez	gp, record_fixup_arg_d3
+	j	record_fixup_arg_rs2
+record_fixup_arg_d3:
+	addi	gp, gp, -1
+	j	record_fixup_arg_rs3
+
 build_local_name:
 	li	t0, '.'
 	sb	t0, 0(a2)
@@ -1723,12 +2295,19 @@ bln_pad:
 	addi	t0, t0, 1
 	j	bln_pad
 bln_done:
-	ret
+	j	build_local_name_disp
 
 # def_local_label: a0=digit. Increments counter, builds name, defines in symtab.
+build_local_name_disp:
+	bnez	gp, build_local_name_d1
+	j	build_local_name_rs0
+build_local_name_d1:
+	addi	gp, gp, -1
+	j	build_local_name_rs1
+
 def_local_label:
 	addi	sp, sp, -20
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	slli	t0, a0, 2
 	add	t0, s10, t0
 	lw	t1, TB_LLCNT(t0)		# counter[digit]
@@ -1737,7 +2316,9 @@ def_local_label:
 	# Build name at sp+4
 	mv	a1, t1			# seq
 	addi	a2, sp, 4
-	jal	ra, build_local_name
+	li	gp, 1
+	j	build_local_name
+build_local_name_rs1:
 	# Copy to token buffer for define_label
 	mv	t0, s10
 	addi	t1, sp, 4
@@ -1761,14 +2342,19 @@ dll_def:
 	li	t0, ':'
 	sb	t0, 9(s10)
 	li	s0, 10
-	jal	ra, define_label
-	lw	ra, 0(sp)
+	li	gp, 1
+	j	define_label
+define_label_rs1:
+	lw	gp, 0(sp)
 	addi	sp, sp, 20
-	ret
+	j	def_local_label_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Emit helpers
 # ══════════════════════════════════════════════════════════════════════════════
+
+def_local_label_disp:
+	j	def_local_label_rs0
 
 emit_word:
 	sb	a0, 0(s2)
@@ -1779,9 +2365,48 @@ emit_word:
 	srli	t5, t5, 8
 	sb	t5, 3(s2)
 	addi	s2, s2, 4
-	ret
+	j	emit_word_disp
 
 # emit_u_inst: a0=opcode, a1=rd, a2=imm20 → emit U-type, tail-call emit_word
+emit_word_disp:
+	bnez	gp, emit_word_d1
+	j	emit_word_rs0
+emit_word_d1:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d2
+	j	emit_word_rs1
+emit_word_d2:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d3
+	j	emit_word_rs2
+emit_word_d3:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d4
+	j	emit_word_rs3
+emit_word_d4:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d5
+	j	emit_word_rs4
+emit_word_d5:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d6
+	j	emit_word_rs5
+emit_word_d6:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d7
+	j	emit_word_rs6
+emit_word_d7:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d8
+	j	emit_word_rs7
+emit_word_d8:
+	addi	gp, gp, -1
+	bnez	gp, emit_word_d9
+	j	emit_word_rs8
+emit_word_d9:
+	addi	gp, gp, -1
+	j	emit_word_rs9
+
 emit_u_inst:
 	slli	t0, a2, 12
 	andi	t1, a1, 0x1F
@@ -1789,9 +2414,39 @@ emit_u_inst:
 	or	t0, t0, t1
 	andi	t1, a0, 0x7F
 	or	a0, t0, t1
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	emit_word
+emit_word_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_u_inst_disp
 
 # emit_i_inst: a0=opcode, a1=rd, a2=rs1, a3=f3, a4=imm12
+emit_u_inst_disp:
+	bnez	gp, emit_u_inst_d1
+	j	emit_u_inst_rs0
+emit_u_inst_d1:
+	addi	gp, gp, -1
+	bnez	gp, emit_u_inst_d2
+	j	emit_u_inst_rs1
+emit_u_inst_d2:
+	addi	gp, gp, -1
+	bnez	gp, emit_u_inst_d3
+	j	emit_u_inst_rs2
+emit_u_inst_d3:
+	addi	gp, gp, -1
+	bnez	gp, emit_u_inst_d4
+	j	emit_u_inst_rs3
+emit_u_inst_d4:
+	addi	gp, gp, -1
+	bnez	gp, emit_u_inst_d5
+	j	emit_u_inst_rs4
+emit_u_inst_d5:
+	addi	gp, gp, -1
+	j	emit_u_inst_rs5
+
 emit_i_inst:
 	slli	t0, a4, 20
 	andi	t1, a2, 0x1F
@@ -1805,9 +2460,83 @@ emit_i_inst:
 	or	t0, t0, t1
 	andi	t1, a0, 0x7F
 	or	a0, t0, t1
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 1
 	j	emit_word
+emit_word_rs1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_i_inst_disp
 
 # emit_r_inst: a0=opcode, a1=rd, a2=rs1, a3=rs2, a4=f3, a5=f7
+emit_i_inst_disp:
+	bnez	gp, emit_i_inst_d1
+	j	emit_i_inst_rs0
+emit_i_inst_d1:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d2
+	j	emit_i_inst_rs1
+emit_i_inst_d2:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d3
+	j	emit_i_inst_rs2
+emit_i_inst_d3:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d4
+	j	emit_i_inst_rs3
+emit_i_inst_d4:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d5
+	j	emit_i_inst_rs4
+emit_i_inst_d5:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d6
+	j	emit_i_inst_rs5
+emit_i_inst_d6:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d7
+	j	emit_i_inst_rs6
+emit_i_inst_d7:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d8
+	j	emit_i_inst_rs7
+emit_i_inst_d8:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d9
+	j	emit_i_inst_rs8
+emit_i_inst_d9:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d10
+	j	emit_i_inst_rs9
+emit_i_inst_d10:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d11
+	j	emit_i_inst_rs10
+emit_i_inst_d11:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d12
+	j	emit_i_inst_rs11
+emit_i_inst_d12:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d13
+	j	emit_i_inst_rs12
+emit_i_inst_d13:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d14
+	j	emit_i_inst_rs13
+emit_i_inst_d14:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d15
+	j	emit_i_inst_rs14
+emit_i_inst_d15:
+	addi	gp, gp, -1
+	bnez	gp, emit_i_inst_d16
+	j	emit_i_inst_rs15
+emit_i_inst_d16:
+	addi	gp, gp, -1
+	j	emit_i_inst_rs16
+
 emit_r_inst:
 	andi	t1, a5, 0x7F
 	slli	t0, t1, 25
@@ -1825,9 +2554,35 @@ emit_r_inst:
 	or	t0, t0, t1
 	andi	t1, a0, 0x7F
 	or	a0, t0, t1
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 2
 	j	emit_word
+emit_word_rs2:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_r_inst_disp
 
 # emit_s_inst: a0=opcode, a1=rs1, a2=rs2, a3=f3, a4=imm12
+emit_r_inst_disp:
+	bnez	gp, emit_r_inst_d1
+	j	emit_r_inst_rs0
+emit_r_inst_d1:
+	addi	gp, gp, -1
+	bnez	gp, emit_r_inst_d2
+	j	emit_r_inst_rs1
+emit_r_inst_d2:
+	addi	gp, gp, -1
+	bnez	gp, emit_r_inst_d3
+	j	emit_r_inst_rs2
+emit_r_inst_d3:
+	addi	gp, gp, -1
+	bnez	gp, emit_r_inst_d4
+	j	emit_r_inst_rs3
+emit_r_inst_d4:
+	addi	gp, gp, -1
+	j	emit_r_inst_rs4
+
 emit_s_inst:
 	srli	t1, a4, 5
 	andi	t1, t1, 0x7F
@@ -1846,9 +2601,27 @@ emit_s_inst:
 	or	t0, t0, t1
 	andi	t1, a0, 0x7F
 	or	a0, t0, t1
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 3
 	j	emit_word
+emit_word_rs3:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_s_inst_disp
 
 # emit_b_inst: a0=opcode(0x63), a1=rs1, a2=rs2, a3=f3, a4=imm
+emit_s_inst_disp:
+	bnez	gp, emit_s_inst_d1
+	j	emit_s_inst_rs0
+emit_s_inst_d1:
+	addi	gp, gp, -1
+	bnez	gp, emit_s_inst_d2
+	j	emit_s_inst_rs1
+emit_s_inst_d2:
+	addi	gp, gp, -1
+	j	emit_s_inst_rs2
+
 emit_b_inst:
 	srli	t0, a4, 12
 	andi	t0, t0, 1
@@ -1876,9 +2649,19 @@ emit_b_inst:
 	or	t0, t0, t1
 	andi	t1, a0, 0x7F
 	or	a0, t0, t1
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 4
 	j	emit_word
+emit_word_rs4:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_b_inst_disp
 
 # emit_j_inst: a0=opcode(0x6F), a1=rd, a2=imm
+emit_b_inst_disp:
+	j	emit_b_inst_rs0
+
 emit_j_inst:
 	srli	t0, a2, 20
 	andi	t0, t0, 1
@@ -1901,7 +2684,14 @@ emit_j_inst:
 	or	t0, t0, t1
 	andi	t1, a0, 0x7F
 	or	a0, t0, t1
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 5
 	j	emit_word
+emit_word_rs5:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_j_inst_disp
 
 # emit_branch_auto: emits relaxed branch (inverted + JAL trampoline)
 # when label target (a4=0), or compact B-type when numeric (a4!=0).
@@ -1911,190 +2701,525 @@ emit_branch_auto:
 	bnez	a4, emit_b_inst		# numeric → compact
 	# Always relax: inverted branch +8, then JAL placeholder
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	xori	a3, a3, 1		# invert condition
 	li	a4, 8			# branch over JAL
-	jal	ra, emit_b_inst
+	li	gp, 0
+	j	emit_b_inst
+emit_b_inst_rs0:
 	li	a0, 0x6F		# JAL x0, 0 (placeholder)
-	jal	ra, emit_word
-	lw	ra, 0(sp)
+	li	gp, 6
+	j	emit_word
+emit_word_rs6:
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	emit_j_inst_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  rec_pcrel_pair: records 2 fixups for auipc+addi/jalr pair
 # ══════════════════════════════════════════════════════════════════════════════
 
+emit_j_inst_disp:
+	bnez	gp, emit_j_inst_d1
+	j	emit_j_inst_rs0
+emit_j_inst_d1:
+	addi	gp, gp, -1
+	j	emit_j_inst_rs1
+
 rec_pcrel_pair:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_token
+	sw	gp, 0(sp)
+	li	gp, 6
+	j	read_token
+read_token_rs6:
 	# Record U_hi20_pcrel fixup for auipc
 	mv	a0, s10
 	mv	a1, s0
 	sub	a2, s2, s1
 	li	a3, 7			# U_hi20_pcrel
-	jal	ra, record_fixup_arg
+	li	gp, 2
+	j	record_fixup_arg
+record_fixup_arg_rs2:
 	# Record I_lo12_pcrel_prev fixup for addi/jalr
 	mv	a0, s10
 	mv	a1, s0
 	sub	a2, s2, s1
 	addi	a2, a2, 4
 	li	a3, 8			# I_lo12_pcrel_prev
-	jal	ra, record_fixup_arg
-	lw	ra, 0(sp)
+	li	gp, 3
+	j	record_fixup_arg
+record_fixup_arg_rs3:
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	rec_pcrel_pair_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Dispatch: a0=class, a1=f3, a2=f7
 # ══════════════════════════════════════════════════════════════════════════════
 
+rec_pcrel_pair_disp:
+	bnez	gp, rec_pcrel_pair_d1
+	j	rec_pcrel_pair_rs0
+rec_pcrel_pair_d1:
+	addi	gp, gp, -1
+	bnez	gp, rec_pcrel_pair_d2
+	j	rec_pcrel_pair_rs1
+rec_pcrel_pair_d2:
+	addi	gp, gp, -1
+	j	rec_pcrel_pair_rs2
+
 dispatch:
 	li	t0, 1
-	beq	a0, t0, do_r
+	bne	a0, t0, dispatch_cd0_do_r
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_r
+do_r_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_r:
 	li	t0, 2
-	beq	a0, t0, do_i_arith
+	bne	a0, t0, dispatch_cd0_do_i_arith
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_i_arith
+do_i_arith_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_i_arith:
 	li	t0, 3
-	beq	a0, t0, do_i_shift
+	bne	a0, t0, dispatch_cd0_do_i_shift
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_i_shift
+do_i_shift_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_i_shift:
 	li	t0, 4
-	beq	a0, t0, do_i_load
+	bne	a0, t0, dispatch_cd0_do_i_load
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_i_load
+do_i_load_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_i_load:
 	li	t0, 5
-	beq	a0, t0, do_s
+	bne	a0, t0, dispatch_cd0_do_s
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_s
+do_s_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_s:
 	li	t0, 6
-	beq	a0, t0, do_b
+	bne	a0, t0, dispatch_cd0_do_b
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_b
+do_b_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_b:
 	li	t0, 7
-	beq	a0, t0, do_u_lui
+	bne	a0, t0, dispatch_cd0_do_u_lui
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_u_lui
+do_u_lui_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_u_lui:
 	li	t0, 8
-	beq	a0, t0, do_u_auipc
+	bne	a0, t0, dispatch_cd0_do_u_auipc
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_u_auipc
+do_u_auipc_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_u_auipc:
 	li	t0, 9
-	beq	a0, t0, do_j_jal
+	bne	a0, t0, dispatch_cd0_do_j_jal
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_j_jal
+do_j_jal_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_j_jal:
 	li	t0, 10
-	beq	a0, t0, do_i_jalr
+	bne	a0, t0, dispatch_cd0_do_i_jalr
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
+	j	do_i_jalr
+do_i_jalr_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
+dispatch_cd0_do_i_jalr:
 	# Pseudos — use bne+j trampolines for far targets
 	li	t0, 11
 	bne	a0, t0, d_12
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_li
+do_ps_li_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_12:
 	li	t0, 12
 	bne	a0, t0, d_13
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_mv
+do_ps_mv_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_13:
 	li	t0, 13
 	bne	a0, t0, d_14
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_j
+do_ps_j_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_14:
 	li	t0, 14
 	bne	a0, t0, d_15
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_ret
+do_ps_ret_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_15:
 	li	t0, 15
 	bne	a0, t0, d_16
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_beqz
+do_ps_beqz_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_16:
 	li	t0, 16
 	bne	a0, t0, d_17
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_bnez
+do_ps_bnez_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_17:
 	li	t0, 17
 	bne	a0, t0, d_19
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_equ
+do_ps_equ_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_19:
 	li	t0, 19
 	bne	a0, t0, d_21
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_byte
+do_ps_byte_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_21:
 	li	t0, 21
 	bne	a0, t0, d_22
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_word
+do_ps_word_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_22:
 	li	t0, 22
 	bne	a0, t0, d_24
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_ascii
+do_ps_ascii_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_24:
 	li	t0, 24
 	bne	a0, t0, d_28
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_zero
+do_ps_zero_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_28:
 	li	t0, 28
 	bne	a0, t0, d_29
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_lla
+do_ps_lla_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_29:
 	li	t0, 29
 	bne	a0, t0, d_30
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_call
+do_ps_call_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_30:
 	li	t0, 30
 	bne	a0, t0, d_31
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_tail
+do_ps_tail_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_31:
 	li	t0, 31
 	bne	a0, t0, d_32
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_nop
+do_ps_nop_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_32:
 	li	t0, TOK_MAX
 	bne	a0, t0, d_33
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_neg
+do_ps_neg_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_33:
 	li	t0, 33
 	bne	a0, t0, d_34
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_not
+do_ps_not_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_34:
 	li	t0, 34
 	bne	a0, t0, d_35
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_seqz
+do_ps_seqz_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_35:
 	li	t0, 35
 	bne	a0, t0, d_36
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_snez
+do_ps_snez_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_36:
 	li	t0, 36
 	bne	a0, t0, d_37
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_sltz
+do_ps_sltz_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_37:
 	li	t0, 37
 	bne	a0, t0, d_38
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_sgtz
+do_ps_sgtz_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_38:
 	li	t0, 38
 	bne	a0, t0, d_39
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_bgt
+do_ps_bgt_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_39:
 	li	t0, 39
 	bne	a0, t0, d_40
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_ble
+do_ps_ble_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_40:
 	li	t0, 40
 	bne	a0, t0, d_41
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_bgtu
+do_ps_bgtu_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_41:
 	li	t0, 41
 	bne	a0, t0, d_42
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_bleu
+do_ps_bleu_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_42:
 	li	t0, 42
 	bne	a0, t0, d_43
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_prologue
+do_ps_prologue_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_43:
 	li	t0, 43
 	bne	a0, t0, d_44
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_epilogue
+do_ps_epilogue_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_44:
 	li	t0, 44
 	bne	a0, t0, d_46
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_return
+do_ps_return_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_46:
 	li	t0, 46
 	bne	a0, t0, d_47
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_bltz
+do_ps_bltz_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_47:
 	li	t0, 47
 	bne	a0, t0, d_48
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_bgez
+do_ps_bgez_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_48:
 	li	t0, 48
 	bne	a0, t0, d_err
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	do_ps_wfi
+do_ps_wfi_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	dispatch_disp
 d_err:
 	li	a0, 1
 	j	halt_err
@@ -2104,56 +3229,97 @@ d_err:
 # ══════════════════════════════════════════════════════════════════════════════
 
 # do_r: rd, rs1, rs2
+dispatch_disp:
+	j	dispatch_rs0
+
 do_r:
 	addi	sp, sp, -20
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)
 	sw	a2, 8(sp)
-	jal	ra, read_reg_op
+	li	gp, 0
+	j	read_reg_op
+read_reg_op_rs0:
 	sw	a0, 12(sp)		# rd
-	jal	ra, read_reg_op
+	li	gp, 1
+	j	read_reg_op
+read_reg_op_rs1:
 	sw	a0, 16(sp)		# rs1
-	jal	ra, read_reg_op
+	li	gp, 2
+	j	read_reg_op
+read_reg_op_rs2:
 	mv	a3, a0			# rs2
 	lw	a5, 8(sp)		# f7
 	lw	a4, 4(sp)		# f3
 	lw	a2, 16(sp)		# rs1
 	lw	a1, 12(sp)		# rd
 	li	a0, 0x33
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 20
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	emit_r_inst
+emit_r_inst_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_r_disp
 
 # do_i_arith: rd, rs1, imm
+do_r_disp:
+	j	do_r_rs0
+
 do_i_arith:
 	addi	sp, sp, -16
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 3
+	j	read_reg_op
+read_reg_op_rs3:
 	sw	a0, 8(sp)		# rd
-	jal	ra, read_reg_op
+	li	gp, 4
+	j	read_reg_op
+read_reg_op_rs4:
 	sw	a0, 12(sp)		# rs1
-	jal	ra, read_imm_op
+	li	gp, 0
+	j	read_imm_op
+read_imm_op_rs0:
 	mv	a4, a0			# imm
 	lw	a3, 4(sp)		# f3
 	lw	a2, 12(sp)		# rs1
 	lw	a1, 8(sp)		# rd
 	li	a0, 0x13
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 16
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	emit_i_inst
+emit_i_inst_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_i_arith_disp
 
 # do_i_shift: rd, rs1, shamt
+do_i_arith_disp:
+	j	do_i_arith_rs0
+
 do_i_shift:
 	addi	sp, sp, -20
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)
 	sw	a2, 8(sp)
-	jal	ra, read_reg_op
+	li	gp, 5
+	j	read_reg_op
+read_reg_op_rs5:
 	sw	a0, 12(sp)		# rd
-	jal	ra, read_reg_op
+	li	gp, 6
+	j	read_reg_op
+read_reg_op_rs6:
 	sw	a0, 16(sp)		# rs1
-	jal	ra, read_imm_op
+	li	gp, 1
+	j	read_imm_op
+read_imm_op_rs1:
 	andi	a4, a0, 0x1F		# shamt
 	lw	t0, 8(sp)		# f7
 	andi	t0, t0, 0x7F
@@ -2163,100 +3329,176 @@ do_i_shift:
 	lw	a2, 16(sp)		# rs1
 	lw	a1, 12(sp)		# rd
 	li	a0, 0x13
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 20
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 1
 	j	emit_i_inst
+emit_i_inst_rs1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_i_shift_disp
 
 # do_i_load: rd, imm(rs1)
+do_i_shift_disp:
+	j	do_i_shift_rs0
+
 do_i_load:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 7
+	j	read_reg_op
+read_reg_op_rs7:
 	sw	a0, 8(sp)		# rd
-	jal	ra, read_mem_op		# a0=imm, a1=rs1
+	li	gp, 0		# a0=imm, a1=rs1
+	j	read_mem_op
+read_mem_op_rs0:
 	mv	a4, a0			# imm
 	mv	a2, a1			# rs1
 	lw	a3, 4(sp)		# f3
 	lw	a1, 8(sp)		# rd
 	li	a0, 0x03
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 2
 	j	emit_i_inst
+emit_i_inst_rs2:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_i_load_disp
 
 # do_s: rs2, imm(rs1)
+do_i_load_disp:
+	j	do_i_load_rs0
+
 do_s:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 8
+	j	read_reg_op
+read_reg_op_rs8:
 	sw	a0, 8(sp)		# rs2
-	jal	ra, read_mem_op		# a0=imm, a1=rs1
+	li	gp, 1		# a0=imm, a1=rs1
+	j	read_mem_op
+read_mem_op_rs1:
 	mv	a4, a0			# imm
 	mv	a1, a1			# rs1
 	lw	a2, 8(sp)		# rs2
 	lw	a3, 4(sp)		# f3
 	li	a0, 0x23
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	emit_s_inst
+emit_s_inst_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_s_disp
 
 # do_b: rs1, rs2, target
+do_s_disp:
+	j	do_s_rs0
+
 do_b:
 	addi	sp, sp, -16
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	sw	a1, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 9
+	j	read_reg_op
+read_reg_op_rs9:
 	sw	a0, 8(sp)		# rs1
-	jal	ra, read_reg_op
+	li	gp, 10
+	j	read_reg_op
+read_reg_op_rs10:
 	sw	a0, 12(sp)		# rs2
 	li	a0, 0			# slot_type B
-	jal	ra, read_br_target
+	li	gp, 0
+	j	read_br_target
+read_br_target_rs0:
 	mv	a4, a0			# offset
 	lw	a3, 4(sp)		# f3
 	lw	a1, 8(sp)		# rs1
 	lw	a2, 12(sp)		# rs2
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 16
 	j	emit_branch_auto
 
 # do_u_lui: rd, imm
 do_u_lui:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 11
+	j	read_reg_op
+read_reg_op_rs11:
 	sw	a0, 4(sp)
-	jal	ra, read_imm_op
+	li	gp, 2
+	j	read_imm_op
+read_imm_op_rs2:
 	mv	a2, a0
 	lw	a1, 4(sp)
 	li	a0, 0x37
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	emit_u_inst
+emit_u_inst_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_u_lui_disp
 
 # do_u_auipc: rd, imm
+do_u_lui_disp:
+	j	do_u_lui_rs0
+
 do_u_auipc:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 12
+	j	read_reg_op
+read_reg_op_rs12:
 	sw	a0, 4(sp)
-	jal	ra, read_imm_op
+	li	gp, 3
+	j	read_imm_op
+read_imm_op_rs3:
 	mv	a2, a0
 	lw	a1, 4(sp)
 	li	a0, 0x17
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 1
 	j	emit_u_inst
+emit_u_inst_rs1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_u_auipc_disp
 
 # do_j_jal: rd, target (or just target with rd=ra implied)
+do_u_auipc_disp:
+	j	do_u_auipc_rs0
+
 do_j_jal:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_token
+	sw	gp, 0(sp)
+	li	gp, 7
+	j	read_token
+read_token_rs7:
 	mv	a0, s10
 	mv	a1, s0
-	jal	ra, parse_reg
+	li	gp, 2
+	j	parse_reg
+parse_reg_rs2:
 	li	t0, -1
 	bne	a0, t0, jal_have_rd
 	# Not a register → default rd=ra, pushback
@@ -2266,66 +3508,122 @@ do_j_jal:
 jal_have_rd:
 	sw	a0, 4(sp)
 	li	a0, 1			# slot_type J
-	jal	ra, read_br_target
+	li	gp, 1
+	j	read_br_target
+read_br_target_rs1:
 	mv	a2, a0			# offset
 	lw	a1, 4(sp)		# rd
 	li	a0, 0x6F
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 0
 	j	emit_j_inst
+emit_j_inst_rs0:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_j_jal_disp
 
 # do_i_jalr: rd, rs1, imm or rd, imm(rs1)
+do_j_jal_disp:
+	j	do_j_jal_rs0
+
 do_i_jalr:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 13
+	j	read_reg_op
+read_reg_op_rs13:
 	sw	a0, 4(sp)		# rd
-	jal	ra, read_token
+	li	gp, 8
+	j	read_token
+read_token_rs8:
 	# Try parsing as register (3-operand form)
 	mv	a0, s10
 	mv	a1, s0
-	jal	ra, parse_reg
+	li	gp, 3
+	j	parse_reg
+parse_reg_rs3:
 	li	t0, -1
 	bne	a0, t0, jalr_3op
 	# Not a register → must be imm(rs1) form
 	mv	a0, s10
 	mv	a1, s0
-	jal	ra, parse_mem
+	li	gp, 1
+	j	parse_mem
+parse_mem_rs1:
 	mv	a4, a0			# imm
 	mv	a2, a1			# rs1
 	j	jalr_emit
 jalr_3op:
 	sw	a0, 8(sp)		# rs1
-	jal	ra, read_imm_op
+	li	gp, 4
+	j	read_imm_op
+read_imm_op_rs4:
 	mv	a4, a0			# imm
 	lw	a2, 8(sp)		# rs1
 jalr_emit:
 	lw	a1, 4(sp)		# rd
 	li	a3, 0			# f3
 	li	a0, 0x67
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 3
 	j	emit_i_inst
+emit_i_inst_rs3:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_i_jalr_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Pseudo Handlers
 # ══════════════════════════════════════════════════════════════════════════════
 
+do_i_jalr_disp:
+	j	do_i_jalr_rs0
+
 do_ps_nop:
 	li	a0, 0x00000013		# addi x0, x0, 0
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 7
 	j	emit_word
+emit_word_rs7:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_nop_disp
+
+do_ps_nop_disp:
+	j	do_ps_nop_rs0
 
 do_ps_wfi:
 	li	a0, 0x10500073		# wfi encoding
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 8
 	j	emit_word
+emit_word_rs8:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_wfi_disp
 
 # li rd, imm
+do_ps_wfi_disp:
+	j	do_ps_wfi_rs0
+
 do_ps_li:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 14
+	j	read_reg_op
+read_reg_op_rs14:
 	sw	a0, 4(sp)		# rd
-	jal	ra, read_multi_expr
+	li	gp, 0
+	j	read_multi_expr
+read_multi_expr_rs0:
 	sw	a0, 8(sp)		# imm
 	# Check if fits in 12-bit signed
 	lw	t0, 8(sp)
@@ -2339,9 +3637,16 @@ do_ps_li:
 	li	a2, 0
 	lw	a1, 4(sp)
 	li	a0, 0x13
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 4
 	j	emit_i_inst
+emit_i_inst_rs4:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_li_disp
 li_two:
 	# lui rd, upper + addi rd, rd, lower
 	lw	t0, 8(sp)
@@ -2351,7 +3656,9 @@ li_two:
 	lw	a1, 4(sp)		# rd
 	mv	a2, t2
 	li	a0, 0x37		# lui
-	jal	ra, emit_u_inst
+	li	gp, 2
+	j	emit_u_inst
+emit_u_inst_rs2:
 	lw	t0, 8(sp)
 	slli	t0, t0, 20
 	srai	t0, t0, 20		# lower12
@@ -2360,357 +3667,577 @@ li_two:
 	lw	a2, 4(sp)		# rs1=rd
 	lw	a1, 4(sp)		# rd
 	li	a0, 0x13		# addi
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 5
 	j	emit_i_inst
+emit_i_inst_rs5:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_li_disp
 
 # mv rd, rs → addi rd, rs, 0
+do_ps_li_disp:
+	j	do_ps_li_rs0
+
 do_ps_mv:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 15
+	j	read_reg_op
+read_reg_op_rs15:
 	sw	a0, 4(sp)		# rd
-	jal	ra, read_reg_op
+	li	gp, 16
+	j	read_reg_op
+read_reg_op_rs16:
 	mv	a2, a0			# rs1
 	lw	a1, 4(sp)		# rd
 	li	a4, 0
 	li	a3, 0
 	li	a0, 0x13
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 6
 	j	emit_i_inst
+emit_i_inst_rs6:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_mv_disp
 
 # j target → jal x0, target
+do_ps_mv_disp:
+	j	do_ps_mv_rs0
+
 do_ps_j:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	li	a0, 1			# slot_type J
-	jal	ra, read_br_target
+	li	gp, 2
+	j	read_br_target
+read_br_target_rs2:
 	mv	a2, a0
 	li	a1, 0			# rd = x0
 	li	a0, 0x6F
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 1
 	j	emit_j_inst
+emit_j_inst_rs1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_j_disp
 
 # ret → jalr x0, ra, 0
+do_ps_j_disp:
+	j	do_ps_j_rs0
+
 do_ps_ret:
 	li	a4, 0
 	li	a3, 0
 	li	a2, 1			# rs1 = ra
 	li	a1, 0			# rd = x0
 	li	a0, 0x67
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 7
 	j	emit_i_inst
+emit_i_inst_rs7:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_ret_disp
 
 # beqz rs, target → beq rs, x0, target (always relaxed for labels)
+do_ps_ret_disp:
+	bnez	gp, do_ps_ret_d1
+	j	do_ps_ret_rs0
+do_ps_ret_d1:
+	addi	gp, gp, -1
+	j	do_ps_ret_rs1
+
 do_ps_beqz:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 17
+	j	read_reg_op
+read_reg_op_rs17:
 	sw	a0, 4(sp)		# rs1
 	li	a0, 0			# slot_type B
-	jal	ra, read_br_target
+	li	gp, 3
+	j	read_br_target
+read_br_target_rs3:
 	mv	a4, a0
 	lw	a1, 4(sp)		# rs1
 	li	a2, 0			# rs2 = x0
 	li	a3, 0			# f3 = beq
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
 	j	emit_branch_auto
 
 # bnez rs, target → bne rs, x0, target
 do_ps_bnez:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 18
+	j	read_reg_op
+read_reg_op_rs18:
 	sw	a0, 4(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 4
+	j	read_br_target
+read_br_target_rs4:
 	mv	a4, a0
 	lw	a1, 4(sp)
 	li	a2, 0
 	li	a3, 1			# f3 = bne
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
 	j	emit_branch_auto
 
 # neg rd, rs → sub rd, x0, rs
 do_ps_neg:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 19
+	j	read_reg_op
+read_reg_op_rs19:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 20
+	j	read_reg_op
+read_reg_op_rs20:
 	mv	a3, a0			# rs2
 	li	a2, 0			# rs1 = x0
 	lw	a1, 4(sp)		# rd
 	li	a5, 0x20		# f7
 	li	a4, 0			# f3
 	li	a0, 0x33
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 1
 	j	emit_r_inst
+emit_r_inst_rs1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_neg_disp
 
 # not rd, rs → xori rd, rs, -1
+do_ps_neg_disp:
+	j	do_ps_neg_rs0
+
 do_ps_not:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 21
+	j	read_reg_op
+read_reg_op_rs21:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 22
+	j	read_reg_op
+read_reg_op_rs22:
 	mv	a2, a0			# rs1
 	lw	a1, 4(sp)		# rd
 	li	a4, -1			# imm
 	li	a3, 4			# f3 = xori
 	li	a0, 0x13
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 8
 	j	emit_i_inst
+emit_i_inst_rs8:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_not_disp
 
 # seqz rd, rs → sltiu rd, rs, 1
+do_ps_not_disp:
+	j	do_ps_not_rs0
+
 do_ps_seqz:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 23
+	j	read_reg_op
+read_reg_op_rs23:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 24
+	j	read_reg_op
+read_reg_op_rs24:
 	mv	a2, a0
 	lw	a1, 4(sp)
 	li	a4, 1
 	li	a3, 3			# sltiu
 	li	a0, 0x13
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 9
 	j	emit_i_inst
+emit_i_inst_rs9:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_seqz_disp
 
 # snez rd, rs → sltu rd, x0, rs
+do_ps_seqz_disp:
+	j	do_ps_seqz_rs0
+
 do_ps_snez:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 25
+	j	read_reg_op
+read_reg_op_rs25:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 26
+	j	read_reg_op
+read_reg_op_rs26:
 	mv	a3, a0			# rs2
 	li	a2, 0			# rs1 = x0
 	lw	a1, 4(sp)
 	li	a5, 0
 	li	a4, 3			# sltu
 	li	a0, 0x33
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 2
 	j	emit_r_inst
+emit_r_inst_rs2:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_snez_disp
 
 # sltz rd, rs → slt rd, rs, x0
+do_ps_snez_disp:
+	j	do_ps_snez_rs0
+
 do_ps_sltz:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 27
+	j	read_reg_op
+read_reg_op_rs27:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 28
+	j	read_reg_op
+read_reg_op_rs28:
 	mv	a2, a0			# rs1
 	li	a3, 0			# rs2 = x0
 	lw	a1, 4(sp)
 	li	a5, 0
 	li	a4, 2			# slt
 	li	a0, 0x33
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 3
 	j	emit_r_inst
+emit_r_inst_rs3:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_sltz_disp
 
 # sgtz rd, rs → slt rd, x0, rs
+do_ps_sltz_disp:
+	j	do_ps_sltz_rs0
+
 do_ps_sgtz:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 29
+	j	read_reg_op
+read_reg_op_rs29:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 30
+	j	read_reg_op
+read_reg_op_rs30:
 	mv	a3, a0			# rs2
 	li	a2, 0			# rs1 = x0
 	lw	a1, 4(sp)
 	li	a5, 0
 	li	a4, 2			# slt
 	li	a0, 0x33
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 4
 	j	emit_r_inst
+emit_r_inst_rs4:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_sgtz_disp
 
 # bgt rs1, rs2, tgt → blt rs2, rs1, tgt (swap operands)
+do_ps_sgtz_disp:
+	j	do_ps_sgtz_rs0
+
 do_ps_bgt:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 31
+	j	read_reg_op
+read_reg_op_rs31:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 32
+	j	read_reg_op
+read_reg_op_rs32:
 	sw	a0, 8(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 5
+	j	read_br_target
+read_br_target_rs5:
 	mv	a4, a0
 	lw	a2, 4(sp)		# rs2 = first operand (swapped)
 	lw	a1, 8(sp)		# rs1 = second operand (swapped)
 	li	a3, 4			# blt
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
 	j	emit_branch_auto
 
 # ble rs1, rs2, tgt → bge rs2, rs1, tgt
 do_ps_ble:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 33
+	j	read_reg_op
+read_reg_op_rs33:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 34
+	j	read_reg_op
+read_reg_op_rs34:
 	sw	a0, 8(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 6
+	j	read_br_target
+read_br_target_rs6:
 	mv	a4, a0
 	lw	a2, 4(sp)
 	lw	a1, 8(sp)
 	li	a3, 5			# bge
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
 	j	emit_branch_auto
 
 # bgtu rs1, rs2, tgt → bltu rs2, rs1, tgt
 do_ps_bgtu:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 35
+	j	read_reg_op
+read_reg_op_rs35:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 36
+	j	read_reg_op
+read_reg_op_rs36:
 	sw	a0, 8(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 7
+	j	read_br_target
+read_br_target_rs7:
 	mv	a4, a0
 	lw	a2, 4(sp)
 	lw	a1, 8(sp)
 	li	a3, 6			# bltu
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
 	j	emit_branch_auto
 
 # bleu rs1, rs2, tgt → bgeu rs2, rs1, tgt
 do_ps_bleu:
 	addi	sp, sp, -12
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 37
+	j	read_reg_op
+read_reg_op_rs37:
 	sw	a0, 4(sp)
-	jal	ra, read_reg_op
+	li	gp, 38
+	j	read_reg_op
+read_reg_op_rs38:
 	sw	a0, 8(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 8
+	j	read_br_target
+read_br_target_rs8:
 	mv	a4, a0
 	lw	a2, 4(sp)
 	lw	a1, 8(sp)
 	li	a3, 7			# bgeu
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 12
 	j	emit_branch_auto
 
 # bltz rs, tgt → blt rs, x0, tgt
 do_ps_bltz:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 39
+	j	read_reg_op
+read_reg_op_rs39:
 	sw	a0, 4(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 9
+	j	read_br_target
+read_br_target_rs9:
 	mv	a4, a0
 	lw	a1, 4(sp)
 	li	a2, 0
 	li	a3, 4			# blt
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
 	j	emit_branch_auto
 
 # bgez rs, tgt → bge rs, x0, tgt
 do_ps_bgez:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 40
+	j	read_reg_op
+read_reg_op_rs40:
 	sw	a0, 4(sp)
 	li	a0, 0
-	jal	ra, read_br_target
+	li	gp, 10
+	j	read_br_target
+read_br_target_rs10:
 	mv	a4, a0
 	lw	a1, 4(sp)
 	li	a2, 0
 	li	a3, 5			# bge
 	li	a0, 0x63
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
 	j	emit_branch_auto
 
 # lla rd, symbol → auipc rd, 0 + addi rd, rd, 0 (fixups recorded)
 do_ps_lla:
 	addi	sp, sp, -8
-	sw	ra, 0(sp)
-	jal	ra, read_reg_op
+	sw	gp, 0(sp)
+	li	gp, 41
+	j	read_reg_op
+read_reg_op_rs41:
 	sw	a0, 4(sp)		# rd
-	jal	ra, rec_pcrel_pair
+	li	gp, 0
+	j	rec_pcrel_pair
+rec_pcrel_pair_rs0:
 	lw	a1, 4(sp)		# rd
 	li	a2, 0
 	li	a0, 0x17		# auipc
-	jal	ra, emit_u_inst
+	li	gp, 3
+	j	emit_u_inst
+emit_u_inst_rs3:
 	lw	a1, 4(sp)
 	mv	a2, a1			# rs1 = rd
 	li	a4, 0
 	li	a3, 0
 	li	a0, 0x13		# addi
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 10
 	j	emit_i_inst
+emit_i_inst_rs10:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_lla_disp
 
 # call symbol → auipc ra, 0 + jalr ra, ra, 0
+do_ps_lla_disp:
+	j	do_ps_lla_rs0
+
 do_ps_call:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, rec_pcrel_pair
+	sw	gp, 0(sp)
+	li	gp, 1
+	j	rec_pcrel_pair
+rec_pcrel_pair_rs1:
 	li	a1, 1			# rd = ra
 	li	a2, 0
 	li	a0, 0x17		# auipc
-	jal	ra, emit_u_inst
+	li	gp, 4
+	j	emit_u_inst
+emit_u_inst_rs4:
 	li	a1, 1			# rd = ra
 	li	a2, 1			# rs1 = ra
 	li	a4, 0
 	li	a3, 0
 	li	a0, 0x67		# jalr
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 11
 	j	emit_i_inst
+emit_i_inst_rs11:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_call_disp
 
 # tail symbol → auipc t1, 0 + jalr x0, t1, 0
+do_ps_call_disp:
+	j	do_ps_call_rs0
+
 do_ps_tail:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, rec_pcrel_pair
+	sw	gp, 0(sp)
+	li	gp, 2
+	j	rec_pcrel_pair
+rec_pcrel_pair_rs2:
 	li	a1, 6			# rd = t1
 	li	a2, 0
 	li	a0, 0x17		# auipc
-	jal	ra, emit_u_inst
+	li	gp, 5
+	j	emit_u_inst
+emit_u_inst_rs5:
 	li	a1, 0			# rd = x0
 	li	a2, 6			# rs1 = t1
 	li	a4, 0
 	li	a3, 0
 	li	a0, 0x67		# jalr
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	li	gp, 12
 	j	emit_i_inst
+emit_i_inst_rs12:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	do_ps_tail_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Directive Handlers
 # ══════════════════════════════════════════════════════════════════════════════
 
 # .equ name, value
+do_ps_tail_disp:
+	j	do_ps_tail_rs0
+
 do_ps_equ:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_token		# name
+	sw	gp, 0(sp)
+	li	gp, 9		# name
+	j	read_token
+read_token_rs9:
 	# Save name in symtab: zero 40 bytes, copy name, set kind=1
 	mv	t2, s4
 	addi	t3, s4, 40
@@ -2730,21 +4257,28 @@ equ_cp:
 	addi	t4, t4, -1
 	j	equ_cp
 equ_val:
-	jal	ra, read_multi_expr
+	li	gp, 1
+	j	read_multi_expr
+read_multi_expr_rs1:
 	sw	a0, 32(s4)		# value
 	li	t0, 1
 	sw	t0, 36(s4)		# kind = 1 (constant)
 	addi	s4, s4, 40
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_equ_disp
 
 # .byte val[, val...]
+do_ps_equ_disp:
+	j	do_ps_equ_rs0
+
 do_ps_byte:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 byte_lp:
-	jal	ra, read_imm_op		# single-token expression per value
+	li	gp, 5		# single-token expression per value
+	j	read_imm_op
+read_imm_op_rs5:
 	sb	a0, 0(s2)
 	addi	s2, s2, 1
 	# Check if more values: pending_nl or eol_flag means end of line
@@ -2755,17 +4289,24 @@ byte_lp:
 	lbu	t0, TB_EOT(s10)		# sticky EOT
 	beqz	t0, byte_lp
 byte_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_byte_disp
 
 # .word val[, val...]
+do_ps_byte_disp:
+	j	do_ps_byte_rs0
+
 do_ps_word:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 word_lp:
-	jal	ra, read_imm_op
-	jal	ra, emit_word
+	li	gp, 6
+	j	read_imm_op
+read_imm_op_rs6:
+	li	gp, 9
+	j	emit_word
+emit_word_rs9:
 	lw	t0, TB_PENDING(s10)
 	bnez	t0, word_done
 	lw	t0, TB_EOL(s10)
@@ -2773,15 +4314,20 @@ word_lp:
 	lbu	t0, TB_EOT(s10)
 	beqz	t0, word_lp
 word_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_word_disp
 
 # .ascii "string"
+do_ps_word_disp:
+	j	do_ps_word_rs0
+
 do_ps_ascii:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_token		# token = "content"
+	sw	gp, 0(sp)
+	li	gp, 10		# token = "content"
+	j	read_token
+read_token_rs10:
 	# First char must be '"', skip it
 	lbu	t0, 0(s10)
 	li	t1, '"'
@@ -2839,18 +4385,23 @@ ascii_emit:
 	addi	t2, t2, 1
 	j	ascii_lp
 ascii_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_ascii_disp
 ascii_bad:
 	li	a0, 24			# E24: bad string
 	j	halt_err
 
 # .zero count
+do_ps_ascii_disp:
+	j	do_ps_ascii_rs0
+
 do_ps_zero:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, read_imm_op
+	sw	gp, 0(sp)
+	li	gp, 7
+	j	read_imm_op
+read_imm_op_rs7:
 	mv	t0, a0
 zero_lp:
 	beqz	t0, zero_done
@@ -2859,9 +4410,9 @@ zero_lp:
 	addi	t0, t0, -1
 	j	zero_lp
 zero_done:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_zero_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Prologue / Epilogue / Return
@@ -2875,12 +4426,17 @@ zero_done:
 #     ...
 #   Saves frame info for matching epilogue.
 
+do_ps_zero_disp:
+	j	do_ps_zero_rs0
+
 do_ps_prologue:
 	addi	sp, sp, -64
-	sw	ra, 60(sp)
+	sw	gp, 60(sp)
 	sw	zero, 48(sp)		# nregs = 0
 prol_read:
-	jal	ra, read_reg_op
+	li	gp, 42
+	j	read_reg_op
+read_reg_op_rs42:
 	beqz	a0, prol_build		# x0 sentinel
 	lw	t0, 48(sp)
 	li	t1, 12
@@ -2935,14 +4491,18 @@ prol_cpd:
 	li	a2, 2			# sp
 	li	a1, 2			# sp
 	li	a0, 0x13
-	jal	ra, emit_i_inst
+	li	gp, 13
+	j	emit_i_inst
+emit_i_inst_rs13:
 	# Emit: sw ra, 0(sp)
 	li	a4, 0
 	li	a3, 2			# sw
 	li	a2, 1			# ra
 	li	a1, 2			# sp
 	li	a0, 0x23
-	jal	ra, emit_s_inst
+	li	gp, 1
+	j	emit_s_inst
+emit_s_inst_rs1:
 	# Emit: sw regs[i], (i+1)*4(sp)
 	sw	zero, 56(sp)		# i = 0
 prol_emit:
@@ -2957,23 +4517,28 @@ prol_emit:
 	li	a3, 2			# sw
 	li	a1, 2			# sp
 	li	a0, 0x23
-	jal	ra, emit_s_inst
+	li	gp, 2
+	j	emit_s_inst
+emit_s_inst_rs2:
 	lw	t0, 56(sp)
 	addi	t0, t0, 1
 	sw	t0, 56(sp)
 	j	prol_emit
 prol_ret:
-	lw	ra, 60(sp)
+	lw	gp, 60(sp)
 	addi	sp, sp, 64
-	ret
+	j	do_ps_prologue_disp
 prol_bad:
 	li	a0, 25
 	j	halt_err
 
 # epilogue — restores regs, deallocates frame (no ret)
+do_ps_prologue_disp:
+	j	do_ps_prologue_rs0
+
 do_ps_epilogue:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	lw	t0, TB_FRAMEDEP(s10)		# frame_depth
 	beqz	t0, epil_bad
 	addi	t0, t0, -1
@@ -2992,7 +4557,9 @@ do_ps_epilogue:
 	li	a2, 2			# sp (base)
 	li	a1, 1			# rd = ra
 	li	a0, 0x03
-	jal	ra, emit_i_inst
+	li	gp, 14
+	j	emit_i_inst
+emit_i_inst_rs14:
 	# Emit: lw regs[i], (i+1)*4(sp)
 	# Recalculate frame pointer (t1 was clobbered by emit)
 	lw	t0, TB_FRAMEDEP(s10)		# current depth (already decremented)
@@ -3019,7 +4586,9 @@ epil_lp:
 	sw	t3, 0(sp)
 	sw	t4, 4(sp)
 	sw	t5, 8(sp)
-	jal	ra, emit_i_inst
+	li	gp, 15
+	j	emit_i_inst
+emit_i_inst_rs15:
 	lw	t3, 0(sp)
 	lw	t4, 4(sp)
 	lw	t5, 8(sp)
@@ -3033,27 +4602,43 @@ epil_end:
 	li	a2, 2
 	li	a1, 2
 	li	a0, 0x13
-	jal	ra, emit_i_inst
-	lw	ra, 0(sp)
+	li	gp, 16
+	j	emit_i_inst
+emit_i_inst_rs16:
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_epilogue_disp
 epil_bad:
 	li	a0, 26
 	j	halt_err
 
 # return — epilogue + ret
+do_ps_epilogue_disp:
+	bnez	gp, do_ps_epilogue_d1
+	j	do_ps_epilogue_rs0
+do_ps_epilogue_d1:
+	addi	gp, gp, -1
+	j	do_ps_epilogue_rs1
+
 do_ps_return:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
-	jal	ra, do_ps_epilogue
-	jal	ra, do_ps_ret
-	lw	ra, 0(sp)
+	sw	gp, 0(sp)
+	li	gp, 1
+	j	do_ps_epilogue
+do_ps_epilogue_rs1:
+	li	gp, 1
+	j	do_ps_ret
+do_ps_ret_rs1:
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	do_ps_return_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Fixup Pass
 # ══════════════════════════════════════════════════════════════════════════════
+
+do_ps_return_disp:
+	j	do_ps_return_rs0
 
 fixup_pass:
 	mv	t0, s7			# fixup iterator
@@ -3170,22 +4755,33 @@ fp_next:
 	addi	t0, t0, 40
 	j	fp_lp
 fp_ret:
-	ret
+	j	fixup_pass_disp
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Output: write s1..s2 to UART
 # ══════════════════════════════════════════════════════════════════════════════
 
+fixup_pass_disp:
+	j	fixup_pass_rs0
+
 dump_output:
 	addi	sp, sp, -4
-	sw	ra, 0(sp)
+	sw	gp, 0(sp)
 	# Emit q32 magic nop (0x13, 0x00, 0x00, 0x00) before output
 	li	t0, 0x13
-	jal	ra, wrch
+	li	gp, 6
+	j	wrch
+wrch_rs6:
 	li	t0, 0
-	jal	ra, wrch
-	jal	ra, wrch
-	jal	ra, wrch
+	li	gp, 7
+	j	wrch
+wrch_rs7:
+	li	gp, 8
+	j	wrch
+wrch_rs8:
+	li	gp, 9
+	j	wrch
+wrch_rs9:
 	mv	a0, s1
 do_lp:
 	beq	a0, s2, do_ret
@@ -3198,6 +4794,8 @@ do_tx:
 	sb	t0, 0(s5)
 	j	do_lp
 do_ret:
-	lw	ra, 0(sp)
+	lw	gp, 0(sp)
 	addi	sp, sp, 4
-	ret
+	j	dump_output_disp
+dump_output_disp:
+	j	dump_output_rs0
