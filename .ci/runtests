@@ -141,6 +141,27 @@ test_output() {
 	fi
 }
 
+# test_error: source must fail to compile, producing an error message on stdout
+# that exactly matches $expected. The "binary" famc emits on error is just the
+# error text (not a valid compiled binary).
+test_error() {
+	TOTAL=$((TOTAL + 1))
+	local name="$1" src="$2" expected="$3"
+	local bin="$TMPDIR/test_${TOTAL}.out"
+	compile "$src" > "$bin" 2>&1 || true
+	local actual
+	# Error output is terminated by poweroff; strip any trailing whitespace
+	# and extract the first line (the formatted error).
+	actual=$(head -c 256 "$bin" 2>/dev/null | head -n1 | tr -d '\r')
+	if [[ "$actual" == "$expected" ]]; then
+		PASS=$((PASS + 1))
+		[[ $VERBOSE -eq 1 ]] && echo "  PASS  $name"
+	else
+		FAIL=$((FAIL + 1))
+		printf "  FAIL  %s (expected %q, got %q)\n" "$name" "$expected" "$actual"
+	fi
+}
+
 # ============================================================================
 echo "Building..."
 if ! (cd "$DIR" && bash build.sh) > /dev/null 2>&1; then
@@ -699,6 +720,177 @@ test_output  "&& with RHS > 4 KiB of compiled code" \
 	"@0x10000000 = (1 && ($(python3 -c "print(' * '.join(['2']*120) + ' * 0 + 1')"))) + 64;" "A"
 test_output  "|| with RHS > 4 KiB of compiled code" \
 	"@0x10000000 = (0 || ($(python3 -c "print(' * '.join(['2']*120) + ' * 0 + 1')"))) + 64;" "A"
+
+# ============================================================================
+echo "=== Ternary (? :) ==="
+test_output  "ternary true branch" \
+	"@0x10000000 = 1 ? 65 : 66;" "A"
+test_output  "ternary false branch" \
+	"@0x10000000 = 0 ? 66 : 65;" "A"
+test_output  "ternary with comparison condition" \
+	"x = 5; @0x10000000 = (x > 0 ? 65 : 66);" "A"
+# Optional else form. With missing ':', false-branch yields 0.
+test_output  "ternary optional else — true path" \
+	"@0x10000000 = 1 ? 65;" "A"
+test_output  "ternary optional else — false path (value 0)" \
+	"x = 65; @0x10000000 = x + (0 ? 1);" "A"
+# Right-associative: a ? b : c ? d : e = a ? b : (c ? d : e).
+test_output  "ternary right-associative on else" \
+	"@0x10000000 = 0 ? 66 : 0 ? 67 : 65;" "A"
+# Nested in the middle branch.
+test_output  "ternary nested in middle" \
+	"@0x10000000 = 1 ? 2 ? 65 : 66 : 67;" "A"
+test_output  "ternary nested middle, outer else path" \
+	"@0x10000000 = 0 ? 1 ? 66 : 67 : 65;" "A"
+# Precedence vs '||' and comparisons: cond is the full '||' expression.
+test_output  "ternary looser than ||" \
+	"@0x10000000 = (0 || 1) ? 65 : 66;" "A"
+# Ternary with multi-op condition.
+test_output  "ternary with && condition" \
+	"x = 5; @0x10000000 = (x > 0 && x < 10) ? 65 : 66;" "A"
+# Short-circuit: only one branch is evaluated. Use ++y with different sign.
+test_output  "ternary short-circuits true branch only" \
+	"x = 5; y = 0; z = (x > 0) ? ++y : --y; @0x10000000 = y + 64;" "A"
+test_output  "ternary short-circuits else branch only" \
+	"x = 0; y = 0; z = (x > 0) ? ++y : --y; @0x10000000 = y + 66;" "A"
+# Ternary in a larger expression.
+test_output  "ternary result participates in addition" \
+	"@0x10000000 = (1 ? 60 : 0) + 5;" "A"
+
+# ============================================================================
+echo "=== Assignment as expression (Pratt) ==="
+# Simple IDENT assignment as an expression
+test_output  "assign in parens contributes its value" \
+	"x = 5; y = (x = 10) + 55; @0x10000000 = y;" "A"
+# Chained right-associative assignment: a = b = c = 5
+test_output  "chained assignment right-associative" \
+	"a = 0; b = 0; x = a = b = 20; @0x10000000 = a + b + x + 5;" "A"
+# @ deref assignment as an expression — writes to address, produces value.
+test_output  "@addr = val as an expression" \
+	"p = 0x10000000; @p = 65;" "A"
+# Assignment inside a ternary branch (the original failing case).
+test_output  "assignment inside ternary branches" \
+	"x = 4; y = 52; x > 3 ? @0x10000000 = y : @0x10000000 = y + 1;" "4"
+# Full user repro
+test_output  "user repro — ternary with deref-assign branches" \
+	"$(cat <<'EOT'
+x = ((2 - 1) + 1);
+x += 1;
+y = x + 48;
+x > 3 ? @0x10000000 = y : @0x10000000 = y + 1;
+EOT
+)" "4"
+# Expression-statement with a comparison (no side effect; just discarded).
+# We can't observe it directly but it should compile & run cleanly.
+test_output  "expression-statement that just computes" \
+	"x = 5; x > 3; @0x10000000 = 65;" "A"
+
+# ============================================================================
+echo "=== Block expressions ==="
+# Rust-style blocks: value is the last expression. Non-final expressions are
+# evaluated (for side effects) and their values discarded.
+test_output  "single-expr block as primary" \
+	"@0x10000000 = { 65 };" "A"
+test_output  "block with trailing bare value" \
+	"@0x10000000 = { x = 10; x + 55 };" "A"
+test_output  "block with only assignments; last assign is value" \
+	"a = 0; @0x10000000 = { a = 66 };" "B"
+test_output  "block participates in addition" \
+	"@0x10000000 = { 30 } + { 35 };" "A"
+test_output  "block in ternary true branch" \
+	"x = 4; y = x > 3 ? { t = x + 1; t + 60 } : { 0 }; @0x10000000 = y;" "A"
+test_output  "block in ternary false branch" \
+	"x = 2; y = x > 3 ? { 0 } : { t = x + 1; t + 62 }; @0x10000000 = y;" "A"
+test_output  "user repro — block in both ternary branches" \
+	"$(cat <<'EOT'
+x = 4;
+y = x > 3 ? { t = x + 1; t } : { t = x + 2; t };
+@0x10000000 = y + 48;
+EOT
+)" "5"
+test_output  "nested blocks" \
+	"@0x10000000 = { a = 10; { b = a + a; b + 45 } };" "A"
+test_output  "deeply nested blocks (3 levels)" \
+	"@0x10000000 = { { { 65 } } };" "A"
+test_output  "block with many statements" \
+	"@0x10000000 = { a = 1; b = 2; c = 3; d = 4; e = 5; a + b + c + d + e + 50 };" "A"
+test_output  "block side-effect on outer variable" \
+	"x = 0; { x = 65 }; @0x10000000 = x;" "A"
+test_output  "block discards non-final expression value" \
+	"@0x10000000 = { 999; 65 };" "A"
+test_output  "block with @deref store as last expression" \
+	"p = 0x10000000; { @p = 65 };" "A"
+test_output  "block in binop with precedence (block binds tightly as primary)" \
+	"@0x10000000 = 1 + { 2 * 32 };" "A"
+test_output  "block as operand to comparison → ternary" \
+	"@0x10000000 = { 5 } > 3 ? 65 : 66;" "A"
+test_output  "chained assignment inside block" \
+	"@0x10000000 = { a = b = 32; a + b + 1 };" "A"
+test_output  "block with inner ternary as last expr" \
+	"x = 7; @0x10000000 = { x > 3 ? 65 : 66 };" "A"
+test_output  "block with inner && as last expr (true path)" \
+	"@0x10000000 = { 1 && 1 } + 64;" "A"
+test_output  "block with loop-shaped sum" \
+	"@0x10000000 = { a = 0; a = a + 10; a = a + 20; a = a + 35; a };" "A"
+test_output  "empty-effect block followed by addition" \
+	"@0x10000000 = { x = 1 } + 64;" "A"
+test_output  "block expression-statement (value discarded)" \
+	"x = 5; { x = x + 60 }; @0x10000000 = x + 0;" "A"
+test_output  "double-nested block via deref store target" \
+	"p = 0x10000000; @p = { { 65 } };" "A"
+
+# ============================================================================
+echo "=== Error messages ==="
+# Missing ';' at end of input and mid-program. Line/col are derived by walking
+# the input buffer, so programs spanning multiple lines exercise line counting.
+# Note: compile() pipes via `echo "$src"` which appends a trailing newline,
+# so EOF errors report one line past the last source line, col 1.
+test_error "missing ';' at EOF" \
+	"x = 5" \
+	"Error:2:1 Expected ';' at end of input"
+test_error "missing ';' before next stmt" \
+	"x = 5 y = 6;" \
+	"Error:1:7 Expected ';' found 'y'"
+test_error "missing ';' after multi-line input" \
+	"$(printf 'a = 1;\nb = 2')" \
+	"Error:3:1 Expected ';' at end of input"
+test_error "column tracking on same line" \
+	"a = 5; b = 5 c = 0;" \
+	"Error:1:14 Expected ';' found 'c'"
+# Missing ')'.
+test_error "missing ')' at EOF" \
+	"@0x10000000 = (1 + 2" \
+	"Error:2:1 Expected ')' at end of input"
+test_error "missing ')' found ';'" \
+	"@0x10000000 = (1 + 2;" \
+	"Error:1:21 Expected ')' found ';'"
+# Missing '}' / ';' in a block.
+test_error "missing '}' at EOF" \
+	"x = { 1; 2" \
+	"Error:2:1 Expected '}' or ';' at end of input"
+test_error "block-separator error shape" \
+	"x = { 1 2 };" \
+	"Error:1:9 Expected '}' or ';' found '2'"
+# Missing primary expression.
+test_error "bare '@' at EOF" \
+	"@" \
+	"Error:2:1 Expected expression at end of input"
+test_error "RHS of '=' missing" \
+	"x = ;" \
+	"Error:1:5 Expected expression found ';'"
+test_error "primary in paren missing" \
+	"x = (1 + );" \
+	"Error:1:10 Expected expression found ')'"
+# Lvalue errors.
+test_error "'=' on non-lvalue expression" \
+	"x = 0; y = 0; (x & y) = 1;" \
+	"Error:1:24 left of '=' is not an lvalue"
+test_error "'++' on numeric literal" \
+	"x = ++5;" \
+	"Error:1:7 '++'/'--' requires an lvalue"
+test_error "line tracking — error on line 3" \
+	"$(printf 'a = 1;\nb = 2;\nc = 3')" \
+	"Error:4:1 Expected ';' at end of input"
 
 # ============================================================================
 echo ""
