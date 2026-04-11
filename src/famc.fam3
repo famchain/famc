@@ -24,18 +24,20 @@
 #   y = x + 48;
 #   @0x10000000 = y;                  # writes byte '1' to the UART
 #
-# Compiled-program prologue (7 instructions, 28 bytes):
+# Compiled-program prologue (11 instructions, 44 bytes):
 #
 #   0:  nop                           # q32 magic
 #   4:  auipc gp, 0                   # gp = &auipc
-#   8:  addi  gp, gp, <patched>       # gp = data_end  (patched at end of emit)
+#   8:  addi  gp, gp, <patched>       # gp = data_end  (patched by Phase 5)
 #  12:  addi  gp, gp, 3                # align ...
 #  16:  andi  gp, gp, -4                # ... to 4 bytes
-#  20:  lui   sp, 0x10                  # sp = 0x10000 (= 64 KB)
-#  24:  add   sp, sp, gp                # sp = gp + 64 KB
-#  28:  addi  fp, sp, 0                 # fp = sp (frame pointer)
-#  32:  addi  sp, sp, -2048              # reserve 2 KB variable frame
-#  36:  <compiled statements ...>
+#  20:  lui   sp, 0x10                  # sp = 0x10000 (= 64 KiB)
+#  24:  add   sp, sp, gp                # sp = gp + 64 KiB (stack top)
+#  28:  lui   t0, <patched hi20>        # frame allocator, upper 20 bits
+#  32:  addi  t0, t0, <patched lo12>    # frame allocator, lower 12 bits
+#  36:  sub   sp, sp, t0                # sp -= frame_size (reserve locals)
+#  40:  addi  fp, sp, 0                 # fp = sp (fp pinned to base of frame)
+#  44:  <compiled statements ...>
 #   N:  lui   t0, 0x100                  # QEMU poweroff sequence:
 # N+4:  lui   t1, 0x5                    #   *0x100000 = 0x5555
 # N+8:  addi  t1, t1, 0x555
@@ -43,32 +45,36 @@
 # N+16: jal   zero, 0                   # safety hang after poweroff
 # N+20: data_end:
 #
-# The addi at offset 8 has its imm12 patched at the end of emission so that
-# auipc_pc + imm = data_end. data_end is the byte immediately after the hang
-# loop; the distance must fit in a 12-bit signed immediate (±2048 bytes).
+# Patch points (all applied in Phase 5 after compile_loop ends):
+#   offset 8   addi gp imm12  → (data_end - auipc_pc)
+#   offset 28  lui  t0 imm20  → upper20 of frame_size
+#   offset 32  addi t0 imm12  → lower12 of frame_size (sign-extended)
+#
+# The frame allocator is always 3 instructions regardless of frame size, so it
+# handles anything from 0 bytes up to ~2 GiB without a special case. Pass 2
+# can replace tiny frames with a single `addi sp, sp, -N` as an optimization.
 #
 # Design contract:
-#   - famc's ONLY job in the prologue is to set gp = end_of_program (aligned).
-#   - The default sp (gp + 64 KB) is a convenience so simple programs have
-#     working stack space out of the box. Real programs / the stdlib should
-#     overwrite sp themselves.
-#   - No alloc, no heap manager is baked into the compiled binary. Dynamic
-#     allocation is the stdlib's job, not ours.
-#   - famc itself only uses its own stack — no dynamic allocation in the
-#     compiler (for now; when that changes, tp will be the heap pointer).
+#   - famc's prologue sets gp = data_end, sp = top of stack, fp = base of frame.
+#   - Frame size is computed dynamically from variable declarations and
+#     patched into the prologue's lui/addi pair at end of compilation. No
+#     hard-coded 2 KiB ceiling — arrays and large structs will Just Work.
+#   - No alloc / no heap manager baked in; dynamic allocation is stdlib's job.
+#   - famc itself uses a stack + a bump-allocated heap (pointed to by tp).
 #   - No ret / jalr / jr in any of our outputs. Static dispatch only.
 #
-# Variables live at NEGATIVE offsets from sp:
-#   slot 0 at -4(sp), slot 1 at -8(sp), ..., slot N at -(N+1)*4(sp).
-# With 12-bit signed offsets we can address slot 0..511. sp never moves after
-# the prologue; expression intermediates live in t1/t2 only.
+# Variables live at POSITIVE offsets from fp:
+#   offset 0(fp) = first local, 4(fp) = second, ..., (frame_size-4)(fp) = last.
+# fp does not move after the prologue; sp moves freely below fp during
+# expression evaluation (stack-machine push/pop). Since sp < fp throughout,
+# pushes never collide with the variable frame.
 #
 # Compiled-program register usage:
 #   a0  — current expression value
-#   t1  — LHS saver across '+' chains     (addi t1, a0, 0 / add a0, t1, a0)
-#   t2  — address saver for *lv / @lv     (addi t2, a0, 0 / sw a0, 0(t2))
-#   gp  — end_of_program pointer (for stdlib/user use — famc doesn't touch it)
-#   sp  — default stack (gp + 64 KB); user can overwrite
+#   t0  — pop destination in the stack-machine pop pattern
+#   fp  — frame pointer (s0; base of the current function's locals)
+#   gp  — data_end pointer (reserved for stdlib/user — famc doesn't touch it)
+#   sp  — expression spill stack; moves freely below fp
 #
 # ── famc's own runtime layout ──────────────────────────────────────────────
 #
@@ -91,7 +97,8 @@
 #   s3  = input end ptr            s4  = output buf base
 #   s5  = output write ptr         s6  = UART base
 #   s7  = symtab base              s8  = symtab write ptr
-#   s9  = next var slot            s10 = token buf base
+#   s9  = current frame size in bytes (= next free byte offset for new locals)
+#                                     s10 = token buf base
 #   s11 = current token length     sp  = famc's stack
 #   tp  = heap bump pointer (famc's heap — initially `data`, grows upward)
 #   gp  = return-site id (dispatch — same convention as fam2/fam3)
@@ -206,22 +213,46 @@ rd_done:
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 
-	# addi fp, sp, 0    →  frame pointer snapshot (mv fp, sp)
-	#   rd=s0=8, rs1=sp=2, f3=0, imm=0
-	#   word = 0x13 | (8<<7) | (2<<15) = 0x13 | 0x400 | 0x10000 = 0x00010413
-	lui	a0, 0x10
-	addi	a0, a0, 0x413
+	# Frame allocator — 3 instructions, always emitted, always patched in
+	# Phase 5 with the real frame_size computed during statement compilation.
+	#
+	#   lui  t0, 0           # 0x000002B7 (imm20 patched to upper20(frame))
+	#   addi t0, t0, 0       # 0x00028293 (imm12 patched to lower12(frame))
+	#   sub  sp, sp, t0      # 0x40510133
+	#
+	# With t0 = frame_size (as loaded by the patched lui+addi), we reserve
+	# frame_size bytes below the current sp. The pattern handles any size
+	# from 0 to ~2 GiB without a special case.
+
+	# lui t0, 0          →  opcode=0x37, rd=t0=5, imm20=0
+	#   word = 0x37 | (5 << 7) = 0x000002B7
+	lui	a0, 0
+	addi	a0, a0, 0x2B7
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 
-	# addi sp, sp, -2048  — reserve 2 KB (512 slots × 4 B) below fp for
-	#   variables. Pushes during expression evaluation move sp further
-	#   down, so they never collide with the var frame.
-	#   opcode=0x13, rd=sp=2, rs1=sp=2, f3=0, imm=-2048 (=0x800 in 12-bit)
-	#   word = 0x13 | (2<<7) | (2<<15) | (0x800<<20)
-	#        = 0x80010113
-	lui	a0, 0x80010
-	addi	a0, a0, 0x113
+	# addi t0, t0, 0     →  opcode=0x13, rd=t0=5, rs1=t0=5, f3=0, imm=0
+	#   word = 0x13 | (5 << 7) | (5 << 15) = 0x13 | 0x280 | 0x28000 = 0x00028293
+	lui	a0, 0x28
+	addi	a0, a0, 0x293
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# sub sp, sp, t0     →  R-type, opcode=0x33, f3=0, f7=0x20,
+	#                        rd=sp=2, rs1=sp=2, rs2=t0=5
+	#   word = 0x33 | (2<<7) | (2<<15) | (5<<20) | (0x20<<25)
+	#        = 0x33 | 0x100 | 0x10000 | 0x500000 | 0x40000000
+	#        = 0x40510133
+	lui	a0, 0x40510
+	addi	a0, a0, 0x133
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi fp, sp, 0     →  fp = sp (fp pinned to base of frame)
+	#   opcode=0x13, rd=s0=8, rs1=sp=2, f3=0, imm=0
+	#   word = 0x13 | (8<<7) | (2<<15) = 0x13 | 0x400 | 0x10000 = 0x00010413
+	lui	a0, 0x10
+	addi	a0, a0, 0x413
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 
@@ -278,22 +309,46 @@ compile_done:
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 
-# ── Phase 5: patch the addi at prologue offset 8 so gp = data_end ──────────
-	# auipc_pc   = s4 + 4                (prologue offset of the auipc)
-	# addi_pc    = s4 + 8                (the instruction to patch)
-	# data_end   = s5                    (current output position)
-	# gp runtime = auipc_pc + imm        (auipc encodes imm<<12; with imm20=0
-	#                                     it's just PC; we add the addi imm)
-	# We want gp = data_end → imm12 = s5 - (s4 + 4)
+# ── Phase 5: patch the prologue (data_end + frame_size) ────────────────────
+
+	# Patch 1 — addi gp, gp, imm at prologue offset 8, so gp = data_end.
+	#   auipc_pc = s4 + 4, addi_pc = s4 + 8, data_end = s5
+	#   imm12 = data_end - auipc_pc = s5 - (s4 + 4)
 	sub	t0, s5, s4
 	addi	t0, t0, -4		# t0 = imm12 (signed)
-	# Build patched word: 0x00018193 | ((t0 & 0xFFF) << 20)
-	andi	t0, t0, 0xFFF
-	slli	t0, t0, 20
+	slli	t0, t0, 20		# place in bits 31:20 (naturally truncates)
 	lui	t1, 0x18
-	addi	t1, t1, 0x193		# 0x00018193
+	addi	t1, t1, 0x193		# base 0x00018193 (addi gp, gp, 0)
 	or	t1, t1, t0
 	sw	t1, 8(s4)
+
+	# Patch 2 — lui  t0, upper20  at prologue offset 28
+	# Patch 3 — addi t0, t0, lo12 at prologue offset 32
+	# Together they set t0 = s9 = frame_size in bytes.
+	#
+	#   lower12 = sign-extended low 12 bits of s9
+	#   upper20 = (s9 - lower12) >> 12
+	#
+	# For s9 = 0 the pair becomes `lui 0 ; addi t0, 0` which is a no-op (t0=0),
+	# and `sub sp, sp, t0` leaves sp alone — correct for a zero-local program.
+	slli	t0, s9, 20		# t0 = s9 << 20 (bits 31:20 = low 12 of s9)
+	srai	t0, t0, 20		# t0 = lower12 (sign-extended to 32)
+	sub	t1, s9, t0		# t1 = s9 - lower12  (always a multiple of 4096)
+	srai	t1, t1, 12		# t1 = upper20
+
+	# lui t0, upper20 word:  (upper20 << 12) | 0x000002B7
+	slli	t2, t1, 12
+	addi	t3, zero, 0x2B7
+	or	t2, t2, t3
+	sw	t2, 28(s4)
+
+	# addi t0, t0, lower12 word:  (lower12 << 20) | 0x00028293
+	# (slli naturally keeps only the low 12 bits of t0 in the imm slot)
+	slli	t2, t0, 20
+	lui	t3, 0x28
+	addi	t3, t3, 0x293
+	or	t2, t2, t3
+	sw	t2, 32(s4)
 
 # ── Phase 6: stream output buffer to UART, then poweroff ───────────────────
 out_loop:
@@ -652,9 +707,14 @@ la_cp:
 	addi	t1, t1, 1
 	j	la_cp
 la_cp_done:
-	sw	s9, 32(s8)
-	addi	a0, s9, 0
-	addi	s9, s9, 1
+	# New entry: store byte offset of this local in the frame (= current
+	# frame_size), plus its size in bytes in the (formerly pad) size field.
+	# All vars are 4 bytes today; arrays/structs will pass a size later.
+	sw	s9, 32(s8)		# offset field = s9 (= next free byte offset)
+	addi	t0, zero, 4		# size in bytes (hardcoded int = 4 for now)
+	sw	t0, 36(s8)		# size field (was pad)
+	addi	a0, s9, 0		# return byte offset
+	addi	s9, s9, 4		# advance frame_size by this var's size
 	addi	s8, s8, 40
 	j	lookup_or_alloc_disp
 
@@ -725,17 +785,14 @@ eli_pop:
 	j	eli_ret
 
 # ══════════════════════════════════════════════════════════════════════════════
-# emit_lw_sp — emit "lw a0, -(slot+1)*4(fp)". slot in a0 on entry.
-#   Loads variable slot via fp (frame pointer). fp never moves, so this is
-#   unaffected by push/pop during expression eval.
+# emit_lw_sp — emit "lw a0, offset(fp)". offset (bytes, positive) in a0.
+#   Loads the local whose byte offset from fp is a0. fp never moves, so this
+#   is unaffected by push/pop during expression evaluation.
 #   Single caller: elws_ret (compile_term)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_lw_sp:
-	addi	a0, a0, 1
-	slli	a0, a0, 2
-	sub	a0, zero, a0		# negative offset
-	andi	t0, a0, 0xFFF
-	slli	t0, t0, 20		# imm in bits 31:20
+	# a0 = byte offset (0..frame_size-4, always positive)
+	slli	t0, a0, 20		# imm12 → bits 31:20 (hi bits truncate)
 	# Base lw a0, 0(fp):
 	#   opcode=0x03, rd=10, f3=2, rs1=8(fp)
 	#   word = 0x03 | (10<<7) | (2<<12) | (8<<15)
@@ -749,14 +806,12 @@ ew_lws:
 	j	elws_ret
 
 # ══════════════════════════════════════════════════════════════════════════════
-# emit_sw_sp — emit "sw a0, -(slot+1)*4(fp)". slot in a0 on entry.
-#   Stores to a variable slot via fp (frame pointer).
+# emit_sw_sp — emit "sw a0, offset(fp)". offset (bytes, positive) in a0.
+#   Stores a0 into the local whose byte offset from fp is passed in.
 #   Single caller: esws_ret (compile_stmt)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_sw_sp:
-	addi	a0, a0, 1
-	slli	a0, a0, 2
-	sub	a0, zero, a0		# imm12 (signed)
+	# a0 = byte offset (0..frame_size-4, positive)
 	# Base sw a0, 0(fp): opcode=0x23, f3=2, rs1=8(fp), rs2=10(a0)
 	#   word = 0x23 | (2<<12) | (8<<15) | (10<<20)
 	#        = 0x23 | 0x2000 | 0x40000 | 0xA00000 = 0x00A42023
@@ -766,8 +821,8 @@ emit_sw_sp:
 	andi	t1, a0, 0x1F
 	slli	t1, t1, 7
 	or	t0, t0, t1
-	# imm[11:5] → bits[31:25]
-	srai	t1, a0, 5
+	# imm[11:5] → bits[31:25]   (positive offset, srai == srli here)
+	srli	t1, a0, 5
 	andi	t1, t1, 0x7F
 	slli	t1, t1, 25
 	or	t0, t0, t1
