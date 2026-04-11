@@ -1,0 +1,1201 @@
+# MIT License
+#
+# Copyright (c) 2026 Christopher Gilliard
+#
+# (License text identical to the rest of the project; abbreviated here.)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# famc.fam3 — first-pass reference compiler (rewrite, pass 1)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Grammar:
+#   program := stmt*
+#   stmt    := lvalue '=' expr ';'
+#   lvalue  := IDENT | '*' expr | '@' expr
+#   expr    := term ('+' term)*
+#   term    := derefop? primary
+#   derefop := '*' | '@'                # '*' = word, '@' = byte
+#   primary := NUM | IDENT
+#   IDENT   := [a-zA-Z_][a-zA-Z_0-9]*
+#   NUM     := dec | 0[xX][0-9a-fA-F]+
+#
+# Example source:
+#   x = 1;
+#   y = x + 48;
+#   @0x10000000 = y;                  # writes byte '1' to the UART
+#
+# Compiled-program prologue (7 instructions, 28 bytes):
+#
+#   0:  nop                           # q32 magic
+#   4:  auipc gp, 0                   # gp = &auipc
+#   8:  addi  gp, gp, <patched>       # gp = data_end  (patched at end of emit)
+#  12:  addi  gp, gp, 3                # align ...
+#  16:  andi  gp, gp, -4                # ... to 4 bytes
+#  20:  lui   sp, 0x10                  # sp = 0x10000 (= 64 KB)
+#  24:  add   sp, sp, gp                # sp = gp + 64 KB
+#  28:  <compiled statements ...>
+#   N:  jal   zero, 0                  # j . (hang)
+# N+4:  data_end:
+#
+# The addi at offset 8 has its imm12 patched at the end of emission so that
+# auipc_pc + imm = data_end. data_end is the byte immediately after the hang
+# loop; the distance must fit in a 12-bit signed immediate (±2048 bytes).
+#
+# Design contract:
+#   - famc's ONLY job in the prologue is to set gp = end_of_program (aligned).
+#   - The default sp (gp + 64 KB) is a convenience so simple programs have
+#     working stack space out of the box. Real programs / the stdlib should
+#     overwrite sp themselves.
+#   - No alloc, no heap manager is baked into the compiled binary. Dynamic
+#     allocation is the stdlib's job, not ours.
+#   - famc itself only uses its own stack — no dynamic allocation in the
+#     compiler (for now; when that changes, tp will be the heap pointer).
+#   - No ret / jalr / jr in any of our outputs. Static dispatch only.
+#
+# Variables live at NEGATIVE offsets from sp:
+#   slot 0 at -4(sp), slot 1 at -8(sp), ..., slot N at -(N+1)*4(sp).
+# With 12-bit signed offsets we can address slot 0..511. sp never moves after
+# the prologue; expression intermediates live in t1/t2 only.
+#
+# Compiled-program register usage:
+#   a0  — current expression value
+#   t1  — LHS saver across '+' chains     (addi t1, a0, 0 / add a0, t1, a0)
+#   t2  — address saver for *lv / @lv     (addi t2, a0, 0 / sw a0, 0(t2))
+#   gp  — end_of_program pointer (for stdlib/user use — famc doesn't touch it)
+#   sp  — default stack (gp + 64 KB); user can overwrite
+#
+# ── famc's own runtime layout ──────────────────────────────────────────────
+#
+#   [high RAM]
+#         │  [output buffer — grows up]        s4 = s3 after read
+#         │  [input buffer  — grows up]        s1 = sp_initial
+#   sp_0  ├──  `lui sp, 0x4000; add sp, sp, tp`   (sp = tp + 64 MiB)
+#         │  [token buffer, 32 B on stack]     s10 = sp after `addi sp, sp, -32`
+#         │  [free stack, grows down ...]
+#         ┆                                     (dispatch gp save/restore)
+#         │  [free heap ...]                   (grows upward)
+#         │  [symtab — 32 entries initially]    s7, s8 write ptr, s0 end ptr
+#   tp_0  ├──  `lla tp, data` then `andi tp, tp, -4`
+#         │  [famc code + data, label `data:` at the end]
+#   0x80000000
+#
+# ── famc's own runtime registers ───────────────────────────────────────────
+#   s0  = symtab end ptr (= s7 + capacity_in_bytes; triggers grow when s8 hits)
+#   s1  = input buf base           s2  = input read ptr
+#   s3  = input end ptr            s4  = output buf base
+#   s5  = output write ptr         s6  = UART base
+#   s7  = symtab base              s8  = symtab write ptr
+#   s9  = next var slot            s10 = token buf base
+#   s11 = current token length     sp  = famc's stack
+#   tp  = heap bump pointer (famc's heap — initially `data`, grows upward)
+#   gp  = return-site id (dispatch — same convention as fam2/fam3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+.equ SYMTAB_INIT_BYTES, 1280	# 32 entries × 40 bytes
+
+_start:
+	nop				# q32 magic for fam3's own output
+
+	# ── Set up heap and stack ─────────────────────────────────────────
+	lla	tp, data		# tp = end of famc image
+	addi	tp, tp, 3
+	andi	tp, tp, -4		# 4-byte align
+	lui	sp, 0x4000		# 0x04000000 = 64 MiB
+	add	sp, sp, tp		# sp = tp + 64 MiB
+
+	lui	s6, 0x10000		# UART
+
+	# ── Input buffer = initial sp, grows upward ───────────────────────
+	addi	s1, sp, 0
+	addi	s2, s1, 0
+
+	# ── Token buffer: 32 bytes on the stack ──────────────────────────
+	addi	sp, sp, -32
+	addi	s10, sp, 0
+
+	# ── Symtab: initial 32 entries on the heap at tp ─────────────────
+	addi	s7, tp, 0		# symtab base
+	addi	s8, s7, 0		# symtab write ptr
+	addi	t0, zero, SYMTAB_INIT_BYTES
+	add	tp, tp, t0		# bump heap
+	addi	s0, s7, SYMTAB_INIT_BYTES	# symtab end (capacity marker)
+
+	addi	s9, zero, 0		# next var slot
+	addi	s11, zero, 0		# token length
+
+# ── Phase 1: read all source text from UART into input buffer ──────────────
+	addi	s3, s1, 0
+rd_loop:
+	lbu	t1, 5(s6)
+	andi	t1, t1, 1
+	beqz	t1, rd_loop
+	lbu	t0, 0(s6)
+	addi	t2, zero, 4
+	beq	t0, t2, rd_done
+	sb	t0, 0(s3)
+	addi	s3, s3, 1
+	j	rd_loop
+rd_done:
+	# Output buffer starts immediately after input
+	addi	s4, s3, 0
+	addi	s5, s4, 0
+
+# ── Phase 2: emit prologue (7 words, 28 bytes) ──────────────────────────────
+	# nop = addi x0, x0, 0 = 0x00000013
+	lui	a0, 0
+	addi	a0, a0, 0x13
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# auipc gp, 0    →  opcode=0x17, rd=gp=3, imm20=0
+	# word = (0 << 12) | (3 << 7) | 0x17 = 0x00000197
+	lui	a0, 0
+	addi	a0, a0, 0x197
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi gp, gp, 0     (immediate patched later to reach data_end)
+	# opcode=0x13, rd=gp=3, rs1=gp=3, f3=0, imm=0
+	# word = (0 << 20) | (3 << 15) | (0 << 12) | (3 << 7) | 0x13
+	#      = 0x00018193
+	lui	a0, 0x18
+	addi	a0, a0, 0x193
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi gp, gp, 3     (align up)
+	# word = (3 << 20) | (3 << 15) | 0 | (3 << 7) | 0x13 = 0x00318193
+	lui	a0, 0x318
+	addi	a0, a0, 0x193
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# andi gp, gp, -4    (align down to 4)
+	# opcode=0x13, f3=7, rd=3, rs1=3, imm=-4 (=0xFFC in 12-bit)
+	# word = (0xFFC << 20) | (3 << 15) | (7 << 12) | (3 << 7) | 0x13
+	#      = 0xFFC << 20 = 0xFFC00000
+	#      | 0x18000 | 0x7000 | 0x180 | 0x13
+	#      = 0xFFC00000 | 0x0001F193
+	#      = 0xFFC1F193
+	lui	a0, 0xFFC1F
+	addi	a0, a0, 0x193
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# lui sp, 0x10      →  opcode=0x37, rd=sp=2, imm20=0x10
+	# word = (0x10 << 12) | (2 << 7) | 0x37
+	#      = 0x00010000 | 0x100 | 0x37 = 0x00010137
+	lui	a0, 0x10
+	addi	a0, a0, 0x137
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# add sp, sp, gp    →  R-type, opcode=0x33, f3=0, f7=0,
+	#                       rd=sp=2, rs1=sp=2, rs2=gp=3
+	# word = (3 << 20) | (2 << 15) | (0 << 12) | (2 << 7) | 0x33
+	#      = 0x00300000 | 0x10000 | 0x100 | 0x33
+	#      = 0x00310133
+	lui	a0, 0x310
+	addi	a0, a0, 0x133
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi fp, sp, 0    →  frame pointer snapshot (mv fp, sp)
+	#   rd=s0=8, rs1=sp=2, f3=0, imm=0
+	#   word = 0x13 | (8<<7) | (2<<15) = 0x13 | 0x400 | 0x10000 = 0x00010413
+	lui	a0, 0x10
+	addi	a0, a0, 0x413
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi sp, sp, -2048  — reserve 2 KB (512 slots × 4 B) below fp for
+	#   variables. Pushes during expression evaluation move sp further
+	#   down, so they never collide with the var frame.
+	#   opcode=0x13, rd=sp=2, rs1=sp=2, f3=0, imm=-2048 (=0x800 in 12-bit)
+	#   word = 0x13 | (2<<7) | (2<<15) | (0x800<<20)
+	#        = 0x80010113
+	lui	a0, 0x80010
+	addi	a0, a0, 0x113
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+# ── Phase 3: compile all statements ────────────────────────────────────────
+compile_loop:
+	addi	gp, zero, 0
+	j	skip_ws
+sw_cl:
+	bge	s2, s3, compile_done
+	j	compile_stmt
+cs_after:
+	j	compile_loop
+compile_done:
+
+# ── Phase 4: emit epilogue — j . = jal zero, 0 = 0x0000006F ────────────────
+	lui	a0, 0
+	addi	a0, a0, 0x6F
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+# ── Phase 5: patch the addi at prologue offset 8 so gp = data_end ──────────
+	# auipc_pc   = s4 + 4                (prologue offset of the auipc)
+	# addi_pc    = s4 + 8                (the instruction to patch)
+	# data_end   = s5                    (current output position)
+	# gp runtime = auipc_pc + imm        (auipc encodes imm<<12; with imm20=0
+	#                                     it's just PC; we add the addi imm)
+	# We want gp = data_end → imm12 = s5 - (s4 + 4)
+	sub	t0, s5, s4
+	addi	t0, t0, -4		# t0 = imm12 (signed)
+	# Build patched word: 0x00018193 | ((t0 & 0xFFF) << 20)
+	andi	t0, t0, 0xFFF
+	slli	t0, t0, 20
+	lui	t1, 0x18
+	addi	t1, t1, 0x193		# 0x00018193
+	or	t1, t1, t0
+	sw	t1, 8(s4)
+
+# ── Phase 6: stream output buffer to UART, then poweroff ───────────────────
+out_loop:
+	beq	s4, s5, poweroff
+	lbu	t0, 0(s4)
+	addi	s4, s4, 1
+tx_wait:
+	lbu	t1, 5(s6)
+	andi	t1, t1, 0x20
+	beqz	t1, tx_wait
+	sb	t0, 0(s6)
+	j	out_loop
+
+poweroff:
+	lui	t0, 0x100
+	lui	t1, 0x5
+	addi	t1, t1, 0x555
+	sw	t1, 0(t0)
+pwr_hang:
+	j	pwr_hang
+
+halt_err:
+	j	halt_err
+
+# ══════════════════════════════════════════════════════════════════════════════
+# skip_ws — advance s2 past chars with code < 33.
+#
+# Call sites (each has a uniquely-named return label):
+#   0: sw_cl          (compile_loop top)
+#   1: sw_ct_pre      (compile_term — initial ws skip)
+#   2: sw_ct_star     (compile_term — after consuming '*')
+#   3: sw_ct_at       (compile_term — after consuming '@')
+#   4: sw_ce_plus     (compile_expr — before checking for '+')
+#   5: sw_cs_eq1      (compile_stmt — after IDENT, before '=')
+#   6: sw_cs_semi1    (compile_stmt — after IDENT/expr, before ';')
+#   7: sw_cs_eq2      (compile_stmt — '*' path, after addr expr, before '=')
+#   8: sw_cs_semi2    (compile_stmt — '*' path, after store, before ';')
+#   9: sw_cs_eq3      (compile_stmt — '@' path, after addr expr, before '=')
+#  10: sw_cs_semi3    (compile_stmt — '@' path, after store, before ';')
+# ══════════════════════════════════════════════════════════════════════════════
+skip_ws:
+sw_loop:
+	bge	s2, s3, sw_done
+	lbu	t0, 0(s2)
+	addi	t1, zero, 33
+	bge	t0, t1, sw_done
+	addi	s2, s2, 1
+	j	sw_loop
+sw_done:
+	j	skip_ws_disp
+
+skip_ws_disp:
+	bnez	gp, sw_d1
+	j	sw_cl
+sw_d1:
+	addi	gp, gp, -1
+	bnez	gp, sw_d2
+	j	sw_ct_pre
+sw_d2:
+	addi	gp, gp, -1
+	bnez	gp, sw_d3
+	j	sw_ct_star
+sw_d3:
+	addi	gp, gp, -1
+	bnez	gp, sw_d4
+	j	sw_ct_at
+sw_d4:
+	addi	gp, gp, -1
+	bnez	gp, sw_d5
+	j	sw_ce_plus
+sw_d5:
+	addi	gp, gp, -1
+	bnez	gp, sw_d6
+	j	sw_cs_eq1
+sw_d6:
+	addi	gp, gp, -1
+	bnez	gp, sw_d7
+	j	sw_cs_semi1
+sw_d7:
+	addi	gp, gp, -1
+	bnez	gp, sw_d8
+	j	sw_cs_eq2
+sw_d8:
+	addi	gp, gp, -1
+	bnez	gp, sw_d9
+	j	sw_cs_semi2
+sw_d9:
+	addi	gp, gp, -1
+	bnez	gp, sw_d10
+	j	sw_cs_eq3
+sw_d10:
+	j	sw_cs_semi3
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_word — store a0 as 4 bytes at s5, advance s5.
+#
+# Call sites:
+#    0: ew_li_s     (emit_li, single-addi path)
+#    1: ew_li_lui   (emit_li, lui of big-imm path)
+#    2: ew_li_add   (emit_li, addi of big-imm path)
+#    3: ew_lws      (emit_lw_sp)
+#    4: ew_sws      (emit_sw_sp)
+#    5: ew_lwd      (emit_lw_deref)
+#    6: ew_lbud     (emit_lbu_deref)
+#    7: ew_push_addi (emit_push_a0 — addi sp,sp,-4)
+#    8: ew_push_sw   (emit_push_a0 — sw a0,0(sp))
+#    9: ew_pop_lw    (emit_pop_t0 — lw t0,0(sp))
+#   10: ew_pop_addi  (emit_pop_t0 — addi sp,sp,4)
+#   11: ew_add       (emit_add — add a0,t0,a0)
+#   12: ew_sw_d      (emit_sw_deref — sw a0,0(t0))
+#   13: ew_sb_d      (emit_sb_deref — sb a0,0(t0))
+# ══════════════════════════════════════════════════════════════════════════════
+emit_word:
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	emit_word_disp
+
+emit_word_disp:
+	bnez	gp, ewd_1
+	j	ew_li_s
+ewd_1:
+	addi	gp, gp, -1
+	bnez	gp, ewd_2
+	j	ew_li_lui
+ewd_2:
+	addi	gp, gp, -1
+	bnez	gp, ewd_3
+	j	ew_li_add
+ewd_3:
+	addi	gp, gp, -1
+	bnez	gp, ewd_4
+	j	ew_lws
+ewd_4:
+	addi	gp, gp, -1
+	bnez	gp, ewd_5
+	j	ew_sws
+ewd_5:
+	addi	gp, gp, -1
+	bnez	gp, ewd_6
+	j	ew_lwd
+ewd_6:
+	addi	gp, gp, -1
+	bnez	gp, ewd_7
+	j	ew_lbud
+ewd_7:
+	addi	gp, gp, -1
+	bnez	gp, ewd_8
+	j	ew_push_addi
+ewd_8:
+	addi	gp, gp, -1
+	bnez	gp, ewd_9
+	j	ew_push_sw
+ewd_9:
+	addi	gp, gp, -1
+	bnez	gp, ewd_10
+	j	ew_pop_lw
+ewd_10:
+	addi	gp, gp, -1
+	bnez	gp, ewd_11
+	j	ew_pop_addi
+ewd_11:
+	addi	gp, gp, -1
+	bnez	gp, ewd_12
+	j	ew_add
+ewd_12:
+	addi	gp, gp, -1
+	bnez	gp, ewd_13
+	j	ew_sw_d
+ewd_13:
+	j	ew_sb_d
+
+# ══════════════════════════════════════════════════════════════════════════════
+# parse_ident — reads an identifier at s2 into token buffer.
+#   Call sites:  0: pi_ct (compile_term),  1: pi_cs (compile_stmt)
+# ══════════════════════════════════════════════════════════════════════════════
+parse_ident:
+	addi	s11, zero, 0
+pi_loop:
+	bge	s2, s3, pi_done
+	lbu	t0, 0(s2)
+	addi	t1, zero, 'a'
+	blt	t0, t1, pi_uc
+	addi	t1, zero, 123
+	blt	t0, t1, pi_take
+pi_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, pi_dig
+	addi	t1, zero, 91
+	blt	t0, t1, pi_take
+pi_dig:
+	addi	t1, zero, '0'
+	blt	t0, t1, pi_us
+	addi	t1, zero, 58
+	blt	t0, t1, pi_take
+pi_us:
+	addi	t1, zero, '_'
+	beq	t0, t1, pi_take
+	j	pi_done
+pi_take:
+	add	t2, s10, s11
+	sb	t0, 0(t2)
+	addi	s11, s11, 1
+	addi	s2, s2, 1
+	j	pi_loop
+pi_done:
+	j	parse_ident_disp
+
+parse_ident_disp:
+	bnez	gp, pid_1
+	j	pi_ct
+pid_1:
+	j	pi_cs
+
+# ══════════════════════════════════════════════════════════════════════════════
+# parse_num — parse decimal or hex at s2, returns value in a0.
+#   Single caller:  pn_ct (compile_term)
+# ══════════════════════════════════════════════════════════════════════════════
+parse_num:
+	addi	a0, zero, 0
+	lbu	t0, 0(s2)
+	addi	t1, zero, '0'
+	bne	t0, t1, pn_dec
+	addi	t2, s2, 1
+	bge	t2, s3, pn_dec
+	lbu	t0, 0(t2)
+	addi	t1, zero, 'x'
+	beq	t0, t1, pn_hex_begin
+	addi	t1, zero, 'X'
+	beq	t0, t1, pn_hex_begin
+	j	pn_dec
+
+pn_hex_begin:
+	addi	s2, s2, 2
+pn_hex_loop:
+	bge	s2, s3, pn_done
+	lbu	t0, 0(s2)
+	addi	t1, zero, '0'
+	blt	t0, t1, pn_done
+	addi	t1, zero, 58
+	blt	t0, t1, pn_hex_09
+	addi	t1, zero, 'A'
+	blt	t0, t1, pn_done
+	addi	t1, zero, 71
+	blt	t0, t1, pn_hex_uc
+	addi	t1, zero, 'a'
+	blt	t0, t1, pn_done
+	addi	t1, zero, 103
+	blt	t0, t1, pn_hex_lc
+	j	pn_done
+pn_hex_09:
+	addi	t0, t0, -48
+	j	pn_hex_acc
+pn_hex_uc:
+	addi	t0, t0, -65
+	addi	t0, t0, 10
+	j	pn_hex_acc
+pn_hex_lc:
+	addi	t0, t0, -97
+	addi	t0, t0, 10
+pn_hex_acc:
+	slli	a0, a0, 4
+	or	a0, a0, t0
+	addi	s2, s2, 1
+	j	pn_hex_loop
+
+pn_dec:
+pn_dec_loop:
+	bge	s2, s3, pn_done
+	lbu	t0, 0(s2)
+	addi	t1, zero, '0'
+	blt	t0, t1, pn_done
+	addi	t1, zero, 58
+	bge	t0, t1, pn_done
+	addi	t0, t0, -48
+	slli	t1, a0, 3
+	slli	t2, a0, 1
+	add	a0, t1, t2
+	add	a0, a0, t0
+	addi	s2, s2, 1
+	j	pn_dec_loop
+
+pn_done:
+	j	pn_ct
+
+# ══════════════════════════════════════════════════════════════════════════════
+# lookup_or_alloc — find/allocate a variable slot.
+#   Call sites:  0: la_ct (compile_term),  1: la_cs (compile_stmt)
+# ══════════════════════════════════════════════════════════════════════════════
+lookup_or_alloc:
+	addi	t0, s7, 0		# scan ptr
+la_scan:
+	beq	t0, s8, la_new
+	addi	t1, zero, 0
+la_cmp:
+	addi	t2, zero, 32
+	beq	t1, t2, la_match
+	add	t3, t0, t1
+	lbu	t4, 0(t3)
+	blt	t1, s11, la_in_tok
+	bnez	t4, la_next
+	addi	t1, t1, 1
+	j	la_cmp
+la_in_tok:
+	add	t5, s10, t1
+	lbu	t6, 0(t5)
+	bne	t4, t6, la_next
+	addi	t1, t1, 1
+	j	la_cmp
+la_match:
+	lw	a0, 32(t0)
+	j	lookup_or_alloc_disp
+la_next:
+	addi	t0, t0, 40
+	j	la_scan
+
+la_new:
+	# Grow symtab if full (s8 has reached s0).
+	# Growing doubles the capacity and copies the existing entries to a
+	# fresh heap block at tp. No free — old block is leaked (bump alloc).
+	bne	s8, s0, la_new_body
+	sub	t0, s0, s7		# old_cap (bytes)
+	slli	t1, t0, 1		# new_cap = 2 * old_cap
+	addi	t2, tp, 0		# new_base = tp
+	addi	t3, s7, 0		# src
+	addi	t4, t2, 0		# dst
+la_grow_cp:
+	beq	t3, s8, la_grow_done
+	lw	t5, 0(t3)
+	sw	t5, 0(t4)
+	addi	t3, t3, 4
+	addi	t4, t4, 4
+	j	la_grow_cp
+la_grow_done:
+	sub	t6, s8, s7		# used bytes
+	addi	s7, t2, 0		# s7 = new base
+	add	s8, s7, t6		# s8 = new write ptr
+	add	s0, s7, t1		# s0 = new end
+	add	tp, tp, t1		# bump heap past the new block
+la_new_body:
+	addi	t1, zero, 0
+la_zero:
+	addi	t2, zero, 40
+	beq	t1, t2, la_zero_done
+	add	t3, s8, t1
+	sb	zero, 0(t3)
+	addi	t1, t1, 1
+	j	la_zero
+la_zero_done:
+	addi	t1, zero, 0
+la_cp:
+	beq	t1, s11, la_cp_done
+	add	t2, s10, t1
+	lbu	t3, 0(t2)
+	add	t4, s8, t1
+	sb	t3, 0(t4)
+	addi	t1, t1, 1
+	j	la_cp
+la_cp_done:
+	sw	s9, 32(s8)
+	addi	a0, s9, 0
+	addi	s9, s9, 1
+	addi	s8, s8, 40
+	j	lookup_or_alloc_disp
+
+lookup_or_alloc_disp:
+	bnez	gp, la_d1
+	j	la_ct
+la_d1:
+	j	la_cs
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_li — emit "li a0, imm". imm passed in a0.
+#   Single caller:  eli_ret (compile_term)
+# ══════════════════════════════════════════════════════════════════════════════
+emit_li:
+	addi	sp, sp, -4
+	sw	a0, 0(sp)		# save imm
+	lw	t0, 0(sp)
+	addi	t1, zero, 2047
+	bgt	t0, t1, eli_big
+	addi	t1, zero, -2048
+	blt	t0, t1, eli_big
+
+	# addi a0, zero, imm   —   word = 0x00000013 | (rd=10 << 7) | (imm << 20)
+	lw	t2, 0(sp)
+	andi	t2, t2, 0xFFF
+	slli	t2, t2, 20
+	lui	a0, 0
+	addi	a0, a0, 0x513		# 0x13 | (10 << 7) = 0x513
+	or	a0, a0, t2
+	addi	gp, zero, 0		# ew site 0 = ew_li_s
+	j	emit_word
+ew_li_s:
+	j	eli_pop
+
+eli_big:
+	# upper20 = (imm + 0x800) >>> 12 (arith shift)
+	lw	t0, 0(sp)
+	lui	t1, 0x1
+	srli	t1, t1, 1		# 0x800
+	add	t2, t0, t1
+	srai	t2, t2, 12		# upper
+
+	# lui a0, upper   —   word = 0x00000037 | (rd=10 << 7) | (upper << 12)
+	lui	a0, 0
+	addi	a0, a0, 0x537		# 0x37 | (10<<7) = 0x537
+	slli	t2, t2, 12
+	or	a0, a0, t2
+	addi	gp, zero, 1		# ew site 1 = ew_li_lui
+	j	emit_word
+ew_li_lui:
+
+	# addi a0, a0, lower12
+	lw	t0, 0(sp)
+	slli	t0, t0, 20
+	srai	t0, t0, 20
+	andi	t0, t0, 0xFFF
+	slli	t0, t0, 20
+	# word = 0x00050513   (addi a0, a0, 0) | imm
+	lui	a0, 0x50
+	addi	a0, a0, 0x513
+	or	a0, a0, t0
+	addi	gp, zero, 2		# ew site 2 = ew_li_add
+	j	emit_word
+ew_li_add:
+
+eli_pop:
+	addi	sp, sp, 4
+	j	eli_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_lw_sp — emit "lw a0, -(slot+1)*4(fp)". slot in a0 on entry.
+#   Loads variable slot via fp (frame pointer). fp never moves, so this is
+#   unaffected by push/pop during expression eval.
+#   Single caller: elws_ret (compile_term)
+# ══════════════════════════════════════════════════════════════════════════════
+emit_lw_sp:
+	addi	a0, a0, 1
+	slli	a0, a0, 2
+	sub	a0, zero, a0		# negative offset
+	andi	t0, a0, 0xFFF
+	slli	t0, t0, 20		# imm in bits 31:20
+	# Base lw a0, 0(fp):
+	#   opcode=0x03, rd=10, f3=2, rs1=8(fp)
+	#   word = 0x03 | (10<<7) | (2<<12) | (8<<15)
+	#        = 0x03 | 0x500 | 0x2000 | 0x40000 = 0x00042503
+	lui	a0, 0x42
+	addi	a0, a0, 0x503
+	or	a0, a0, t0
+	addi	gp, zero, 3		# ew site 3 = ew_lws
+	j	emit_word
+ew_lws:
+	j	elws_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_sw_sp — emit "sw a0, -(slot+1)*4(fp)". slot in a0 on entry.
+#   Stores to a variable slot via fp (frame pointer).
+#   Single caller: esws_ret (compile_stmt)
+# ══════════════════════════════════════════════════════════════════════════════
+emit_sw_sp:
+	addi	a0, a0, 1
+	slli	a0, a0, 2
+	sub	a0, zero, a0		# imm12 (signed)
+	# Base sw a0, 0(fp): opcode=0x23, f3=2, rs1=8(fp), rs2=10(a0)
+	#   word = 0x23 | (2<<12) | (8<<15) | (10<<20)
+	#        = 0x23 | 0x2000 | 0x40000 | 0xA00000 = 0x00A42023
+	lui	t0, 0xA42
+	addi	t0, t0, 0x023
+	# imm[4:0] → bits[11:7]
+	andi	t1, a0, 0x1F
+	slli	t1, t1, 7
+	or	t0, t0, t1
+	# imm[11:5] → bits[31:25]
+	srai	t1, a0, 5
+	andi	t1, t1, 0x7F
+	slli	t1, t1, 25
+	or	t0, t0, t1
+	addi	a0, t0, 0
+	addi	gp, zero, 4		# ew site 4 = ew_sws
+	j	emit_word
+ew_sws:
+	j	esws_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_lw_deref  — emit "lw a0, 0(a0)"
+# ══════════════════════════════════════════════════════════════════════════════
+emit_lw_deref:
+	# opcode=0x03, rd=10, f3=2, rs1=10, imm=0
+	# word = 0x03 | (10<<7) | (2<<12) | (10<<15) = 0x03 | 0x500 | 0x2000 | 0x50000
+	#      = 0x00052503
+	lui	a0, 0x52
+	addi	a0, a0, 0x503
+	addi	gp, zero, 5		# ew site 5 = ew_lwd
+	j	emit_word
+ew_lwd:
+	j	elwd_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_lbu_deref — emit "lbu a0, 0(a0)"
+# ══════════════════════════════════════════════════════════════════════════════
+emit_lbu_deref:
+	# opcode=0x03, f3=4, rd=10, rs1=10, imm=0
+	# word = 0x03 | (10<<7) | (4<<12) | (10<<15) = 0x03 | 0x500 | 0x4000 | 0x50000
+	#      = 0x00054503
+	lui	a0, 0x54
+	addi	a0, a0, 0x503
+	addi	gp, zero, 6		# ew site 6 = ew_lbud
+	j	emit_word
+ew_lbud:
+	j	elbud_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_push_a0 — emit "addi sp,sp,-4 ; sw a0,0(sp)"   (pushes a0 onto the
+#   compiled program's stack).  Multi-caller (compile_expr, cs_star, cs_at),
+#   so we save/restore gp around the inner emit_word calls.
+#
+# Call sites:  0: push_ce (compile_expr '+' chain)
+#              1: push_cs_star (cs_star, save address)
+#              2: push_cs_at   (cs_at, save address)
+# ══════════════════════════════════════════════════════════════════════════════
+emit_push_a0:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	# addi sp, sp, -4  in the compiled program
+	# opcode=0x13, rd=sp=2, rs1=sp=2, f3=0, imm=-4 (0xFFC)
+	# word = 0x13 | (2<<7) | (2<<15) | (0xFFC<<20)
+	#      = 0x13 | 0x100 | 0x10000 | 0xFFC00000 = 0xFFC10113
+	lui	a0, 0xFFC10
+	addi	a0, a0, 0x113
+	addi	gp, zero, 7		# ew site 7 = ew_push_addi
+	j	emit_word
+ew_push_addi:
+	# sw a0, 0(sp)  in the compiled program
+	# opcode=0x23, rs1=sp=2, rs2=a0=10, f3=2, imm=0
+	# word = 0x23 | (2<<12) | (2<<15) | (10<<20) = 0x00A12023
+	lui	a0, 0xA12
+	addi	a0, a0, 0x023
+	addi	gp, zero, 8		# ew site 8 = ew_push_sw
+	j	emit_word
+ew_push_sw:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_push_a0_disp
+
+emit_push_a0_disp:
+	bnez	gp, epa_d1
+	j	push_ce
+epa_d1:
+	addi	gp, gp, -1
+	bnez	gp, epa_d2
+	j	push_cs_star
+epa_d2:
+	j	push_cs_at
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_pop_t0 — emit "lw t0,0(sp) ; addi sp,sp,4"  (pops top of the compiled
+#   program's stack into its t0 register).  Multi-caller.
+#
+# Call sites:  0: pop_ce (compile_expr, pop LHS for add)
+#              1: pop_cs_star (cs_star, pop address before sw)
+#              2: pop_cs_at   (cs_at, pop address before sb)
+# ══════════════════════════════════════════════════════════════════════════════
+emit_pop_t0:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	# lw t0, 0(sp)  in the compiled program
+	# opcode=0x03, rd=t0=5, rs1=sp=2, f3=2, imm=0
+	# word = 0x03 | (5<<7) | (2<<12) | (2<<15) = 0x03|0x280|0x2000|0x10000
+	#      = 0x00012283
+	lui	a0, 0x12
+	addi	a0, a0, 0x283
+	addi	gp, zero, 9		# ew site 9 = ew_pop_lw
+	j	emit_word
+ew_pop_lw:
+	# addi sp, sp, 4  in the compiled program
+	# opcode=0x13, rd=sp=2, rs1=sp=2, f3=0, imm=4
+	# word = 0x13 | (2<<7) | (2<<15) | (4<<20) = 0x00410113
+	lui	a0, 0x410
+	addi	a0, a0, 0x113
+	addi	gp, zero, 10		# ew site 10 = ew_pop_addi
+	j	emit_word
+ew_pop_addi:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_pop_t0_disp
+
+emit_pop_t0_disp:
+	bnez	gp, ept_d1
+	j	pop_ce
+ept_d1:
+	addi	gp, gp, -1
+	bnez	gp, ept_d2
+	j	pop_cs_star
+ept_d2:
+	j	pop_cs_at
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_add — emit "add a0, t0, a0"    (caller just popped LHS into t0).
+#   R-type: opcode=0x33, rd=10, rs1=5(t0), rs2=10(a0), f3=0, f7=0
+#   word = 0x33 | (10<<7) | (5<<15) | (10<<20)
+#        = 0x33 | 0x500 | 0x28000 | 0xA00000 = 0x00A28533
+# Single caller: ea_ret (compile_expr).
+# ══════════════════════════════════════════════════════════════════════════════
+emit_add:
+	lui	a0, 0xA28
+	addi	a0, a0, 0x533
+	addi	gp, zero, 11		# ew site 11 = ew_add
+	j	emit_word
+ew_add:
+	j	ea_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_sw_deref — emit "sw a0, 0(t0)"   (caller just popped addr into t0).
+#   opcode=0x23, f3=2, rs1=5(t0), rs2=10(a0), imm=0
+#   word = 0x23 | (2<<12) | (5<<15) | (10<<20) = 0x00A2A023
+# Single caller: esw_ret (compile_stmt cs_star).
+# ══════════════════════════════════════════════════════════════════════════════
+emit_sw_deref:
+	lui	a0, 0xA2A
+	addi	a0, a0, 0x023
+	addi	gp, zero, 12		# ew site 12 = ew_sw_d
+	j	emit_word
+ew_sw_d:
+	j	esw_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_sb_deref — emit "sb a0, 0(t0)"
+#   opcode=0x23, f3=0, rs1=5(t0), rs2=10(a0), imm=0
+#   word = 0x23 | (0<<12) | (5<<15) | (10<<20) = 0x00A28023
+# Single caller: esb_ret (compile_stmt cs_at).
+# ══════════════════════════════════════════════════════════════════════════════
+emit_sb_deref:
+	lui	a0, 0xA28
+	addi	a0, a0, 0x023
+	addi	gp, zero, 13		# ew site 13 = ew_sb_d
+	j	emit_word
+ew_sb_d:
+	j	esb_ret
+
+# ══════════════════════════════════════════════════════════════════════════════
+# compile_term — emits code that leaves a term's value in a0.
+#   term := ('*' | '@')? primary
+#
+# Call sites:  0: ct_ce_first,  1: ct_ce_next
+# ══════════════════════════════════════════════════════════════════════════════
+compile_term:
+	addi	sp, sp, -8
+	sw	gp, 0(sp)
+	sw	zero, 4(sp)		# deref kind: 0=none, 1=word '*', 2=byte '@'
+
+	addi	gp, zero, 1
+	j	skip_ws
+sw_ct_pre:
+	bge	s2, s3, ct_bad
+
+	lbu	t0, 0(s2)
+	addi	t1, zero, 42
+	bne	t0, t1, ct_chk_at
+	addi	s2, s2, 1
+	addi	t1, zero, 1
+	sw	t1, 4(sp)
+	addi	gp, zero, 2
+	j	skip_ws
+sw_ct_star:
+	j	ct_primary
+ct_chk_at:
+	addi	t1, zero, 64
+	bne	t0, t1, ct_primary
+	addi	s2, s2, 1
+	addi	t1, zero, 2
+	sw	t1, 4(sp)
+	addi	gp, zero, 3
+	j	skip_ws
+sw_ct_at:
+
+ct_primary:
+	bge	s2, s3, ct_bad
+	lbu	t0, 0(s2)
+	# Digit?
+	addi	t1, zero, '0'
+	blt	t0, t1, ct_not_num
+	addi	t1, zero, 58
+	blt	t0, t1, ct_num
+ct_not_num:
+	# Letter or underscore?
+	addi	t1, zero, 'a'
+	blt	t0, t1, ct_not_lc
+	addi	t1, zero, 123
+	blt	t0, t1, ct_id
+ct_not_lc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, ct_not_uc
+	addi	t1, zero, 91
+	blt	t0, t1, ct_id
+ct_not_uc:
+	addi	t1, zero, '_'
+	beq	t0, t1, ct_id
+	j	ct_bad
+
+ct_num:
+	j	parse_num
+pn_ct:
+	# a0 = value
+	j	emit_li
+eli_ret:
+	j	ct_deref
+
+ct_id:
+	addi	gp, zero, 0
+	j	parse_ident
+pi_ct:
+	addi	gp, zero, 0
+	j	lookup_or_alloc
+la_ct:
+	# a0 = slot
+	j	emit_lw_sp
+elws_ret:
+	j	ct_deref
+
+ct_deref:
+	lw	t0, 4(sp)
+	beqz	t0, ct_done
+	addi	t1, zero, 1
+	beq	t0, t1, ct_deref_w
+	# kind == 2 → byte
+	j	emit_lbu_deref
+elbud_ret:
+	j	ct_done
+ct_deref_w:
+	j	emit_lw_deref
+elwd_ret:
+	j	ct_done
+
+ct_bad:
+	j	halt_err
+
+ct_done:
+	lw	gp, 0(sp)
+	addi	sp, sp, 8
+	j	compile_term_disp
+
+compile_term_disp:
+	bnez	gp, ctd_1
+	j	ct_ce_first
+ctd_1:
+	j	ct_ce_next
+
+# ══════════════════════════════════════════════════════════════════════════════
+# compile_expr — expr := term ('+' term)*.   Result in a0.
+#
+# Call sites:
+#   0: ce_cs_rhs    (compile_stmt, IDENT = <expr>)
+#   1: ce_cs_addr1  (compile_stmt, '*' <expr> = ...)
+#   2: ce_cs_val1   (compile_stmt, '*' ... = <expr>)
+#   3: ce_cs_addr2  (compile_stmt, '@' <expr> = ...)
+#   4: ce_cs_val2   (compile_stmt, '@' ... = <expr>)
+# ══════════════════════════════════════════════════════════════════════════════
+compile_expr:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+
+	addi	gp, zero, 0
+	j	compile_term
+ct_ce_first:
+
+ce_loop:
+	addi	gp, zero, 4
+	j	skip_ws
+sw_ce_plus:
+	bge	s2, s3, ce_done
+	lbu	t0, 0(s2)
+	addi	t1, zero, '+'
+	bne	t0, t1, ce_done
+	addi	s2, s2, 1
+
+	# Push LHS onto the compiled program's stack, compile RHS into a0,
+	# then pop LHS into t0 and add.
+	addi	gp, zero, 0		# push site 0 = push_ce
+	j	emit_push_a0
+push_ce:
+
+	addi	gp, zero, 1
+	j	compile_term
+ct_ce_next:
+
+	addi	gp, zero, 0		# pop site 0 = pop_ce
+	j	emit_pop_t0
+pop_ce:
+	j	emit_add
+ea_ret:
+	j	ce_loop
+
+ce_done:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	compile_expr_disp
+
+compile_expr_disp:
+	bnez	gp, ced_1
+	j	ce_cs_rhs
+ced_1:
+	addi	gp, gp, -1
+	bnez	gp, ced_2
+	j	ce_cs_addr1
+ced_2:
+	addi	gp, gp, -1
+	bnez	gp, ced_3
+	j	ce_cs_val1
+ced_3:
+	addi	gp, gp, -1
+	bnez	gp, ced_4
+	j	ce_cs_addr2
+ced_4:
+	j	ce_cs_val2
+
+# ══════════════════════════════════════════════════════════════════════════════
+# compile_stmt — compile one statement. Non-ws known to be at s2.
+# Single caller: cs_after (compile_loop)
+# ══════════════════════════════════════════════════════════════════════════════
+compile_stmt:
+	lbu	t0, 0(s2)
+	addi	t1, zero, 42
+	beq	t0, t1, cs_star
+	addi	t1, zero, 64
+	beq	t0, t1, cs_at
+
+	# IDENT '=' expr ';'
+	addi	gp, zero, 1
+	j	parse_ident
+pi_cs:
+	addi	gp, zero, 1
+	j	lookup_or_alloc
+la_cs:
+	# Spill slot to famc's stack (compile_expr → lookup_or_alloc clobbers t6)
+	addi	sp, sp, -4
+	sw	a0, 0(sp)
+
+	addi	gp, zero, 5
+	j	skip_ws
+sw_cs_eq1:
+	lbu	t0, 0(s2)
+	addi	t1, zero, '='
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+
+	addi	gp, zero, 0
+	j	compile_expr
+ce_cs_rhs:
+	# a0 = value; emit sw a0, -(slot+1)*4(sp)
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	j	emit_sw_sp
+esws_ret:
+
+	addi	gp, zero, 6
+	j	skip_ws
+sw_cs_semi1:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ';'
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+	j	cs_done
+
+cs_star:
+	addi	s2, s2, 1
+	addi	gp, zero, 1
+	j	compile_expr
+ce_cs_addr1:
+	# Push the address onto the compiled program's stack.
+	addi	gp, zero, 1		# push site 1 = push_cs_star
+	j	emit_push_a0
+push_cs_star:
+
+	addi	gp, zero, 7
+	j	skip_ws
+sw_cs_eq2:
+	lbu	t0, 0(s2)
+	addi	t1, zero, '='
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+
+	addi	gp, zero, 2
+	j	compile_expr
+ce_cs_val1:
+	# Pop the address into t0 in the compiled program, then sw.
+	addi	gp, zero, 1		# pop site 1 = pop_cs_star
+	j	emit_pop_t0
+pop_cs_star:
+	j	emit_sw_deref
+esw_ret:
+
+	addi	gp, zero, 8
+	j	skip_ws
+sw_cs_semi2:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ';'
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+	j	cs_done
+
+cs_at:
+	addi	s2, s2, 1
+	addi	gp, zero, 3
+	j	compile_expr
+ce_cs_addr2:
+	addi	gp, zero, 2		# push site 2 = push_cs_at
+	j	emit_push_a0
+push_cs_at:
+
+	addi	gp, zero, 9
+	j	skip_ws
+sw_cs_eq3:
+	lbu	t0, 0(s2)
+	addi	t1, zero, '='
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+
+	addi	gp, zero, 4
+	j	compile_expr
+ce_cs_val2:
+	addi	gp, zero, 2		# pop site 2 = pop_cs_at
+	j	emit_pop_t0
+pop_cs_at:
+	j	emit_sb_deref
+esb_ret:
+
+	addi	gp, zero, 10
+	j	skip_ws
+sw_cs_semi3:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ';'
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+	j	cs_done
+
+cs_bad:
+	j	halt_err
+
+cs_done:
+	j	cs_after
+
+# ══════════════════════════════════════════════════════════════════════════════
+# End of famc image.  `tp` is initialized from this label at startup — every
+# heap allocation (symtab, future dynamic state) bumps `tp` forward from here.
+# Naturally 4-byte aligned because every preceding instruction is exactly 4 B.
+# ══════════════════════════════════════════════════════════════════════════════
+data:

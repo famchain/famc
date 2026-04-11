@@ -1,7 +1,9 @@
 #!/bin/sh
 
 SMP=1
-CPU="rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false"
+CPU="rv32,m=false,a=false,f=false,d=false,c=false,\
+zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,\
+zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false"
 FILE=""
 
 for arg in "$@"; do
