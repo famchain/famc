@@ -314,6 +314,393 @@ test_output  "repeated bare ++x" \
 	"x = 60; ++x; ++x; ++x; ++x; ++x; @0x10000000 = x;" "A"
 
 # ============================================================================
+echo "=== Shifts (<< >>) ==="
+test_output  "lshift literal" \
+	"@0x10000000 = 1 << 6;" "@"
+test_output  "rshift literal (arith, positive)" \
+	"@0x10000000 = 130 >> 1;" "A"
+test_output  "lshift zero is identity" \
+	"@0x10000000 = 0x41 << 0;" "A"
+# Signed right shift on a negative value sign-extends.
+# -128 = 0xFFFFFF80, >> 1 = 0xFFFFFFC0 = -64. Then +193 = 129.
+# Use a byte write so we get the low 8 bits: 0xC0 + 0xC1 ... careful.
+# Simpler: -64 & 0xff = 0xC0. For an ASCII test, use a non-negative case.
+test_output  "chained rshift" \
+	"@0x10000000 = 256 >> 1 >> 1;" "@"
+# Precedence: '+' tighter than '<<'.  1 << (2+4) = 1<<6 = 64='@'.
+test_output  "shift lower precedence than add (rhs)" \
+	"@0x10000000 = 1 << 2 + 4;" "@"
+# (1+2) << 4 = 48 = '0'.
+test_output  "shift lower precedence than add (lhs)" \
+	"@0x10000000 = 1 + 2 << 4;" "0"
+# '^' is lower than '<<': 0x40 ^ (1<<0) = 0x40 ^ 1 = 0x41 = 'A'.
+test_output  "xor lower precedence than shift" \
+	"@0x10000000 = 0x40 ^ 1 << 0;" "A"
+test_output  "compound <<= " \
+	"x = 8; x <<= 3; @0x10000000 = x;" "@"
+test_output  "compound >>= " \
+	"x = 260; x >>= 2; @0x10000000 = x;" "A"
+test_output  "compound <<= then >>=" \
+	"x = 1; x <<= 6; x <<= 1; x >>= 1; @0x10000000 = x;" "@"
+test_output  "shift with variable rhs" \
+	"x = 1; n = 6; @0x10000000 = x << n;" "@"
+
+# ============================================================================
+echo "=== Bitwise AND (&) ==="
+test_output  "and literal masks low bits" \
+	"@0x10000000 = 0x4F & 0x41;" "A"
+test_output  "and literal masks upper bits" \
+	"@0x10000000 = 0xFF & 65;" "A"
+test_output  "compound &=" \
+	"x = 0x47; x &= 0x41; @0x10000000 = x;" "A"
+# '&' binds tighter than '^': (0x41 & 0x0F) ^ 0x4E = 0x01 ^ 0x4E = 0x4F = 'O'.
+# If '^' were tighter: 0x41 & (0x0F ^ 0x4E) = 0x41 & 0x41 = 0x41 = 'A'.
+# So a result of 'O' confirms Rust precedence (& > ^).
+test_output  "and tighter than xor (rust precedence)" \
+	"@0x10000000 = 0x41 & 0x0F ^ 0x4E;" "O"
+test_output  "and tighter than xor — commuted" \
+	"@0x10000000 = 0x4E ^ 0x41 & 0x0F;" "O"
+# '<<' tighter than '&': (1 << 6) & 0x7F = 64 & 0x7F = 64 = '@'.
+test_output  "shift tighter than and" \
+	"@0x10000000 = 1 << 6 & 0x7F;" "@"
+
+# ============================================================================
+echo "=== Bitwise OR (|) ==="
+test_output  "or literal" \
+	"@0x10000000 = 0x40 | 1;" "A"
+test_output  "or literal commuted" \
+	"@0x10000000 = 0x01 | 0x40;" "A"
+test_output  "compound |=" \
+	"x = 0x40; x |= 1; @0x10000000 = x;" "A"
+# '^' tighter than '|': 0x40 | (1 ^ 0) = 0x40 | 1 = 0x41 = 'A'.
+test_output  "xor tighter than or" \
+	"@0x10000000 = 0x40 | 1 ^ 0;" "A"
+# '<<' tighter than '|': (1 << 6) | 1 = 65 = 'A'.
+test_output  "shift tighter than or" \
+	"@0x10000000 = 1 << 6 | 1;" "A"
+# '&' tighter than '|': (0x45 & 0x40) | 1 = 0x40 | 1 = 'A'.
+test_output  "and tighter than or" \
+	"@0x10000000 = 0x45 & 0x40 | 1;" "A"
+# Full sanity mix: bitfield composition.
+test_output  "or many bits together" \
+	"@0x10000000 = 1 | 64;" "A"
+
+# ============================================================================
+echo "=== Unary ~ and - ==="
+# ~0xBE = 0xFFFFFF41; low byte is 0x41='A'.
+test_output  "unary ~ literal" \
+	"@0x10000000 = ~0xBE;" "A"
+# Double NOT is identity.
+test_output  "unary ~ chained" \
+	"@0x10000000 = ~~65;" "A"
+# Unary '-' on a variable.
+test_output  "unary - variable" \
+	"x = 1; @0x10000000 = -x + 66;" "A"
+# Adding a negative.
+test_output  "unary - in add chain" \
+	"x = 10; @0x10000000 = 75 + -x;" "A"
+# Subtracting a negative.
+test_output  "unary - under subtraction" \
+	"x = 5; @0x10000000 = 60 - -x;" "A"
+# Chaining: -(~64) = -(-65) = 65 = 'A'.
+test_output  "unary - applied to ~" \
+	"@0x10000000 = -~64;" "A"
+# Double unary - with whitespace: - -x = x.
+test_output  "double unary - with space" \
+	"x = 65; @0x10000000 = - -x;" "A"
+# ~x is -x-1. -(-x-1) = x+1. So with x=64, result = 65 = 'A'.
+test_output  "neg of not of variable" \
+	"x = 64; @0x10000000 = -~x;" "A"
+
+# ============================================================================
+echo "=== Parens ==="
+test_output  "paren around literal" \
+	"@0x10000000 = (65);" "A"
+test_output  "paren around add" \
+	"@0x10000000 = (60 + 5);" "A"
+# Without parens this would parse as (1+2)<<4 = 48; with parens it's 1+(2<<4) = 33.
+test_output  "paren overrides add-shift precedence" \
+	"@0x10000000 = 1 + (2 << 5);" "A"
+# (1+2)<<4 = 3<<4 = 48 = '0'.
+test_output  "paren overrides shift-add precedence" \
+	"@0x10000000 = (1 + 2) << 4;" "0"
+# Parens let '|' bind before '<<' explicitly. (1<<6)|1 = 65.
+test_output  "explicit paren around shift before or" \
+	"@0x10000000 = (1 << 6) | 1;" "A"
+test_output  "nested parens" \
+	"@0x10000000 = (((65)));" "A"
+test_output  "unary applied to paren" \
+	"@0x10000000 = ~(0xBE);" "A"
+test_output  "paren around variable" \
+	"x = 1 + 2; @0x10000000 = (x) + 62;" "A"
+# Deref of parenthesized address.
+test_output  "byte deref of paren expression" \
+	"p = 0x10000000; @(p + 0) = 65;" "A"
+test_output  "paren under byte deref" \
+	"p = 0x10000000; @(p) = 65;" "A"
+# Paren lets '&' contribute to a subsequent computation differently.
+# (0x44 & 0x0F) | 0x40 = 0x04 | 0x40 = 0x44 = 'D'.
+test_output  "paren changes and-or grouping" \
+	"@0x10000000 = (0x44 & 0x0F) | 0x40;" "D"
+
+# ============================================================================
+echo "=== Signed comparisons ==="
+# Result of a cmp is 0 or 1; add 64 to map to '@'/'A' for easy testing.
+test_output  "less-than true" \
+	"@0x10000000 = (1 < 2) + 64;" "A"
+test_output  "less-than false" \
+	"@0x10000000 = (2 < 1) + 65;" "A"
+test_output  "less-equal true (strict)" \
+	"@0x10000000 = (3 <= 5) + 64;" "A"
+test_output  "less-equal true (equal)" \
+	"@0x10000000 = (5 <= 5) + 64;" "A"
+test_output  "less-equal false" \
+	"@0x10000000 = (6 <= 5) + 65;" "A"
+test_output  "greater-than true" \
+	"@0x10000000 = (3 > 2) + 64;" "A"
+test_output  "greater-than false" \
+	"@0x10000000 = (2 > 3) + 65;" "A"
+test_output  "greater-equal true (equal)" \
+	"@0x10000000 = (3 >= 3) + 64;" "A"
+test_output  "equality true" \
+	"@0x10000000 = (7 == 7) + 64;" "A"
+test_output  "equality false" \
+	"@0x10000000 = (7 == 8) + 65;" "A"
+test_output  "inequality true" \
+	"@0x10000000 = (7 != 8) + 64;" "A"
+test_output  "inequality false" \
+	"@0x10000000 = (7 != 7) + 65;" "A"
+# Signed less-than with a negative operand: 0-1 = -1 < 0 → 1.
+test_output  "less-than on negative is signed" \
+	"@0x10000000 = (0 - 1 < 0) + 64;" "A"
+# Variables.
+test_output  "comparison with variables" \
+	"x = 10; y = 5; @0x10000000 = (x > y) + 64;" "A"
+# Precedence: '+' tighter than '==': (1+2) == 3 → 1.
+test_output  "add tighter than equality" \
+	"@0x10000000 = (1 + 2 == 3) + 64;" "A"
+# Rust precedence: '|' is TIGHTER than '<' (the 100-year-bug fix).
+# 1 < 2|64 parses as 1 < (2|64) = 1 < 66 = 1, then +64 = 65 = 'A'.
+test_output  "or tighter than less-than (rust)" \
+	"@0x10000000 = (1 < 2 | 64) + 64;" "A"
+# (1 | 64) == 65 → 1, then +64 = 65 = 'A'.
+test_output  "or tighter than equality (rust)" \
+	"@0x10000000 = (1 | 64 == 65) + 64;" "A"
+
+# ============================================================================
+echo "=== Unsigned comparisons and >>u ==="
+test_output  "unsigned less-than" \
+	"@0x10000000 = (1 <u 2) + 64;" "A"
+# -1 as unsigned is 0xFFFFFFFF, which is NOT less than 0 (unsigned).
+# Contrast with signed: (-1 < 0) is true; (-1 <u 0) is false.
+test_output  "unsigned less-than treats -1 as max uint" \
+	"@0x10000000 = (0 - 1 <u 0) + 65;" "A"
+test_output  "signed less-than on -1 is true" \
+	"@0x10000000 = (0 - 1 < 0) + 64;" "A"
+test_output  "unsigned less-equal" \
+	"@0x10000000 = (5 <=u 5) + 64;" "A"
+test_output  "unsigned greater-than" \
+	"@0x10000000 = (3 >u 2) + 64;" "A"
+test_output  "unsigned greater-equal" \
+	"@0x10000000 = (3 >=u 3) + 64;" "A"
+# -1 as unsigned is huge; 0 is not >=u (-1 as uint).
+test_output  "unsigned >=u on -1 is false" \
+	"@0x10000000 = (0 >=u 0 - 1) + 65;" "A"
+# Signed >> (sra): -1 shifted right stays -1 (sign-extends).
+test_output  "signed >> sign-extends" \
+	"x = 0 - 1; @0x10000000 = (x >> 1) + 66;" "A"
+# Unsigned >>u (srl): -2 = 0xFFFFFFFE; shifted right by 25 = 0x7F = 127.
+# Then +(256-192) = 127+(-192)? Use different arithmetic:
+# 0xFFFFFFFE >>u 25 = 127. 127 - 62 = 65 = 'A'.
+test_output  "unsigned >>u on negative yields logical shift" \
+	"@0x10000000 = ((0 - 2) >>u 25) - 62;" "A"
+# Mixed chain: unsigned shift then add.
+test_output  "unsigned shift chain" \
+	"@0x10000000 = (1 << 6) + (0 - 1 >>u 31);" "A"
+
+# ============================================================================
+echo "=== C precedence: relational vs equality ==="
+# '<' is tighter than '=='. These tests verify that mixed chains parse per C.
+# 0 == (1 < 2) = 0 == 1 = 0 → '@'
+test_output  "eq binds looser than lt" \
+	"@0x10000000 = (0 == 1 < 2) + 64;" "@"
+# 1 == (2 > 3) = 1 == 0 = 0 → 'A' (after +65)
+test_output  "eq binds looser than gt" \
+	"@0x10000000 = (1 == 2 > 3) + 65;" "A"
+# 0 != (5 > 10) = 0 != 0 = 0 → '@'
+test_output  "neq binds looser than gt" \
+	"@0x10000000 = (0 != 5 > 10) + 64;" "@"
+# (1 < 2) == 1 = 1 == 1 = 1 → 'A'
+test_output  "relational then eq on rhs" \
+	"@0x10000000 = (1 < 2 == 1) + 64;" "A"
+# (2 < 1) == 0 = 0 == 0 = 1 → 'A'
+test_output  "false relational then eq" \
+	"@0x10000000 = (2 < 1 == 0) + 64;" "A"
+# Same-level chain of equalities stays left-associative.
+# (5 == 5) != 0 = 1 != 0 = 1 → 'A'
+test_output  "chained equality is left-assoc" \
+	"@0x10000000 = (5 == 5 != 0) + 64;" "A"
+
+# ============================================================================
+echo "=== Multiplication (software shift-and-add) ==="
+test_output  "mul literals" \
+	"@0x10000000 = 13 * 5;" "A"
+test_output  "mul by one" \
+	"@0x10000000 = 1 * 65;" "A"
+test_output  "mul by zero produces NUL" \
+	"@0x10000000 = 0 * 123; @0x10000000 = 65;" "A"
+test_output  "mul variables" \
+	"x = 8; y = 8; @0x10000000 = x * y + 1;" "A"
+# '*' binds tighter than '+' (like C).
+test_output  "mul tighter than add (rhs)" \
+	"@0x10000000 = 2 + 3 * 21;" "A"
+test_output  "mul tighter than add (lhs)" \
+	"@0x10000000 = 2 * 3 + 59;" "A"
+# Signed multiplication of two negatives gives a positive. -5 * -13 = 65.
+test_output  "mul of two negatives" \
+	"@0x10000000 = (0 - 5) * (0 - 13);" "A"
+# Mixed signs: -5 * 13 = -65; +130 = 65 = 'A'.
+test_output  "mul of negative by positive" \
+	"@0x10000000 = (0 - 5) * 13 + 130;" "A"
+# Compound *=
+test_output  "compound *=" \
+	"x = 7; x *= 9; @0x10000000 = x + 2;" "A"
+test_output  "chained *" \
+	"@0x10000000 = 4 * 4 * 4 + 1;" "A"
+# Larger product computed with upper bits used; byte store selects low 8.
+# 256*2 + 65 = 577 = 0x241; low byte = 0x41 = 'A'.
+test_output  "mul product larger than a byte (low-byte store)" \
+	"@0x10000000 = 256 * 2 + 65;" "A"
+
+# ============================================================================
+echo "=== Division and modulo (software shift-and-subtract) ==="
+test_output  "div literal" \
+	"@0x10000000 = 130 / 2;" "A"
+test_output  "div by one" \
+	"@0x10000000 = 65 / 1;" "A"
+test_output  "div with remainder truncates toward zero" \
+	"@0x10000000 = 200 / 3;" "B"
+test_output  "div variables" \
+	"x = 260; y = 4; @0x10000000 = x / y;" "A"
+test_output  "mod literal" \
+	"@0x10000000 = 65 % 100;" "A"
+test_output  "mod with larger dividend" \
+	"@0x10000000 = 1000 % 935;" "A"
+# div tighter than add (like mul).
+test_output  "div tighter than add" \
+	"@0x10000000 = 100 / 10 + 55;" "A"
+test_output  "mod tighter than add" \
+	"@0x10000000 = 200 % 135 + 0;" "A"
+# Signed division: two negatives → positive quotient. -10 / -2 = 5.
+test_output  "div of two negatives is positive" \
+	"@0x10000000 = (0 - 10) / (0 - 2) + 60;" "A"
+# Signed division: mixed signs → negative quotient. -10 / 2 = -5.
+test_output  "div of negative by positive is negative" \
+	"@0x10000000 = (0 - 10) / 2 + 70;" "A"
+# C99 remainder has sign of dividend. -7 % 3 = -1.
+test_output  "mod of negative follows dividend sign" \
+	"@0x10000000 = (0 - 7) % 3 + 66;" "A"
+# Compound /=
+test_output  "compound /=" \
+	"x = 260; x /= 4; @0x10000000 = x;" "A"
+# Compound %= producing a printable result: 165 % 100 = 65.
+test_output  "compound %=" \
+	"x = 165; x %= 100; @0x10000000 = x;" "A"
+# Chained div: ((1000 / 5) / 2) - 35 = 100 - 35 = 65.
+test_output  "chained /" \
+	"@0x10000000 = 1000 / 5 / 2 - 35;" "A"
+# Identity: (a/b)*b + (a%b) == a
+test_output  "divmod identity on positive" \
+	"a = 65; b = 7; q = a / b; r = a % b; @0x10000000 = q * b + r;" "A"
+
+# ============================================================================
+echo "=== Unsigned division /u and modulo %u ==="
+test_output  "unsigned div on positives matches signed" \
+	"@0x10000000 = 130 /u 2;" "A"
+test_output  "unsigned div truncates like signed" \
+	"@0x10000000 = 200 /u 3;" "B"
+test_output  "unsigned mod literal" \
+	"@0x10000000 = 65 %u 100;" "A"
+test_output  "unsigned mod with large dividend" \
+	"@0x10000000 = 1000 %u 935;" "A"
+# Unsigned div with -1 as dividend: 0xFFFFFFFF / 2 = 0x7FFFFFFF; +(- 0x7FFFFFFE)
+# Simpler: use subtraction to get a printable result.
+# 0xFFFFFFFF /u 1 = 0xFFFFFFFF = -1 signed; + 66 = 65 = 'A'.
+test_output  "unsigned -1 /u 1 treats -1 as max uint" \
+	"@0x10000000 = (0 - 1) /u 1 + 66;" "A"
+# -4 unsigned is huge; divided by -2 unsigned (also huge): 0xFFFFFFFC < 0xFFFFFFFE, so quotient = 0.
+test_output  "unsigned div where dividend < divisor is 0" \
+	"@0x10000000 = (0 - 4) /u (0 - 2) + 65;" "A"
+# Contrast signed: -4 / -2 = 2 (signed), 0 (unsigned).
+test_output  "signed div of negatives gives positive quotient" \
+	"@0x10000000 = (0 - 4) / (0 - 2) + 63;" "A"
+# Unsigned mod with -1: 0xFFFFFFFF %u 2 = 1.
+test_output  "unsigned mod of -1 by 2 is 1" \
+	"@0x10000000 = (0 - 1) %u 2 + 64;" "A"
+# Variables.
+test_output  "unsigned div with variables" \
+	"a = 260; b = 4; @0x10000000 = a /u b;" "A"
+test_output  "unsigned mod with variables" \
+	"a = 165; b = 100; @0x10000000 = a %u b;" "A"
+
+# ============================================================================
+echo "=== Short-circuit && and || ==="
+test_output  "&& both true" \
+	"@0x10000000 = (1 && 1) + 64;" "A"
+test_output  "&& false-true" \
+	"@0x10000000 = (0 && 1) + 65;" "A"
+test_output  "&& true-false" \
+	"@0x10000000 = (1 && 0) + 65;" "A"
+test_output  "&& both false" \
+	"@0x10000000 = (0 && 0) + 65;" "A"
+test_output  "|| both true" \
+	"@0x10000000 = (1 || 1) + 64;" "A"
+test_output  "|| false-true" \
+	"@0x10000000 = (0 || 1) + 64;" "A"
+test_output  "|| true-false" \
+	"@0x10000000 = (1 || 0) + 64;" "A"
+test_output  "|| both false" \
+	"@0x10000000 = (0 || 0) + 65;" "A"
+# Non-canonical non-zero is normalized to 1.
+test_output  "&& normalizes to 0/1" \
+	"@0x10000000 = (5 && 3) + 64;" "A"
+test_output  "|| normalizes to 0/1" \
+	"@0x10000000 = (7 || 0) + 64;" "A"
+# Mixing with comparisons.
+test_output  "range check with &&" \
+	"x = 5; @0x10000000 = (x > 0 && x < 10) + 64;" "A"
+test_output  "equality alternates with ||" \
+	"x = 5; @0x10000000 = (x == 0 || x == 5) + 64;" "A"
+# Short-circuit verified with ++ side effect.
+test_output  "&& false short-circuits rhs" \
+	"x = 5; y = (0 && ++x); @0x10000000 = x + 60;" "A"
+test_output  "&& true evaluates rhs" \
+	"x = 5; y = (1 && ++x); @0x10000000 = x + 59;" "A"
+test_output  "|| true short-circuits rhs" \
+	"x = 5; y = (1 || ++x); @0x10000000 = x + 60;" "A"
+test_output  "|| false evaluates rhs" \
+	"x = 5; y = (0 || ++x); @0x10000000 = x + 59;" "A"
+# Chained operators.
+test_output  "chained &&" \
+	"@0x10000000 = (1 && 1 && 1) + 64;" "A"
+test_output  "chained || with early hit" \
+	"@0x10000000 = (0 || 0 || 1) + 64;" "A"
+# Precedence: && tighter than ||. (0 || 1 && 0) = 0 || (1 && 0) = 0 || 0 = 0.
+test_output  "&& tighter than ||" \
+	"@0x10000000 = (0 || 1 && 0) + 65;" "A"
+# (1 || 0 && 0) = 1 || (0 && 0) = 1 || 0 = 1.
+test_output  "&& tighter than || (early ||)" \
+	"@0x10000000 = (1 || 0 && 0) + 64;" "A"
+# Very large RHS: exercises the jal-trampoline pattern for the short-circuit
+# forward jumps. 120 multiplications blow past the B-type ±4 KiB reach,
+# so this would fail with a raw beq/bne conditional branch but works with
+# the bne+jal / beq+jal trampoline the emitter uses.
+test_output  "&& with RHS > 4 KiB of compiled code" \
+	"@0x10000000 = (1 && ($(python3 -c "print(' * '.join(['2']*120) + ' * 0 + 1')"))) + 64;" "A"
+test_output  "|| with RHS > 4 KiB of compiled code" \
+	"@0x10000000 = (0 || ($(python3 -c "print(' * '.join(['2']*120) + ' * 0 + 1')"))) + 64;" "A"
+
+# ============================================================================
 echo ""
 echo "=== Results ==="
 echo "  $PASS passed, $FAIL failed, $TOTAL total"
