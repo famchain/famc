@@ -381,13 +381,20 @@ halt_err:
 #   1: sw_ct_pre      (compile_term — initial ws skip)
 #   2: sw_ct_star     (compile_term — after consuming '*')
 #   3: sw_ct_at       (compile_term — after consuming '@')
-#   4: sw_ce_plus     (compile_expr — before checking for '+')
+#   4: sw_ca_plus     (compile_add — before checking for '+'/'-')
 #   5: sw_cs_eq1      (compile_stmt — after IDENT, before '=')
 #   6: sw_cs_semi1    (compile_stmt — after IDENT/expr, before ';')
 #   7: sw_cs_eq2      (compile_stmt — '*' path, after addr expr, before '=')
 #   8: sw_cs_semi2    (compile_stmt — '*' path, after store, before ';')
 #   9: sw_cs_eq3      (compile_stmt — '@' path, after addr expr, before '=')
 #  10: sw_cs_semi3    (compile_stmt — '@' path, after store, before ';')
+#  11: sw_ce_xor      (compile_expr — before checking for '^')
+#  12: sw_ct_pp       (compile_unary — after consuming prefix '++')
+#  13: sw_ct_mm       (compile_unary — after consuming prefix '--')
+#  14: sw_ct_post     (compile_unary — after IDENT+lw, before peek postfix)
+#  15: sw_cs_semi_stmt (compile_stmt — before trailing ';' for compound/inc-dec stmts)
+#  16: sw_cs_pp_id    (compile_stmt — after bare '++', before IDENT)
+#  17: sw_cs_mm_id    (compile_stmt — after bare '--', before IDENT)
 # ══════════════════════════════════════════════════════════════════════════════
 skip_ws:
 sw_loop:
@@ -418,7 +425,7 @@ sw_d3:
 sw_d4:
 	addi	gp, gp, -1
 	bnez	gp, sw_d5
-	j	sw_ce_plus
+	j	sw_ca_plus
 sw_d5:
 	addi	gp, gp, -1
 	bnez	gp, sw_d6
@@ -440,7 +447,35 @@ sw_d9:
 	bnez	gp, sw_d10
 	j	sw_cs_eq3
 sw_d10:
+	addi	gp, gp, -1
+	bnez	gp, sw_d11
 	j	sw_cs_semi3
+sw_d11:
+	addi	gp, gp, -1
+	bnez	gp, sw_d12
+	j	sw_ce_xor
+sw_d12:
+	addi	gp, gp, -1
+	bnez	gp, sw_d13
+	j	sw_ct_pp
+sw_d13:
+	addi	gp, gp, -1
+	bnez	gp, sw_d14
+	j	sw_ct_mm
+sw_d14:
+	addi	gp, gp, -1
+	bnez	gp, sw_d15
+	j	sw_ct_post
+sw_d15:
+	addi	gp, gp, -1
+	bnez	gp, sw_d16
+	j	sw_cs_semi_stmt
+sw_d16:
+	addi	gp, gp, -1
+	bnez	gp, sw_d17
+	j	sw_cs_pp_id
+sw_d17:
+	j	sw_cs_mm_id
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_word — store a0 as 4 bytes at s5, advance s5.
@@ -460,6 +495,10 @@ sw_d10:
 #   11: ew_add       (emit_add — add a0,t0,a0)
 #   12: ew_sw_d      (emit_sw_deref — sw a0,0(t0))
 #   13: ew_sb_d      (emit_sb_deref — sb a0,0(t0))
+#   14: ew_sub       (emit_sub — sub a0,t0,a0)
+#   15: ew_xor       (emit_xor — xor a0,t0,a0)
+#   16: ew_addi1     (emit_addi_a0_1  — addi a0,a0,1)
+#   17: ew_addim1    (emit_addi_a0_m1 — addi a0,a0,-1)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_word:
 	sw	a0, 0(s5)
@@ -518,11 +557,30 @@ ewd_12:
 	bnez	gp, ewd_13
 	j	ew_sw_d
 ewd_13:
+	addi	gp, gp, -1
+	bnez	gp, ewd_14
 	j	ew_sb_d
+ewd_14:
+	addi	gp, gp, -1
+	bnez	gp, ewd_15
+	j	ew_sub
+ewd_15:
+	addi	gp, gp, -1
+	bnez	gp, ewd_16
+	j	ew_xor
+ewd_16:
+	addi	gp, gp, -1
+	bnez	gp, ewd_17
+	j	ew_addi1
+ewd_17:
+	j	ew_addim1
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_ident — reads an identifier at s2 into token buffer.
-#   Call sites:  0: pi_ct (compile_term),  1: pi_cs (compile_stmt)
+#   Call sites:  0: pi_ct    (compile_unary — IDENT primary)
+#                1: pi_cs    (compile_stmt — IDENT-LHS dispatch)
+#                2: pi_cs_pp (compile_stmt — '++IDENT;')
+#                3: pi_cs_mm (compile_stmt — '--IDENT;')
 # ══════════════════════════════════════════════════════════════════════════════
 parse_ident:
 	addi	s11, zero, 0
@@ -560,7 +618,15 @@ parse_ident_disp:
 	bnez	gp, pid_1
 	j	pi_ct
 pid_1:
+	addi	gp, gp, -1
+	bnez	gp, pid_2
 	j	pi_cs
+pid_2:
+	addi	gp, gp, -1
+	bnez	gp, pid_3
+	j	pi_cs_pp
+pid_3:
+	j	pi_cs_mm
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_num — parse decimal or hex at s2, returns value in a0.
@@ -722,7 +788,15 @@ lookup_or_alloc_disp:
 	bnez	gp, la_d1
 	j	la_ct
 la_d1:
+	addi	gp, gp, -1
+	bnez	gp, la_d2
 	j	la_cs
+la_d2:
+	addi	gp, gp, -1
+	bnez	gp, la_d3
+	j	la_cs_pp
+la_d3:
+	j	la_cs_mm
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_li — emit "li a0, imm". imm passed in a0.
@@ -788,9 +862,17 @@ eli_pop:
 # emit_lw_sp — emit "lw a0, offset(fp)". offset (bytes, positive) in a0.
 #   Loads the local whose byte offset from fp is a0. fp never moves, so this
 #   is unaffected by push/pop during expression evaluation.
-#   Single caller: elws_ret (compile_term)
+#   Multi-caller — caller must set gp to its dispatch site.
+#   Call sites:  0: elws_ret          (compile_unary ct_id)
+#                1: elws_cs_inc_stmt  (compile_stmt '++' inc in place)
+#                2: elws_cs_dec_stmt  (compile_stmt '--' dec in place)
+#                3: elws_cs_plus      (compile_stmt '+=')
+#                4: elws_cs_minus     (compile_stmt '-=')
+#                5: elws_cs_xor       (compile_stmt '^=')
 # ══════════════════════════════════════════════════════════════════════════════
 emit_lw_sp:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
 	# a0 = byte offset (0..frame_size-4, always positive)
 	slli	t0, a0, 20		# imm12 → bits 31:20 (hi bits truncate)
 	# Base lw a0, 0(fp):
@@ -803,14 +885,50 @@ emit_lw_sp:
 	addi	gp, zero, 3		# ew site 3 = ew_lws
 	j	emit_word
 ew_lws:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_lw_sp_disp
+
+emit_lw_sp_disp:
+	bnez	gp, elws_d1
 	j	elws_ret
+elws_d1:
+	addi	gp, gp, -1
+	bnez	gp, elws_d2
+	j	elws_cs_inc_stmt
+elws_d2:
+	addi	gp, gp, -1
+	bnez	gp, elws_d3
+	j	elws_cs_dec_stmt
+elws_d3:
+	addi	gp, gp, -1
+	bnez	gp, elws_d4
+	j	elws_cs_plus
+elws_d4:
+	addi	gp, gp, -1
+	bnez	gp, elws_d5
+	j	elws_cs_minus
+elws_d5:
+	j	elws_cs_xor
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sw_sp — emit "sw a0, offset(fp)". offset (bytes, positive) in a0.
 #   Stores a0 into the local whose byte offset from fp is passed in.
-#   Single caller: esws_ret (compile_stmt)
+#   Multi-caller — caller must set gp to its dispatch site.
+#   Call sites:  0: esws_ret           (compile_stmt IDENT = expr)
+#                1: esws_pre_inc       (compile_unary prefix '++')
+#                2: esws_pre_dec       (compile_unary prefix '--')
+#                3: esws_post_inc      (compile_unary postfix '++')
+#                4: esws_post_dec      (compile_unary postfix '--')
+#                5: esws_cs_inc_stmt   (compile_stmt '++IDENT;' / 'IDENT++;')
+#                6: esws_cs_dec_stmt   (compile_stmt '--IDENT;' / 'IDENT--;')
+#                7: esws_cs_plus       (compile_stmt 'IDENT += expr;')
+#                8: esws_cs_minus      (compile_stmt 'IDENT -= expr;')
+#                9: esws_cs_xor        (compile_stmt 'IDENT ^= expr;')
 # ══════════════════════════════════════════════════════════════════════════════
 emit_sw_sp:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
 	# a0 = byte offset (0..frame_size-4, positive)
 	# Base sw a0, 0(fp): opcode=0x23, f3=2, rs1=8(fp), rs2=10(a0)
 	#   word = 0x23 | (2<<12) | (8<<15) | (10<<20)
@@ -830,7 +948,47 @@ emit_sw_sp:
 	addi	gp, zero, 4		# ew site 4 = ew_sws
 	j	emit_word
 ew_sws:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_sw_sp_disp
+
+emit_sw_sp_disp:
+	bnez	gp, esws_d1
 	j	esws_ret
+esws_d1:
+	addi	gp, gp, -1
+	bnez	gp, esws_d2
+	j	esws_pre_inc
+esws_d2:
+	addi	gp, gp, -1
+	bnez	gp, esws_d3
+	j	esws_pre_dec
+esws_d3:
+	addi	gp, gp, -1
+	bnez	gp, esws_d4
+	j	esws_post_inc
+esws_d4:
+	addi	gp, gp, -1
+	bnez	gp, esws_d5
+	j	esws_post_dec
+esws_d5:
+	addi	gp, gp, -1
+	bnez	gp, esws_d6
+	j	esws_cs_inc_stmt
+esws_d6:
+	addi	gp, gp, -1
+	bnez	gp, esws_d7
+	j	esws_cs_dec_stmt
+esws_d7:
+	addi	gp, gp, -1
+	bnez	gp, esws_d8
+	j	esws_cs_plus
+esws_d8:
+	addi	gp, gp, -1
+	bnez	gp, esws_d9
+	j	esws_cs_minus
+esws_d9:
+	j	esws_cs_xor
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_lw_deref  — emit "lw a0, 0(a0)"
@@ -865,9 +1023,13 @@ ew_lbud:
 #   compiled program's stack).  Multi-caller (compile_expr, cs_star, cs_at),
 #   so we save/restore gp around the inner emit_word calls.
 #
-# Call sites:  0: push_ce (compile_expr '+' chain)
+# Call sites:  0: push_ca (compile_add '+'/'-' loop)
 #              1: push_cs_star (cs_star, save address)
 #              2: push_cs_at   (cs_at, save address)
+#              3: push_ce     (compile_expr '^' loop)
+#              4: push_cs_plus  (compile_stmt '+=' — save old LHS)
+#              5: push_cs_minus (compile_stmt '-=' — save old LHS)
+#              6: push_cs_xor   (compile_stmt '^=' — save old LHS)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_push_a0:
 	addi	sp, sp, -4
@@ -895,21 +1057,41 @@ ew_push_sw:
 
 emit_push_a0_disp:
 	bnez	gp, epa_d1
-	j	push_ce
+	j	push_ca
 epa_d1:
 	addi	gp, gp, -1
 	bnez	gp, epa_d2
 	j	push_cs_star
 epa_d2:
+	addi	gp, gp, -1
+	bnez	gp, epa_d3
 	j	push_cs_at
+epa_d3:
+	addi	gp, gp, -1
+	bnez	gp, epa_d4
+	j	push_ce
+epa_d4:
+	addi	gp, gp, -1
+	bnez	gp, epa_d5
+	j	push_cs_plus
+epa_d5:
+	addi	gp, gp, -1
+	bnez	gp, epa_d6
+	j	push_cs_minus
+epa_d6:
+	j	push_cs_xor
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_pop_t0 — emit "lw t0,0(sp) ; addi sp,sp,4"  (pops top of the compiled
 #   program's stack into its t0 register).  Multi-caller.
 #
-# Call sites:  0: pop_ce (compile_expr, pop LHS for add)
+# Call sites:  0: pop_ca (compile_add, pop LHS for add/sub)
 #              1: pop_cs_star (cs_star, pop address before sw)
 #              2: pop_cs_at   (cs_at, pop address before sb)
+#              3: pop_ce     (compile_expr '^' loop)
+#              4: pop_cs_plus  (compile_stmt '+=' — pop old LHS)
+#              5: pop_cs_minus (compile_stmt '-=' — pop old LHS)
+#              6: pop_cs_xor   (compile_stmt '^=' — pop old LHS)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_pop_t0:
 	addi	sp, sp, -4
@@ -937,28 +1119,174 @@ ew_pop_addi:
 
 emit_pop_t0_disp:
 	bnez	gp, ept_d1
-	j	pop_ce
+	j	pop_ca
 ept_d1:
 	addi	gp, gp, -1
 	bnez	gp, ept_d2
 	j	pop_cs_star
 ept_d2:
+	addi	gp, gp, -1
+	bnez	gp, ept_d3
 	j	pop_cs_at
+ept_d3:
+	addi	gp, gp, -1
+	bnez	gp, ept_d4
+	j	pop_ce
+ept_d4:
+	addi	gp, gp, -1
+	bnez	gp, ept_d5
+	j	pop_cs_plus
+ept_d5:
+	addi	gp, gp, -1
+	bnez	gp, ept_d6
+	j	pop_cs_minus
+ept_d6:
+	j	pop_cs_xor
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_add — emit "add a0, t0, a0"    (caller just popped LHS into t0).
 #   R-type: opcode=0x33, rd=10, rs1=5(t0), rs2=10(a0), f3=0, f7=0
-#   word = 0x33 | (10<<7) | (5<<15) | (10<<20)
-#        = 0x33 | 0x500 | 0x28000 | 0xA00000 = 0x00A28533
-# Single caller: ea_ret (compile_expr).
+#   word = 0x00A28533
+# Call sites: 0: ea_ret      (compile_add '+' loop)
+#             1: ea_cs_plus  (compile_stmt '+=')
 # ══════════════════════════════════════════════════════════════════════════════
 emit_add:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
 	lui	a0, 0xA28
 	addi	a0, a0, 0x533
 	addi	gp, zero, 11		# ew site 11 = ew_add
 	j	emit_word
 ew_add:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_add_disp
+
+emit_add_disp:
+	bnez	gp, ead_1
 	j	ea_ret
+ead_1:
+	j	ea_cs_plus
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_sub — emit "sub a0, t0, a0"    (caller popped LHS into t0).
+#   R-type: word = 0x40A28533
+# Call sites: 0: es_ret       (compile_add '-' loop)
+#             1: es_cs_minus  (compile_stmt '-=')
+# ══════════════════════════════════════════════════════════════════════════════
+emit_sub:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lui	a0, 0x40A28
+	addi	a0, a0, 0x533
+	addi	gp, zero, 14		# ew site 14 = ew_sub
+	j	emit_word
+ew_sub:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_sub_disp
+
+emit_sub_disp:
+	bnez	gp, esd_1
+	j	es_ret
+esd_1:
+	j	es_cs_minus
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_xor — emit "xor a0, t0, a0"    (caller popped LHS into t0).
+#   R-type: word = 0x00A2C533
+# Call sites: 0: ex_ret     (compile_expr '^' loop)
+#             1: ex_cs_xor  (compile_stmt '^=')
+# ══════════════════════════════════════════════════════════════════════════════
+emit_xor:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lui	a0, 0xA2C
+	addi	a0, a0, 0x533
+	addi	gp, zero, 15		# ew site 15 = ew_xor
+	j	emit_word
+ew_xor:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_xor_disp
+
+emit_xor_disp:
+	bnez	gp, exd_1
+	j	ex_ret
+exd_1:
+	j	ex_cs_xor
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_addi_a0_1 — emit "addi a0, a0, 1"
+#   opcode=0x13, rd=10, f3=0, rs1=10, imm=1
+#   word = 0x13 | (10<<7) | (10<<15) | (1<<20) = 0x00150513
+# Multi-caller. Call sites:
+#   0: eaa1_pre_inc       (compile_unary prefix '++')
+#   1: eaa1_post_inc      (compile_unary postfix '++' — emit new value)
+#   2: eaa1_post_dec_undo (compile_unary postfix '--' — restore old value)
+#   3: eaa1_cs_inc_stmt   (compile_stmt '++IDENT;' / 'IDENT++;')
+# ══════════════════════════════════════════════════════════════════════════════
+emit_addi_a0_1:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lui	a0, 0x150
+	addi	a0, a0, 0x513
+	addi	gp, zero, 16		# ew site 16 = ew_addi1
+	j	emit_word
+ew_addi1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_addi_a0_1_disp
+
+emit_addi_a0_1_disp:
+	bnez	gp, eaa1_d1
+	j	eaa1_pre_inc
+eaa1_d1:
+	addi	gp, gp, -1
+	bnez	gp, eaa1_d2
+	j	eaa1_post_inc
+eaa1_d2:
+	addi	gp, gp, -1
+	bnez	gp, eaa1_d3
+	j	eaa1_post_dec_undo
+eaa1_d3:
+	j	eaa1_cs_inc_stmt
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_addi_a0_m1 — emit "addi a0, a0, -1"
+#   opcode=0x13, rd=10, f3=0, rs1=10, imm=0xFFF (-1 sign-extended)
+#   word = 0x13 | (10<<7) | (10<<15) | (0xFFF<<20) = 0xFFF50513
+# Multi-caller. Call sites:
+#   0: eaam1_pre_dec       (compile_unary prefix '--')
+#   1: eaam1_post_inc_undo (compile_unary postfix '++' — restore old value)
+#   2: eaam1_post_dec      (compile_unary postfix '--' — emit new value)
+#   3: eaam1_cs_dec_stmt   (compile_stmt '--IDENT;' / 'IDENT--;')
+# ══════════════════════════════════════════════════════════════════════════════
+emit_addi_a0_m1:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lui	a0, 0xFFF50
+	addi	a0, a0, 0x513
+	addi	gp, zero, 17		# ew site 17 = ew_addim1
+	j	emit_word
+ew_addim1:
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	emit_addi_a0_m1_disp
+
+emit_addi_a0_m1_disp:
+	bnez	gp, eaam1_d1
+	j	eaam1_pre_dec
+eaam1_d1:
+	addi	gp, gp, -1
+	bnez	gp, eaam1_d2
+	j	eaam1_post_inc_undo
+eaam1_d2:
+	addi	gp, gp, -1
+	bnez	gp, eaam1_d3
+	j	eaam1_post_dec
+eaam1_d3:
+	j	eaam1_cs_dec_stmt
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sw_deref — emit "sw a0, 0(t0)"   (caller just popped addr into t0).
@@ -989,15 +1317,42 @@ ew_sb_d:
 	j	esb_ret
 
 # ══════════════════════════════════════════════════════════════════════════════
-# compile_term — emits code that leaves a term's value in a0.
-#   term := ('*' | '@')? primary
+# Expression compilation — precedence-climbing, three layers:
 #
-# Call sites:  0: ct_ce_first,  1: ct_ce_next
+#   compile_expr  := compile_add ('^' compile_add)*            # xor layer
+#   compile_add   := compile_unary (('+' | '-') compile_unary)*# additive layer
+#   compile_unary := ('*' | '@') compile_unary | primary       # unary layer
+#   primary       := NUM | IDENT
+#
+# Sub-step A (now): the three layers exist but only `+` is implemented (in
+# compile_add). compile_expr is a degenerate wrapper with no body and
+# compile_unary has the current compile_term logic. Sub-steps B/C/D/E will
+# fill in `-`, `^`, `++`/`--`, and compound assignment.
+#
+# Dispatch site namespaces:
+#   compile_unary:  cu_ca_first (from compile_add, before loop)
+#                   cu_ca_next  (from compile_add, loop body)
+#   compile_add:    ca_ce_first (from compile_expr; only one site today)
+#   compile_expr:   ce_cs_rhs, ce_cs_addr1, ce_cs_val1, ce_cs_addr2, ce_cs_val2
 # ══════════════════════════════════════════════════════════════════════════════
-compile_term:
-	addi	sp, sp, -8
+
+# ── compile_unary ────────────────────────────────────────────────────────────
+# emits code that leaves a unary's value in a0.
+#   unary := ('*' | '@' | '++' | '--') unary | primary ('++' | '--')?
+# Prefix/postfix '++'/'--' only apply to bare identifiers (not numbers, not
+# combined with '*'/'@' in this pass).
+#
+# Frame (12 bytes):
+#   0(sp): saved gp
+#   4(sp): deref_kind   (0=none, 1=word '*', 2=byte '@')
+#   8(sp): incdec_kind  (0=none, 1=prefix++, 2=prefix--)
+#
+# Call sites:  0: cu_ca_first,  1: cu_ca_next
+compile_unary:
+	addi	sp, sp, -12
 	sw	gp, 0(sp)
-	sw	zero, 4(sp)		# deref kind: 0=none, 1=word '*', 2=byte '@'
+	sw	zero, 4(sp)
+	sw	zero, 8(sp)
 
 	addi	gp, zero, 1
 	j	skip_ws
@@ -1005,8 +1360,17 @@ sw_ct_pre:
 	bge	s2, s3, ct_bad
 
 	lbu	t0, 0(s2)
-	addi	t1, zero, 42
-	bne	t0, t1, ct_chk_at
+	addi	t1, zero, 42		# '*'
+	beq	t0, t1, ct_is_star
+	addi	t1, zero, 64		# '@'
+	beq	t0, t1, ct_is_at
+	addi	t1, zero, '+'
+	beq	t0, t1, ct_chk_pp
+	addi	t1, zero, '-'
+	beq	t0, t1, ct_chk_mm
+	j	ct_primary
+
+ct_is_star:
 	addi	s2, s2, 1
 	addi	t1, zero, 1
 	sw	t1, 4(sp)
@@ -1014,15 +1378,46 @@ sw_ct_pre:
 	j	skip_ws
 sw_ct_star:
 	j	ct_primary
-ct_chk_at:
-	addi	t1, zero, 64
-	bne	t0, t1, ct_primary
+
+ct_is_at:
 	addi	s2, s2, 1
 	addi	t1, zero, 2
 	sw	t1, 4(sp)
 	addi	gp, zero, 3
 	j	skip_ws
 sw_ct_at:
+	j	ct_primary
+
+ct_chk_pp:
+	# Need s2+1 < s3 and s2[1] == '+'; otherwise bare '+' is a parse error
+	# (we have no unary plus).
+	addi	t2, s2, 1
+	bge	t2, s3, ct_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '+'
+	bne	t0, t1, ct_bad
+	addi	s2, s2, 2
+	addi	t1, zero, 1
+	sw	t1, 8(sp)		# incdec_kind = 1 (prefix ++)
+	addi	gp, zero, 12		# skip_ws site 12 = sw_ct_pp
+	j	skip_ws
+sw_ct_pp:
+	j	ct_primary
+
+ct_chk_mm:
+	# Bare '-' has no unary meaning here — '--' or error.
+	addi	t2, s2, 1
+	bge	t2, s3, ct_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '-'
+	bne	t0, t1, ct_bad
+	addi	s2, s2, 2
+	addi	t1, zero, 2
+	sw	t1, 8(sp)		# incdec_kind = 2 (prefix --)
+	addi	gp, zero, 13		# skip_ws site 13 = sw_ct_mm
+	j	skip_ws
+sw_ct_mm:
+	j	ct_primary
 
 ct_primary:
 	bge	s2, s3, ct_bad
@@ -1049,9 +1444,11 @@ ct_not_uc:
 	j	ct_bad
 
 ct_num:
+	# '++'/'--' are invalid on numeric literals.
+	lw	t0, 8(sp)
+	bnez	t0, ct_bad
 	j	parse_num
 pn_ct:
-	# a0 = value
 	j	emit_li
 eli_ret:
 	j	ct_deref
@@ -1063,17 +1460,125 @@ pi_ct:
 	addi	gp, zero, 0
 	j	lookup_or_alloc
 la_ct:
-	# a0 = slot
+	# a0 = byte offset of the variable. Stash it for potential reuse by
+	# prefix/postfix '++'/'--' (emit_lw_sp/emit_sw_sp both clobber a0).
+	# Frame shift by +4: gp@4, deref_kind@8, incdec_kind@12, saved off@0.
+	addi	sp, sp, -4
+	sw	a0, 0(sp)
+	addi	gp, zero, 0		# elws site 0 = elws_ret
 	j	emit_lw_sp
 elws_ret:
+	# Was there a prefix '++' or '--'?
+	lw	t0, 12(sp)
+	bnez	t0, ct_id_prefix_emit
+	# No prefix. A deref prefix ('*'/'@') means we ignore any '++'/'--'
+	# after the ident and fall through to the deref emitter.
+	lw	t0, 8(sp)
+	bnez	t0, ct_id_pop_then_deref
+	# Otherwise check for postfix '++'/'--'.
+	addi	gp, zero, 14		# skip_ws site 14 = sw_ct_post
+	j	skip_ws
+sw_ct_post:
+	bge	s2, s3, ct_id_nopf
+	lbu	t0, 0(s2)
+	addi	t1, zero, '+'
+	beq	t0, t1, ct_pf_chkpp
+	addi	t1, zero, '-'
+	beq	t0, t1, ct_pf_chkmm
+	j	ct_id_nopf
+ct_pf_chkpp:
+	addi	t2, s2, 1
+	bge	t2, s3, ct_id_nopf
+	lbu	t0, 0(t2)
+	addi	t1, zero, '+'
+	bne	t0, t1, ct_id_nopf
+	addi	s2, s2, 2
+	j	ct_do_post_inc
+ct_pf_chkmm:
+	addi	t2, s2, 1
+	bge	t2, s3, ct_id_nopf
+	lbu	t0, 0(t2)
+	addi	t1, zero, '-'
+	bne	t0, t1, ct_id_nopf
+	addi	s2, s2, 2
+	j	ct_do_post_dec
+
+ct_id_nopf:
+	# No postfix; discard saved offset and finish (deref_kind is 0 here).
+	addi	sp, sp, 4
+	j	ct_done
+
+ct_id_pop_then_deref:
+	# Prefix '*'/'@' active; discard saved offset and emit the deref.
+	addi	sp, sp, 4
 	j	ct_deref
+
+ct_id_prefix_emit:
+	# t0 holds incdec_kind (1 = ++, 2 = --). If a deref prefix is also
+	# set, the combination isn't supported in this pass.
+	lw	t1, 8(sp)
+	bnez	t1, ct_bad
+	addi	t2, zero, 1
+	beq	t0, t2, ct_pre_inc_emit
+	j	ct_pre_dec_emit
+
+ct_pre_inc_emit:
+	addi	gp, zero, 0		# eaa1 site 0 = eaa1_pre_inc
+	j	emit_addi_a0_1
+eaa1_pre_inc:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 1		# esws site 1 = esws_pre_inc
+	j	emit_sw_sp
+esws_pre_inc:
+	j	ct_done
+
+ct_pre_dec_emit:
+	addi	gp, zero, 0		# eaam1 site 0 = eaam1_pre_dec
+	j	emit_addi_a0_m1
+eaam1_pre_dec:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 2		# esws site 2 = esws_pre_dec
+	j	emit_sw_sp
+esws_pre_dec:
+	j	ct_done
+
+ct_do_post_inc:
+	# Runtime seq: a0 = old x; addi a0,a0,1; sw a0,off(fp); addi a0,a0,-1.
+	addi	gp, zero, 1		# eaa1 site 1 = eaa1_post_inc
+	j	emit_addi_a0_1
+eaa1_post_inc:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 3		# esws site 3 = esws_post_inc
+	j	emit_sw_sp
+esws_post_inc:
+	addi	gp, zero, 1		# eaam1 site 1 = eaam1_post_inc_undo
+	j	emit_addi_a0_m1
+eaam1_post_inc_undo:
+	j	ct_done
+
+ct_do_post_dec:
+	# Runtime seq: a0 = old x; addi a0,a0,-1; sw a0,off(fp); addi a0,a0,1.
+	addi	gp, zero, 2		# eaam1 site 2 = eaam1_post_dec
+	j	emit_addi_a0_m1
+eaam1_post_dec:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 4		# esws site 4 = esws_post_dec
+	j	emit_sw_sp
+esws_post_dec:
+	addi	gp, zero, 2		# eaa1 site 2 = eaa1_post_dec_undo
+	j	emit_addi_a0_1
+eaa1_post_dec_undo:
+	j	ct_done
 
 ct_deref:
 	lw	t0, 4(sp)
 	beqz	t0, ct_done
 	addi	t1, zero, 1
 	beq	t0, t1, ct_deref_w
-	# kind == 2 → byte
 	j	emit_lbu_deref
 elbud_ret:
 	j	ct_done
@@ -1087,58 +1592,131 @@ ct_bad:
 
 ct_done:
 	lw	gp, 0(sp)
+	addi	sp, sp, 12
+	j	compile_unary_disp
+
+compile_unary_disp:
+	bnez	gp, cud_1
+	j	cu_ca_first
+cud_1:
+	j	cu_ca_next
+
+# ── compile_add ──────────────────────────────────────────────────────────────
+# additive layer: compile_unary (('+' | '-') compile_unary)*
+# An op-kind byte lives at 4(sp) inside compile_add's frame (0 = add, 1 = sub),
+# set before the push/unary/pop sequence and read after to decide which
+# arithmetic emitter to call.
+# Call sites: 0: ca_ce_first (compile_expr, first unary in '^' chain)
+#             1: ca_ce_next  (compile_expr, after each '^' in loop)
+compile_add:
+	addi	sp, sp, -8
+	sw	gp, 0(sp)
+
+	addi	gp, zero, 0
+	j	compile_unary
+cu_ca_first:
+
+ca_loop:
+	addi	gp, zero, 4
+	j	skip_ws
+sw_ca_plus:
+	bge	s2, s3, ca_done
+	lbu	t0, 0(s2)
+	addi	t1, zero, '+'
+	beq	t0, t1, ca_do_add
+	addi	t1, zero, '-'
+	beq	t0, t1, ca_do_sub
+	j	ca_done
+
+ca_do_add:
+	addi	s2, s2, 1
+	sw	zero, 4(sp)		# op kind = 0 (add)
+	j	ca_binop
+ca_do_sub:
+	addi	s2, s2, 1
+	addi	t1, zero, 1
+	sw	t1, 4(sp)		# op kind = 1 (sub)
+
+ca_binop:
+	# Push LHS, compile RHS, pop LHS into t0, emit op.
+	addi	gp, zero, 0		# push site 0 = push_ca
+	j	emit_push_a0
+push_ca:
+
+	addi	gp, zero, 1
+	j	compile_unary
+cu_ca_next:
+
+	addi	gp, zero, 0		# pop site 0 = pop_ca
+	j	emit_pop_t0
+pop_ca:
+	lw	t6, 4(sp)
+	bnez	t6, ca_emit_sub
+	addi	gp, zero, 0		# ea site 0 = ea_ret
+	j	emit_add
+ea_ret:
+	j	ca_loop
+ca_emit_sub:
+	addi	gp, zero, 0		# es site 0 = es_ret
+	j	emit_sub
+es_ret:
+	j	ca_loop
+
+ca_done:
+	lw	gp, 0(sp)
 	addi	sp, sp, 8
-	j	compile_term_disp
+	j	compile_add_disp
 
-compile_term_disp:
-	bnez	gp, ctd_1
-	j	ct_ce_first
-ctd_1:
-	j	ct_ce_next
+compile_add_disp:
+	bnez	gp, cad_1
+	j	ca_ce_first
+cad_1:
+	j	ca_ce_next
 
-# ══════════════════════════════════════════════════════════════════════════════
-# compile_expr — expr := term ('+' term)*.   Result in a0.
+# ── compile_expr ─────────────────────────────────────────────────────────────
+# xor layer (wrapper for sub-step A; real body comes in sub-step C).
 #
-# Call sites:
-#   0: ce_cs_rhs    (compile_stmt, IDENT = <expr>)
-#   1: ce_cs_addr1  (compile_stmt, '*' <expr> = ...)
-#   2: ce_cs_val1   (compile_stmt, '*' ... = <expr>)
-#   3: ce_cs_addr2  (compile_stmt, '@' <expr> = ...)
-#   4: ce_cs_val2   (compile_stmt, '@' ... = <expr>)
-# ══════════════════════════════════════════════════════════════════════════════
+# Call sites (from compile_stmt):
+#   0: ce_cs_rhs    (IDENT = <expr>)
+#   1: ce_cs_addr1  ('*' <expr> = ...)
+#   2: ce_cs_val1   ('*' ... = <expr>)
+#   3: ce_cs_addr2  ('@' <expr> = ...)
+#   4: ce_cs_val2   ('@' ... = <expr>)
+#   5: ce_cs_plus   (IDENT += <expr>)
+#   6: ce_cs_minus  (IDENT -= <expr>)
+#   7: ce_cs_xor    (IDENT ^= <expr>)
 compile_expr:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
 
-	addi	gp, zero, 0
-	j	compile_term
-ct_ce_first:
+	addi	gp, zero, 0		# compile_add site 0 = ca_ce_first
+	j	compile_add
+ca_ce_first:
 
 ce_loop:
-	addi	gp, zero, 4
+	addi	gp, zero, 11		# skip_ws site 11 = sw_ce_xor
 	j	skip_ws
-sw_ce_plus:
+sw_ce_xor:
 	bge	s2, s3, ce_done
 	lbu	t0, 0(s2)
-	addi	t1, zero, '+'
+	addi	t1, zero, '^'
 	bne	t0, t1, ce_done
 	addi	s2, s2, 1
 
-	# Push LHS onto the compiled program's stack, compile RHS into a0,
-	# then pop LHS into t0 and add.
-	addi	gp, zero, 0		# push site 0 = push_ce
+	addi	gp, zero, 3		# push site 3 = push_ce
 	j	emit_push_a0
 push_ce:
 
-	addi	gp, zero, 1
-	j	compile_term
-ct_ce_next:
+	addi	gp, zero, 1		# compile_add site 1 = ca_ce_next
+	j	compile_add
+ca_ce_next:
 
-	addi	gp, zero, 0		# pop site 0 = pop_ce
+	addi	gp, zero, 3		# pop site 3 = pop_ce
 	j	emit_pop_t0
 pop_ce:
-	j	emit_add
-ea_ret:
+	addi	gp, zero, 0		# ex site 0 = ex_ret
+	j	emit_xor
+ex_ret:
 	j	ce_loop
 
 ce_done:
@@ -1162,47 +1740,84 @@ ced_3:
 	bnez	gp, ced_4
 	j	ce_cs_addr2
 ced_4:
+	addi	gp, gp, -1
+	bnez	gp, ced_5
 	j	ce_cs_val2
+ced_5:
+	addi	gp, gp, -1
+	bnez	gp, ced_6
+	j	ce_cs_plus
+ced_6:
+	addi	gp, gp, -1
+	bnez	gp, ced_7
+	j	ce_cs_minus
+ced_7:
+	j	ce_cs_xor
 
 # ══════════════════════════════════════════════════════════════════════════════
 # compile_stmt — compile one statement. Non-ws known to be at s2.
+#
+# Grammar:
+#   stmt := '*' expr '=' expr ';'
+#         | '@' expr '=' expr ';'
+#         | '++' IDENT ';'
+#         | '--' IDENT ';'
+#         | IDENT '='  expr ';'
+#         | IDENT '+=' expr ';'
+#         | IDENT '-=' expr ';'
+#         | IDENT '^=' expr ';'
+#         | IDENT '++' ';'
+#         | IDENT '--' ';'
+#
 # Single caller: cs_after (compile_loop)
 # ══════════════════════════════════════════════════════════════════════════════
 compile_stmt:
 	lbu	t0, 0(s2)
-	addi	t1, zero, 42
+	addi	t1, zero, 42		# '*'
 	beq	t0, t1, cs_star
-	addi	t1, zero, 64
+	addi	t1, zero, 64		# '@'
 	beq	t0, t1, cs_at
+	addi	t1, zero, '+'
+	beq	t0, t1, cs_chk_pre_pp
+	addi	t1, zero, '-'
+	beq	t0, t1, cs_chk_pre_mm
 
-	# IDENT '=' expr ';'
+	# IDENT <op> ... ';'
 	addi	gp, zero, 1
 	j	parse_ident
 pi_cs:
 	addi	gp, zero, 1
 	j	lookup_or_alloc
 la_cs:
-	# Spill slot to famc's stack (compile_expr → lookup_or_alloc clobbers t6)
+	# Spill slot to famc's stack.
 	addi	sp, sp, -4
 	sw	a0, 0(sp)
 
 	addi	gp, zero, 5
 	j	skip_ws
 sw_cs_eq1:
+	bge	s2, s3, cs_bad
 	lbu	t0, 0(s2)
 	addi	t1, zero, '='
-	bne	t0, t1, cs_bad
-	addi	s2, s2, 1
+	beq	t0, t1, cs_op_eq
+	addi	t1, zero, '+'
+	beq	t0, t1, cs_op_plus
+	addi	t1, zero, '-'
+	beq	t0, t1, cs_op_minus
+	addi	t1, zero, '^'
+	beq	t0, t1, cs_op_xor
+	j	cs_bad
 
+cs_op_eq:
+	addi	s2, s2, 1
 	addi	gp, zero, 0
 	j	compile_expr
 ce_cs_rhs:
-	# a0 = value; emit sw a0, -(slot+1)*4(sp)
 	lw	a0, 0(sp)
 	addi	sp, sp, 4
+	addi	gp, zero, 0		# esws site 0 = esws_ret
 	j	emit_sw_sp
 esws_ret:
-
 	addi	gp, zero, 6
 	j	skip_ws
 sw_cs_semi1:
@@ -1211,6 +1826,210 @@ sw_cs_semi1:
 	bne	t0, t1, cs_bad
 	addi	s2, s2, 1
 	j	cs_done
+
+# ── '+' after IDENT: distinguish '+=' and '++' ───────────────────────────────
+cs_op_plus:
+	addi	t2, s2, 1
+	bge	t2, s3, cs_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '='
+	beq	t0, t1, cs_compound_add
+	addi	t1, zero, '+'
+	beq	t0, t1, cs_ident_post_inc
+	j	cs_bad
+
+cs_op_minus:
+	addi	t2, s2, 1
+	bge	t2, s3, cs_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '='
+	beq	t0, t1, cs_compound_sub
+	addi	t1, zero, '-'
+	beq	t0, t1, cs_ident_post_dec
+	j	cs_bad
+
+cs_op_xor:
+	# Must be '^=' (bare '^' isn't a statement operator).
+	addi	t2, s2, 1
+	bge	t2, s3, cs_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '='
+	bne	t0, t1, cs_bad
+	j	cs_compound_xor
+
+# ── IDENT '+=' expr ; ────────────────────────────────────────────────────────
+cs_compound_add:
+	addi	s2, s2, 2
+	lw	a0, 0(sp)
+	addi	gp, zero, 3		# elws site 3 = elws_cs_plus
+	j	emit_lw_sp
+elws_cs_plus:
+	addi	gp, zero, 4		# push site 4 = push_cs_plus
+	j	emit_push_a0
+push_cs_plus:
+	addi	gp, zero, 5		# ce site 5 = ce_cs_plus
+	j	compile_expr
+ce_cs_plus:
+	addi	gp, zero, 4		# pop site 4 = pop_cs_plus
+	j	emit_pop_t0
+pop_cs_plus:
+	addi	gp, zero, 1		# ea site 1 = ea_cs_plus
+	j	emit_add
+ea_cs_plus:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 7		# esws site 7 = esws_cs_plus
+	j	emit_sw_sp
+esws_cs_plus:
+	addi	gp, zero, 15		# skip_ws site 15 = sw_cs_semi_stmt
+	j	skip_ws
+
+# ── IDENT '-=' expr ; ────────────────────────────────────────────────────────
+cs_compound_sub:
+	addi	s2, s2, 2
+	lw	a0, 0(sp)
+	addi	gp, zero, 4		# elws site 4 = elws_cs_minus
+	j	emit_lw_sp
+elws_cs_minus:
+	addi	gp, zero, 5		# push site 5 = push_cs_minus
+	j	emit_push_a0
+push_cs_minus:
+	addi	gp, zero, 6		# ce site 6 = ce_cs_minus
+	j	compile_expr
+ce_cs_minus:
+	addi	gp, zero, 5		# pop site 5 = pop_cs_minus
+	j	emit_pop_t0
+pop_cs_minus:
+	addi	gp, zero, 1		# es site 1 = es_cs_minus
+	j	emit_sub
+es_cs_minus:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 8		# esws site 8 = esws_cs_minus
+	j	emit_sw_sp
+esws_cs_minus:
+	addi	gp, zero, 15
+	j	skip_ws
+
+# ── IDENT '^=' expr ; ────────────────────────────────────────────────────────
+cs_compound_xor:
+	addi	s2, s2, 2
+	lw	a0, 0(sp)
+	addi	gp, zero, 5		# elws site 5 = elws_cs_xor
+	j	emit_lw_sp
+elws_cs_xor:
+	addi	gp, zero, 6		# push site 6 = push_cs_xor
+	j	emit_push_a0
+push_cs_xor:
+	addi	gp, zero, 7		# ce site 7 = ce_cs_xor
+	j	compile_expr
+ce_cs_xor:
+	addi	gp, zero, 6		# pop site 6 = pop_cs_xor
+	j	emit_pop_t0
+pop_cs_xor:
+	addi	gp, zero, 1		# ex site 1 = ex_cs_xor
+	j	emit_xor
+ex_cs_xor:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 9		# esws site 9 = esws_cs_xor
+	j	emit_sw_sp
+esws_cs_xor:
+	addi	gp, zero, 15
+	j	skip_ws
+
+# ── IDENT '++' ; (postfix, value discarded) ──────────────────────────────────
+cs_ident_post_inc:
+	addi	s2, s2, 2
+	lw	a0, 0(sp)
+	addi	gp, zero, 1		# elws site 1 = elws_cs_inc_stmt
+	j	emit_lw_sp
+
+# ── IDENT '--' ; (postfix, value discarded) ──────────────────────────────────
+cs_ident_post_dec:
+	addi	s2, s2, 2
+	lw	a0, 0(sp)
+	addi	gp, zero, 2		# elws site 2 = elws_cs_dec_stmt
+	j	emit_lw_sp
+
+# Shared tail for '++x;' / 'x++;' (load already emitted, offset at 0(sp)).
+elws_cs_inc_stmt:
+	addi	gp, zero, 3		# eaa1 site 3 = eaa1_cs_inc_stmt
+	j	emit_addi_a0_1
+eaa1_cs_inc_stmt:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 5		# esws site 5 = esws_cs_inc_stmt
+	j	emit_sw_sp
+esws_cs_inc_stmt:
+	addi	gp, zero, 15
+	j	skip_ws
+
+# Shared tail for '--x;' / 'x--;'.
+elws_cs_dec_stmt:
+	addi	gp, zero, 3		# eaam1 site 3 = eaam1_cs_dec_stmt
+	j	emit_addi_a0_m1
+eaam1_cs_dec_stmt:
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	addi	gp, zero, 6		# esws site 6 = esws_cs_dec_stmt
+	j	emit_sw_sp
+esws_cs_dec_stmt:
+	addi	gp, zero, 15
+	j	skip_ws
+
+# Shared trailing-';' check for every path that jumps to skip_ws site 15.
+sw_cs_semi_stmt:
+	bge	s2, s3, cs_bad
+	lbu	t0, 0(s2)
+	addi	t1, zero, ';'
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 1
+	j	cs_done
+
+# ── '++' IDENT ; (bare prefix statement) ─────────────────────────────────────
+cs_chk_pre_pp:
+	addi	t2, s2, 1
+	bge	t2, s3, cs_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '+'
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 2
+	addi	gp, zero, 16		# skip_ws site 16 = sw_cs_pp_id
+	j	skip_ws
+sw_cs_pp_id:
+	addi	gp, zero, 2		# parse_ident site 2 = pi_cs_pp
+	j	parse_ident
+pi_cs_pp:
+	addi	gp, zero, 2		# lookup_or_alloc site 2 = la_cs_pp
+	j	lookup_or_alloc
+la_cs_pp:
+	addi	sp, sp, -4
+	sw	a0, 0(sp)
+	addi	gp, zero, 1		# elws site 1 = elws_cs_inc_stmt (shared)
+	j	emit_lw_sp
+
+# ── '--' IDENT ; (bare prefix statement) ─────────────────────────────────────
+cs_chk_pre_mm:
+	addi	t2, s2, 1
+	bge	t2, s3, cs_bad
+	lbu	t0, 0(t2)
+	addi	t1, zero, '-'
+	bne	t0, t1, cs_bad
+	addi	s2, s2, 2
+	addi	gp, zero, 17		# skip_ws site 17 = sw_cs_mm_id
+	j	skip_ws
+sw_cs_mm_id:
+	addi	gp, zero, 3		# parse_ident site 3 = pi_cs_mm
+	j	parse_ident
+pi_cs_mm:
+	addi	gp, zero, 3		# lookup_or_alloc site 3 = la_cs_mm
+	j	lookup_or_alloc
+la_cs_mm:
+	addi	sp, sp, -4
+	sw	a0, 0(sp)
+	addi	gp, zero, 2		# elws site 2 = elws_cs_dec_stmt (shared)
+	j	emit_lw_sp
 
 cs_star:
 	addi	s2, s2, 1

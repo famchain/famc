@@ -247,6 +247,73 @@ test_output  "32 variable slots" \
 	"A"
 
 # ============================================================================
+echo "=== Xor (^) ==="
+test_output  "xor literals" \
+	"@0x10000000 = 0x50 ^ 0x11;" "A"
+test_output  "xor variables" \
+	"a = 0x41; b = 0x05; @0x10000000 = a ^ b ^ b;" "A"
+test_output  "xor three-operand chain" \
+	"@0x10000000 = 65 ^ 7 ^ 7;" "A"
+# '+' binds tighter than '^': (60+5) ^ 0 = 65 = 'A'.
+test_output  "xor lower precedence than add" \
+	"@0x10000000 = 60 + 5 ^ 0;" "A"
+test_output  "xor mixed with subtraction" \
+	"@0x10000000 = 70 - 1 ^ 4;" "A"
+
+# ============================================================================
+echo "=== Prefix/postfix ++ -- ==="
+# Prefix ++: value after increment.
+test_output  "prefix ++ yields new value" \
+	"x = 50; @0x10000000 = ++x;" "3"
+# Postfix ++: value is old, variable updated.
+test_output  "postfix ++ yields old value" \
+	"x = 50; @0x10000000 = x++; @0x10000000 = x;" "23"
+# Prefix --.
+test_output  "prefix -- yields new value" \
+	"x = 52; @0x10000000 = --x;" "3"
+# Postfix --.
+test_output  "postfix -- yields old value" \
+	"x = 52; @0x10000000 = x--; @0x10000000 = x;" "43"
+# Mixed postfix ++ with '+': (60) + (5) = 65='A', and a,b updated.
+test_output  "postfix ++ in add expression" \
+	"a = 60; b = 5; @0x10000000 = a++ + b++;" "A"
+# Two postfix increments in sequence, variable fully updated.
+test_output  "repeated postfix ++ updates variable" \
+	"x = 63; @0x10000000 = x++; @0x10000000 = x++; @0x10000000 = x;" "?@A"
+# Prefix ++ inside a longer add chain: (1+1)+(50)+12 = 64='@', x=2 after.
+test_output  "prefix ++ inside add chain" \
+	"x = 1; @0x10000000 = ++x + 50 + 12;" "@"
+
+# ============================================================================
+echo "=== Compound assignments ==="
+test_output  "x += literal" \
+	"x = 60; x += 5; @0x10000000 = x;" "A"
+test_output  "x += expr" \
+	"x = 60; y = 3; x += y + 2; @0x10000000 = x;" "A"
+test_output  "x -= literal" \
+	"x = 70; x -= 5; @0x10000000 = x;" "A"
+test_output  "x ^= literal" \
+	"x = 0x43; x ^= 0x02; @0x10000000 = x;" "A"
+test_output  "chained compound assigns" \
+	"x = 10; x += 20; x += 30; x += 5; @0x10000000 = x;" "A"
+# The case that triggered the original hang report.
+test_output  "the x += 1 repro" \
+	"x = 2; x += 1; y = x + 48; @0x10000000 = y;" "3"
+
+# ============================================================================
+echo "=== Bare inc/dec statements ==="
+test_output  "bare ++x statement" \
+	"x = 64; ++x; @0x10000000 = x;" "A"
+test_output  "bare x++ statement" \
+	"x = 64; x++; @0x10000000 = x;" "A"
+test_output  "bare --x statement" \
+	"x = 66; --x; @0x10000000 = x;" "A"
+test_output  "bare x-- statement" \
+	"x = 66; x--; @0x10000000 = x;" "A"
+test_output  "repeated bare ++x" \
+	"x = 60; ++x; ++x; ++x; ++x; ++x; @0x10000000 = x;" "A"
+
+# ============================================================================
 echo ""
 echo "=== Results ==="
 echo "  $PASS passed, $FAIL failed, $TOTAL total"
