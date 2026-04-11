@@ -756,6 +756,11 @@ test_output  "ternary short-circuits else branch only" \
 # Ternary in a larger expression.
 test_output  "ternary result participates in addition" \
 	"@0x10000000 = (1 ? 60 : 0) + 5;" "A"
+# No-else ternary on false cond defaults to 0.
+test_output  "no-else ternary false path defaults to 0" \
+	"x = 0; y = x ? 7; @0x10000000 = y + 65;" "A"
+test_output  "no-else ternary true path returns value" \
+	"x = 1; y = x ? 1; @0x10000000 = y + 64;" "A"
 
 # ============================================================================
 echo "=== Assignment as expression (Pratt) ==="
@@ -840,6 +845,276 @@ test_output  "double-nested block via deref store target" \
 	"p = 0x10000000; @p = { { 65 } };" "A"
 
 # ============================================================================
+echo "=== Char literals ==="
+test_output  "single char 'A'" \
+	"@0x10000000 = 'A';" "A"
+test_output  "char in addition" \
+	"@0x10000000 = 'A' + 1;" "B"
+test_output  "newline escape '\\n'" \
+	"@0x10000000 = 'A'; @0x10000000 = '\n';" "$(printf 'A\n')"
+test_output  "tab escape" \
+	"@0x10000000 = 'A'; @0x10000000 = '\t'; @0x10000000 = 'B';" "$(printf 'A\tB')"
+test_output  "backslash escape" \
+	"@0x10000000 = '\\\\';" '\'
+test_output  "single-quote escape" \
+	"@0x10000000 = '\\'';" "'"
+test_output  "char compared" \
+	"x = 'Z'; @0x10000000 = x == 'Z' ? 65 : 66;" "A"
+test_output  "backspace escape \\b" \
+	"@0x10000000 = 'A'; @0x10000000 = '\b'; @0x10000000 = 'B';" "$(printf 'A\bB')"
+test_output  "form feed escape \\f" \
+	"@0x10000000 = 'A'; @0x10000000 = '\f';" "$(printf 'A\f')"
+test_output  "bell escape \\a" \
+	"@0x10000000 = '\a';" "$(printf '\a')"
+test_output  "vertical tab \\v" \
+	"@0x10000000 = 'A'; @0x10000000 = '\v';" "$(printf 'A\v')"
+test_output  "escape char \\e" \
+	"@0x10000000 = '\e';" "$(printf '\033')"
+test_output  "double-quote escape in char literal" \
+	'@0x10000000 = '"'"'\"'"'"';' '"'
+
+# ============================================================================
+echo "=== Compound assigns in expression context ==="
+test_output  "(x += 3) as expression" \
+	"x = 5; @0x10000000 = (x += 3) + 57;" "A"
+test_output  "x -= n inside block" \
+	"x = 100; y = { x -= 35; x }; @0x10000000 = y;" "A"
+test_output  "x *= n" \
+	"x = 13; { x *= 5 }; @0x10000000 = x;" "A"
+test_output  "x /= n" \
+	"x = 325; { x /= 5 }; @0x10000000 = x;" "A"
+test_output  "x %= n" \
+	"x = 132; { x %= 67 }; @0x10000000 = x;" "A"
+test_output  "x &= mask" \
+	"x = 0x7FF; { x &= 0x41 }; @0x10000000 = x;" "A"
+test_output  "x |= bits" \
+	"x = 0x40; { x |= 1 }; @0x10000000 = x;" "A"
+test_output  "x ^= bits" \
+	"x = 0x60; { x ^= 0x21 }; @0x10000000 = x;" "A"
+test_output  "x <<= shift in expression" \
+	"x = 4; { x <<= 2 }; @0x10000000 = x + 49;" "A"
+test_output  "x >>= shift in expression" \
+	"x = 260; { x >>= 2 }; @0x10000000 = x;" "A"
+test_output  "x >>u= unsigned shift in expression" \
+	"x = 260; { x >>u= 2 }; @0x10000000 = x;" "A"
+# Compound assigns on deref targets — byte and word.
+test_output  "@deref += on heap byte" \
+	"p = 0x80005000; @p = 60; @p += 5; r = @p; @0x10000000 = r;" "A"
+test_output  "@deref *= on heap byte" \
+	"p = 0x80005004; @p = 13; @p *= 5; r = @p; @0x10000000 = r;" "A"
+test_output  "*deref += on heap word" \
+	"p = 0x80005008; *p = 60; *p += 5; r = *p; @0x10000000 = r;" "A"
+test_output  "*deref *= on heap word" \
+	"p = 0x8000500C; *p = 13; *p *= 5; r = *p; @0x10000000 = r;" "A"
+test_output  "*deref &= on heap word" \
+	"p = 0x80005010; *p = 0x7F; *p &= 0x41; r = *p; @0x10000000 = r;" "A"
+# Unary logical NOT.
+test_output  "!0 is 1" \
+	"x = 0; @0x10000000 = !x + 64;" "A"
+test_output  "!5 is 0" \
+	"x = 5; @0x10000000 = !x + 65;" "A"
+test_output  "!!x double-negate" \
+	"x = 5; @0x10000000 = !!x + 64;" "A"
+test_output  "! in ternary condition" \
+	"x = 0; @0x10000000 = !x ? 65 : 66;" "A"
+test_output  "! on comparison result" \
+	"x = 5; y = 3; @0x10000000 = !(x > y) + 66;" "B"
+
+# ============================================================================
+echo "=== Loop / break ==="
+# Simple loop that breaks immediately.
+test_output  "loop break const" \
+	"@0x10000000 = loop { break 65; };" "A"
+# Loop that counts up to a bound.
+test_output  "loop sum 1..10" \
+	"y = 0; x = loop { y += 1; y > 10 ? break y + 54; }; @0x10000000 = x;" "A"
+# The full user repro: sum 1..100 == 5050.
+test_output  "user repro — sum 1..100 via loop+break" \
+	"$(cat <<'EOT'
+y = 0;
+x = 0;
+x = loop {
+    ++y > 100 ? break x;
+    x += y;
+};
+x == 5050 ? @0x10000000 = 'Y' : @0x10000000 = 'N';
+EOT
+)" "Y"
+# Break with no explicit value (defaults to 0).
+test_output  "break without value" \
+	"x = loop { break; }; @0x10000000 = x + 65;" "A"
+# Loop inside an expression.
+test_output  "loop result used in addition" \
+	"@0x10000000 = 60 + loop { break 5; };" "A"
+# continue skips the rest of the loop body.
+test_output  "continue skips rest of body" \
+	"$(cat <<'EOT'
+i = 0; sum = 0;
+sum = loop {
+    ++i > 10 ? break sum;
+    i == 5 ? continue;
+    sum += i;
+};
+@0x10000000 = sum == 50 ? 'A' : 'N';
+EOT
+)" "A"
+test_output  "continue in a fall-through (no else) ternary" \
+	"$(cat <<'EOT'
+i = 0;
+loop {
+    ++i > 7 ? break 0;
+    i % 2 == 0 ? continue;
+    @0x10000000 = 48 + i;
+};
+EOT
+)" "1357"
+test_output  "continue target is innermost loop only" \
+	"$(cat <<'EOT'
+outer = 0; hits = 0;
+loop {
+    outer += 1;
+    loop {
+        hits += 1;
+        hits % 3 == 0 ? break 0;
+        continue;
+    };
+    outer > 2 ? break 0;
+};
+@0x10000000 = hits == 9 ? 'A' : 'N';
+EOT
+)" "A"
+
+# Nested loops: the inner break only exits the inner loop.
+test_output  "nested loops — inner break doesn't escape outer" \
+	"$(cat <<'EOT'
+o = 0;
+total = 0;
+total = loop {
+    o += 1;
+    inner = loop { break 7; };
+    total += inner;
+    o > 4 ? break total + 30;
+};
+@0x10000000 = total;
+EOT
+)" "A"
+
+# ============================================================================
+echo "=== For loops ==="
+test_output  "exclusive range body" \
+	"for i in 0..3 { @0x10000000 = 'A' + i; };" "ABC"
+test_output  "inclusive range body" \
+	"for i in 0..=3 { @0x10000000 = 'A' + i; };" "ABCD"
+test_output  "for as expression — inclusive last value" \
+	"v = for x in 0..=10 { x }; @0x10000000 = v + 55;" "A"
+test_output  "for as expression — exclusive last value" \
+	"v = for x in 0..5 { x }; @0x10000000 = v + 61;" "A"
+test_output  "empty range evaluates to 0" \
+	"v = for x in 0..0 { x + 1 }; @0x10000000 = v + 65;" "A"
+test_output  "sum 1..=100 via for" \
+	"s = 0; for i in 1..=100 { s += i; }; @0x10000000 = s == 5050 ? 'Y' : 'N';" "Y"
+test_output  "break with value inside for" \
+	"v = for x in 0..100 { x > 5 ? break x + 58; }; @0x10000000 = v;" "@"
+test_output  "continue in for skips body tail" \
+	"s = 0; for i in 0..=10 { i % 2 == 0 ? continue; s += i; }; @0x10000000 = s == 25 ? 'Y' : 'N';" "Y"
+test_output  "shadowing — outer x unchanged after for" \
+	"x = 5; for x in 0..3 { }; @0x10000000 = x + 60;" "A"
+test_output  "shadowing — inner x visible in body" \
+	"x = 9; for x in 0..3 { @0x10000000 = '0' + x; }; @0x10000000 = 'A';" "012A"
+test_output  "nested for loops" \
+	"for i in 0..3 { for j in 0..2 { @0x10000000 = 'A' + i + j; }; };" "ABBCCD"
+test_output  "non-literal range bounds" \
+	"lo = 2; hi = 5; v = for x in lo..hi { x }; @0x10000000 = v + 61;" "A"
+test_output  "inclusive with expression bounds" \
+	"lo = 1; hi = 4; for i in lo..=hi { @0x10000000 = '0' + i; };" "1234"
+
+# ============================================================================
+echo "=== Functions ==="
+test_output  "parameterless fn with side-effect body" \
+	"fn greet() { @0x10000000 = 65; } greet();" "A"
+test_output  "fn returns last expression" \
+	"fn five() { 65 } @0x10000000 = five();" "A"
+test_output  "fn with one arg" \
+	"fn add1(x) { x + 1 } @0x10000000 = add1(64);" "A"
+test_output  "fn with two args" \
+	"fn add(x, y) { x + y } @0x10000000 = add(30, 35);" "A"
+test_output  "fn with 8 args" \
+	"fn sum(a,b,c,d,e,f,g,h) { a+b+c+d+e+f+g+h } @0x10000000 = sum(1,2,3,4,5,6,7,37);" "A"
+test_output  "user repro — my_fun(10,20,95)" \
+	"fn my_fun(x, y, z) { a = x + y; z - a } @0x10000000 = my_fun(10, 20, 95);" "A"
+test_output  "explicit return" \
+	"fn f(x) { return x + 1; 99 } @0x10000000 = f(64);" "A"
+test_output  "early return in ternary" \
+	"fn abs(x) { x < 0 ? return 0 - x; x } @0x10000000 = abs(0 - 65);" "A"
+test_output  "recursive factorial" \
+	"fn fact(n) { n < 2 ? return 1; n * fact(n - 1) } @0x10000000 = fact(5) + 1;" "$(printf 'y')"
+test_output  "nested function calls" \
+	"fn inc(x) { x + 1 } fn dbl(x) { x + x } @0x10000000 = inc(dbl(32));" "A"
+test_output  "fn calls fn" \
+	"fn a(x) { x + 1 } fn b(x) { a(x) + 1 } @0x10000000 = b(63);" "A"
+test_output  "fn used in compound expression" \
+	"fn sq(x) { x * x } @0x10000000 = sq(8) + 1;" "A"
+test_output  "recursive fibonacci" \
+	"fn fib(n) { n < 2 ? return n; fib(n - 1) + fib(n - 2) } @0x10000000 = fib(10) + 10;" "A"
+# Error cases
+test_error "undefined function" \
+	"f();" \
+	"Error:1:1 undefined function"
+test_error "wrong arg count — too few" \
+	"fn f(x, y) { x + y } f(1);" \
+	"Error:1:26 wrong number of arguments"
+test_error "wrong arg count — too many" \
+	"fn f(x) { x } f(1, 2);" \
+	"Error:1:22 wrong number of arguments"
+test_error "more than 8 params" \
+	"fn f(a, b, c, d, e, f, g, h, i) { }" \
+	"Error:1:30 'fn' takes at most 8 args"
+test_error "fn name is a keyword" \
+	"fn loop() { }" \
+	"Error:1:8 Expected identifier found '('"
+test_error "redefined function" \
+	"fn f() { } fn f() { }" \
+	"Error:1:16 'fn' already defined"
+test_error "return outside function" \
+	"return 5;" \
+	"Error:1:7 'return' outside function"
+
+# ============================================================================
+echo "=== Comments ==="
+test_output  "line comment before statement" \
+	"// greet
+@0x10000000 = 65;" "A"
+test_output  "line comment trailing a statement" \
+	"@0x10000000 = 66; // emit B" "B"
+test_output  "line comment at EOF no newline" \
+	"@0x10000000 = 67; // end" "C"
+test_output  "block comment on one line" \
+	"/* pick */ @0x10000000 = 68;" "D"
+test_output  "block comment inside expression" \
+	"x = 26 /* plus */ + 39; @0x10000000 = x;" "A"
+test_output  "multiline block comment" \
+	"/* line1
+line2
+line3 */ @0x10000000 = 69;" "E"
+test_output  "nested block comment — 2 levels" \
+	"/* outer /* inner */ still outer */ @0x10000000 = 70;" "F"
+test_output  "nested block comment — 3 levels" \
+	"/* a /* b /* c */ b */ a */ @0x10000000 = 71;" "G"
+test_output  "comment between tokens in a for loop" \
+	"for /*i*/ i /*in*/ in /*lo*/ 0 /*range*/ .. /*hi*/ 3 /*body*/ { @0x10000000 = 'A' + i; /*ok*/ };" "ABC"
+test_output  "division operator isn't mistaken for comment" \
+	"@0x10000000 = 130 / 2;" "A"
+test_output  "// inside a block expression" \
+	"v = { // commented
+	65 }; @0x10000000 = v;" "A"
+test_error "unterminated block comment" \
+	"/* oops" \
+	"Error:2:1 unterminated block comment"
+test_error "unterminated nested block comment" \
+	"/* a /* b */ rest" \
+	"Error:2:1 unterminated block comment"
+
+# ============================================================================
 echo "=== Error messages ==="
 # Missing ';' at end of input and mid-program. Line/col are derived by walking
 # the input buffer, so programs spanning multiple lines exercise line counting.
@@ -891,6 +1166,56 @@ test_error "'++' on numeric literal" \
 test_error "line tracking — error on line 3" \
 	"$(printf 'a = 1;\nb = 2;\nc = 3')" \
 	"Error:4:1 Expected ';' at end of input"
+# for-loop parse errors
+test_error "for without ident" \
+	"for 3 in 0..3 { };" \
+	"Error:1:5 Expected identifier found '3'"
+test_error "for without 'in'" \
+	"for i 0..3 { };" \
+	"Error:1:7 Expected 'in' found '0'"
+test_error "for without '..'" \
+	"for i in 0 { };" \
+	"Error:1:12 Expected '..' / '..=' found '{'"
+test_error "loop as for-var name rejected" \
+	"for loop in 0..3 { };" \
+	"Error:1:5 Expected identifier found 'l'"
+test_error "digit-start statement not a var name" \
+	"0x10000000 = '\n';" \
+	"Error:1:13 left of '=' is not an lvalue"
+test_error "unknown char-literal escape" \
+	"@0x10000000 = '\q';" \
+	"Error:1:17 unknown escape sequence"
+# Undefined-variable detection: reads of names that haven't been assigned yet
+# are rejected. First use on the LHS of a bare '=' is still a declaration.
+test_error "undefined var on RHS of assignment" \
+	"y = z;" \
+	"Error:1:5 undefined variable"
+test_error "undefined var in expression" \
+	"x = 5; @0x10000000 = y + 1;" \
+	"Error:1:22 undefined variable"
+test_error "undefined var inside for body" \
+	"for i in 0..3 { qq + 1; };" \
+	"Error:1:17 undefined variable"
+test_error "undefined var inside block" \
+	"v = { r };" \
+	"Error:1:7 undefined variable"
+test_error "compound '+=' on undef var" \
+	"y += 3;" \
+	"Error:1:1 undefined variable"
+test_error "compound '*=' on undef var" \
+	"q *= 2;" \
+	"Error:1:1 undefined variable"
+test_error "'y++;' on undef var" \
+	"y++;" \
+	"Error:1:1 undefined variable"
+test_error "'++y;' on undef var" \
+	"++z;" \
+	"Error:1:3 undefined variable"
+# Break-list overflow (>32 breaks in one loop). Generate 35 breaks via shell
+# so the program is large but the error message is deterministic.
+test_error "break overflow in single loop" \
+	"$(printf 'loop {\n'; for i in $(seq 1 35); do printf '    %d ? break 0;\n' $i; done; printf '};\n')" \
+	"Error:34:17 loop has too many 'break's"
 
 # ============================================================================
 echo ""
