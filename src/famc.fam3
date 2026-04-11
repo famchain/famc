@@ -33,9 +33,15 @@
 #  16:  andi  gp, gp, -4                # ... to 4 bytes
 #  20:  lui   sp, 0x10                  # sp = 0x10000 (= 64 KB)
 #  24:  add   sp, sp, gp                # sp = gp + 64 KB
-#  28:  <compiled statements ...>
-#   N:  jal   zero, 0                  # j . (hang)
-# N+4:  data_end:
+#  28:  addi  fp, sp, 0                 # fp = sp (frame pointer)
+#  32:  addi  sp, sp, -2048              # reserve 2 KB variable frame
+#  36:  <compiled statements ...>
+#   N:  lui   t0, 0x100                  # QEMU poweroff sequence:
+# N+4:  lui   t1, 0x5                    #   *0x100000 = 0x5555
+# N+8:  addi  t1, t1, 0x555
+# N+12: sw    t1, 0(t0)
+# N+16: jal   zero, 0                   # safety hang after poweroff
+# N+20: data_end:
 #
 # The addi at offset 8 has its imm12 patched at the end of emission so that
 # auipc_pc + imm = data_end. data_end is the byte immediately after the hang
@@ -230,7 +236,43 @@ cs_after:
 	j	compile_loop
 compile_done:
 
-# ── Phase 4: emit epilogue — j . = jal zero, 0 = 0x0000006F ────────────────
+# ── Phase 4: emit epilogue — QEMU-virt poweroff + safety hang ──────────────
+# Writes the magic value 0x5555 to the "test" device at 0x00100000, which
+# causes qemu-system-riscv32 -machine virt to exit.  Followed by `j .` as a
+# safety net in case we're running on something that doesn't honour the test
+# device (the CPU will then just park there).
+#
+#   lui  t0, 0x100        # t0 = 0x00100000 (test device)     0x001002B7
+#   lui  t1, 0x5          # t1 = 0x00005000                    0x00005337
+#   addi t1, t1, 0x555    # t1 = 0x00005555                    0x55530313
+#   sw   t1, 0(t0)                                             0x0062A023
+#   jal  zero, 0          # j .  (safety hang)                 0x0000006F
+
+	# lui t0, 0x100
+	lui	a0, 0x100
+	addi	a0, a0, 0x2B7
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# lui t1, 0x5
+	lui	a0, 0x5
+	addi	a0, a0, 0x337
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi t1, t1, 0x555
+	lui	a0, 0x55530
+	addi	a0, a0, 0x313
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# sw t1, 0(t0)
+	lui	a0, 0x62A
+	addi	a0, a0, 0x023
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# jal zero, 0 — safety hang
 	lui	a0, 0
 	addi	a0, a0, 0x6F
 	sw	a0, 0(s5)
