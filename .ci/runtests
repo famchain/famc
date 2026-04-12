@@ -285,54 +285,54 @@ test_output  "xor mixed with subtraction" \
 echo "=== Prefix/postfix ++ -- ==="
 # Prefix ++: value after increment.
 test_output  "prefix ++ yields new value" \
-	"x = 50; @0x10000000 = ++x;" "3"
+	"x := 50; @0x10000000 = ++x;" "3"
 # Postfix ++: value is old, variable updated.
 test_output  "postfix ++ yields old value" \
-	"x = 50; @0x10000000 = x++; @0x10000000 = x;" "23"
+	"x := 50; @0x10000000 = x++; @0x10000000 = x;" "23"
 # Prefix --.
 test_output  "prefix -- yields new value" \
-	"x = 52; @0x10000000 = --x;" "3"
+	"x := 52; @0x10000000 = --x;" "3"
 # Postfix --.
 test_output  "postfix -- yields old value" \
-	"x = 52; @0x10000000 = x--; @0x10000000 = x;" "43"
+	"x := 52; @0x10000000 = x--; @0x10000000 = x;" "43"
 # Mixed postfix ++ with '+': (60) + (5) = 65='A', and a,b updated.
 test_output  "postfix ++ in add expression" \
-	"a = 60; b = 5; @0x10000000 = a++ + b++;" "A"
+	"a := 60; b := 5; @0x10000000 = a++ + b++;" "A"
 # Two postfix increments in sequence, variable fully updated.
 test_output  "repeated postfix ++ updates variable" \
-	"x = 63; @0x10000000 = x++; @0x10000000 = x++; @0x10000000 = x;" "?@A"
+	"x := 63; @0x10000000 = x++; @0x10000000 = x++; @0x10000000 = x;" "?@A"
 # Prefix ++ inside a longer add chain: (1+1)+(50)+12 = 64='@', x=2 after.
 test_output  "prefix ++ inside add chain" \
-	"x = 1; @0x10000000 = ++x + 50 + 12;" "@"
+	"x := 1; @0x10000000 = ++x + 50 + 12;" "@"
 
 # ============================================================================
 echo "=== Compound assignments ==="
 test_output  "x += literal" \
-	"x = 60; x += 5; @0x10000000 = x;" "A"
+	"x := 60; x += 5; @0x10000000 = x;" "A"
 test_output  "x += expr" \
-	"x = 60; y = 3; x += y + 2; @0x10000000 = x;" "A"
+	"x := 60; y = 3; x += y + 2; @0x10000000 = x;" "A"
 test_output  "x -= literal" \
-	"x = 70; x -= 5; @0x10000000 = x;" "A"
+	"x := 70; x -= 5; @0x10000000 = x;" "A"
 test_output  "x ^= literal" \
-	"x = 0x43; x ^= 0x02; @0x10000000 = x;" "A"
+	"x := 0x43; x ^= 0x02; @0x10000000 = x;" "A"
 test_output  "chained compound assigns" \
-	"x = 10; x += 20; x += 30; x += 5; @0x10000000 = x;" "A"
+	"x := 10; x += 20; x += 30; x += 5; @0x10000000 = x;" "A"
 # The case that triggered the original hang report.
 test_output  "the x += 1 repro" \
-	"x = 2; x += 1; y = x + 48; @0x10000000 = y;" "3"
+	"x := 2; x += 1; y = x + 48; @0x10000000 = y;" "3"
 
 # ============================================================================
 echo "=== Bare inc/dec statements ==="
 test_output  "bare ++x statement" \
-	"x = 64; ++x; @0x10000000 = x;" "A"
+	"x := 64; ++x; @0x10000000 = x;" "A"
 test_output  "bare x++ statement" \
-	"x = 64; x++; @0x10000000 = x;" "A"
+	"x := 64; x++; @0x10000000 = x;" "A"
 test_output  "bare --x statement" \
-	"x = 66; --x; @0x10000000 = x;" "A"
+	"x := 66; --x; @0x10000000 = x;" "A"
 test_output  "bare x-- statement" \
-	"x = 66; x--; @0x10000000 = x;" "A"
+	"x := 66; x--; @0x10000000 = x;" "A"
 test_output  "repeated bare ++x" \
-	"x = 60; ++x; ++x; ++x; ++x; ++x; @0x10000000 = x;" "A"
+	"x := 60; ++x; ++x; ++x; ++x; ++x; @0x10000000 = x;" "A"
 
 # ============================================================================
 echo "=== Shifts (<< >>) ==="
@@ -358,11 +358,11 @@ test_output  "shift lower precedence than add (lhs)" \
 test_output  "xor lower precedence than shift" \
 	"@0x10000000 = 0x40 ^ 1 << 0;" "A"
 test_output  "compound <<= " \
-	"x = 8; x <<= 3; @0x10000000 = x;" "@"
+	"x := 8; x <<= 3; @0x10000000 = x;" "@"
 test_output  "compound >>= " \
-	"x = 260; x >>= 2; @0x10000000 = x;" "A"
+	"x := 260; x >>= 2; @0x10000000 = x;" "A"
 test_output  "compound <<= then >>=" \
-	"x = 1; x <<= 6; x <<= 1; x >>= 1; @0x10000000 = x;" "@"
+	"x := 1; x <<= 6; x <<= 1; x >>= 1; @0x10000000 = x;" "@"
 test_output  "shift with variable rhs" \
 	"x = 1; n = 6; @0x10000000 = x << n;" "@"
 
@@ -373,7 +373,7 @@ test_output  "and literal masks low bits" \
 test_output  "and literal masks upper bits" \
 	"@0x10000000 = 0xFF & 65;" "A"
 test_output  "compound &=" \
-	"x = 0x47; x &= 0x41; @0x10000000 = x;" "A"
+	"x := 0x47; x &= 0x41; @0x10000000 = x;" "A"
 # '&' binds tighter than '^': (0x41 & 0x0F) ^ 0x4E = 0x01 ^ 0x4E = 0x4F = 'O'.
 # If '^' were tighter: 0x41 & (0x0F ^ 0x4E) = 0x41 & 0x41 = 0x41 = 'A'.
 # So a result of 'O' confirms Rust precedence (& > ^).
@@ -392,7 +392,7 @@ test_output  "or literal" \
 test_output  "or literal commuted" \
 	"@0x10000000 = 0x01 | 0x40;" "A"
 test_output  "compound |=" \
-	"x = 0x40; x |= 1; @0x10000000 = x;" "A"
+	"x := 0x40; x |= 1; @0x10000000 = x;" "A"
 # '^' tighter than '|': 0x40 | (1 ^ 0) = 0x40 | 1 = 0x41 = 'A'.
 test_output  "xor tighter than or" \
 	"@0x10000000 = 0x40 | 1 ^ 0;" "A"
@@ -585,7 +585,7 @@ test_output  "mul of negative by positive" \
 	"@0x10000000 = (0 - 5) * 13 + 130;" "A"
 # Compound *=
 test_output  "compound *=" \
-	"x = 7; x *= 9; @0x10000000 = x + 2;" "A"
+	"x := 7; x *= 9; @0x10000000 = x + 2;" "A"
 test_output  "chained *" \
 	"@0x10000000 = 4 * 4 * 4 + 1;" "A"
 # Larger product computed with upper bits used; byte store selects low 8.
@@ -623,10 +623,10 @@ test_output  "mod of negative follows dividend sign" \
 	"@0x10000000 = (0 - 7) % 3 + 66;" "A"
 # Compound /=
 test_output  "compound /=" \
-	"x = 260; x /= 4; @0x10000000 = x;" "A"
+	"x := 260; x /= 4; @0x10000000 = x;" "A"
 # Compound %= producing a printable result: 165 % 100 = 65.
 test_output  "compound %=" \
-	"x = 165; x %= 100; @0x10000000 = x;" "A"
+	"x := 165; x %= 100; @0x10000000 = x;" "A"
 # Chained div: ((1000 / 5) / 2) - 35 = 100 - 35 = 65.
 test_output  "chained /" \
 	"@0x10000000 = 1000 / 5 / 2 - 35;" "A"
@@ -694,13 +694,13 @@ test_output  "equality alternates with ||" \
 	"x = 5; @0x10000000 = (x == 0 || x == 5) + 64;" "A"
 # Short-circuit verified with ++ side effect.
 test_output  "&& false short-circuits rhs" \
-	"x = 5; y = (0 && ++x); @0x10000000 = x + 60;" "A"
+	"x := 5; y = (0 && ++x); @0x10000000 = x + 60;" "A"
 test_output  "&& true evaluates rhs" \
-	"x = 5; y = (1 && ++x); @0x10000000 = x + 59;" "A"
+	"x := 5; y = (1 && ++x); @0x10000000 = x + 59;" "A"
 test_output  "|| true short-circuits rhs" \
-	"x = 5; y = (1 || ++x); @0x10000000 = x + 60;" "A"
+	"x := 5; y = (1 || ++x); @0x10000000 = x + 60;" "A"
 test_output  "|| false evaluates rhs" \
-	"x = 5; y = (0 || ++x); @0x10000000 = x + 59;" "A"
+	"x := 5; y = (0 || ++x); @0x10000000 = x + 59;" "A"
 # Chained operators.
 test_output  "chained &&" \
 	"@0x10000000 = (1 && 1 && 1) + 64;" "A"
@@ -750,9 +750,9 @@ test_output  "ternary with && condition" \
 	"x = 5; @0x10000000 = (x > 0 && x < 10) ? 65 : 66;" "A"
 # Short-circuit: only one branch is evaluated. Use ++y with different sign.
 test_output  "ternary short-circuits true branch only" \
-	"x = 5; y = 0; z = (x > 0) ? ++y : --y; @0x10000000 = y + 64;" "A"
+	"x = 5; y := 0; z = (x > 0) ? ++y : --y; @0x10000000 = y + 64;" "A"
 test_output  "ternary short-circuits else branch only" \
-	"x = 0; y = 0; z = (x > 0) ? ++y : --y; @0x10000000 = y + 66;" "A"
+	"x = 0; y := 0; z = (x > 0) ? ++y : --y; @0x10000000 = y + 66;" "A"
 # Ternary in a larger expression.
 test_output  "ternary result participates in addition" \
 	"@0x10000000 = (1 ? 60 : 0) + 5;" "A"
@@ -779,7 +779,7 @@ test_output  "assignment inside ternary branches" \
 # Full user repro
 test_output  "user repro — ternary with deref-assign branches" \
 	"$(cat <<'EOT'
-x = ((2 - 1) + 1);
+x := ((2 - 1) + 1);
 x += 1;
 y = x + 48;
 x > 3 ? @0x10000000 = y : @0x10000000 = y + 1;
@@ -876,27 +876,27 @@ test_output  "double-quote escape in char literal" \
 # ============================================================================
 echo "=== Compound assigns in expression context ==="
 test_output  "(x += 3) as expression" \
-	"x = 5; @0x10000000 = (x += 3) + 57;" "A"
+	"x := 5; @0x10000000 = (x += 3) + 57;" "A"
 test_output  "x -= n inside block" \
-	"x = 100; y = { x -= 35; x }; @0x10000000 = y;" "A"
+	"x := 100; y = { x -= 35; x }; @0x10000000 = y;" "A"
 test_output  "x *= n" \
-	"x = 13; { x *= 5 }; @0x10000000 = x;" "A"
+	"x := 13; { x *= 5 }; @0x10000000 = x;" "A"
 test_output  "x /= n" \
-	"x = 325; { x /= 5 }; @0x10000000 = x;" "A"
+	"x := 325; { x /= 5 }; @0x10000000 = x;" "A"
 test_output  "x %= n" \
-	"x = 132; { x %= 67 }; @0x10000000 = x;" "A"
+	"x := 132; { x %= 67 }; @0x10000000 = x;" "A"
 test_output  "x &= mask" \
-	"x = 0x7FF; { x &= 0x41 }; @0x10000000 = x;" "A"
+	"x := 0x7FF; { x &= 0x41 }; @0x10000000 = x;" "A"
 test_output  "x |= bits" \
-	"x = 0x40; { x |= 1 }; @0x10000000 = x;" "A"
+	"x := 0x40; { x |= 1 }; @0x10000000 = x;" "A"
 test_output  "x ^= bits" \
-	"x = 0x60; { x ^= 0x21 }; @0x10000000 = x;" "A"
+	"x := 0x60; { x ^= 0x21 }; @0x10000000 = x;" "A"
 test_output  "x <<= shift in expression" \
-	"x = 4; { x <<= 2 }; @0x10000000 = x + 49;" "A"
+	"x := 4; { x <<= 2 }; @0x10000000 = x + 49;" "A"
 test_output  "x >>= shift in expression" \
-	"x = 260; { x >>= 2 }; @0x10000000 = x;" "A"
+	"x := 260; { x >>= 2 }; @0x10000000 = x;" "A"
 test_output  "x >>u= unsigned shift in expression" \
-	"x = 260; { x >>u= 2 }; @0x10000000 = x;" "A"
+	"x := 260; { x >>u= 2 }; @0x10000000 = x;" "A"
 # Compound assigns on deref targets — byte and word.
 test_output  "@deref += on heap byte" \
 	"p = 0x80005000; @p = 60; @p += 5; r = @p; @0x10000000 = r;" "A"
@@ -927,7 +927,7 @@ test_output  "loop break const" \
 	"@0x10000000 = loop { break 65; };" "A"
 # Loop that counts up to a bound.
 test_output  "loop sum 1..10" \
-	"y = 0; x = loop { y += 1; y > 10 ? break y + 54; }; @0x10000000 = x;" "A"
+	"y := 0; x = loop { y += 1; y > 10 ? break y + 54; }; @0x10000000 = x;" "A"
 # The full user repro: sum 1..100 == 5050.
 test_output  "user repro — sum 1..100 via loop+break" \
 	"$(cat <<'EOT'
@@ -960,7 +960,7 @@ EOT
 )" "A"
 test_output  "continue in a fall-through (no else) ternary" \
 	"$(cat <<'EOT'
-i = 0;
+i := 0;
 loop {
     ++i > 7 ? break 0;
     i % 2 == 0 ? continue;
@@ -1012,11 +1012,11 @@ test_output  "for as expression — exclusive last value" \
 test_output  "empty range evaluates to 0" \
 	"v = for x in 0..0 { x + 1 }; @0x10000000 = v + 65;" "A"
 test_output  "sum 1..=100 via for" \
-	"s = 0; for i in 1..=100 { s += i; }; @0x10000000 = s == 5050 ? 'Y' : 'N';" "Y"
+	"s := 0; for i in 1..=100 { s += i; }; @0x10000000 = s == 5050 ? 'Y' : 'N';" "Y"
 test_output  "break with value inside for" \
 	"v = for x in 0..100 { x > 5 ? break x + 58; }; @0x10000000 = v;" "@"
 test_output  "continue in for skips body tail" \
-	"s = 0; for i in 0..=10 { i % 2 == 0 ? continue; s += i; }; @0x10000000 = s == 25 ? 'Y' : 'N';" "Y"
+	"s := 0; for i in 0..=10 { i % 2 == 0 ? continue; s += i; }; @0x10000000 = s == 25 ? 'Y' : 'N';" "Y"
 test_output  "shadowing — outer x unchanged after for" \
 	"x = 5; for x in 0..3 { }; @0x10000000 = x + 60;" "A"
 test_output  "shadowing — inner x visible in body" \
@@ -1041,7 +1041,7 @@ test_output  "halfword array decl + access" \
 test_output  "byte array iteration" \
 	"@arr[5]; for i in 0..5 { @arr[i] = 'A' + i; }; for i in 0..5 { @0x10000000 = @arr[i]; };" "ABCDE"
 test_output  "word array sum" \
-	"*arr[5]; for i in 0..5 { *arr[i] = i + 1; }; s = 0; for i in 0..5 { s += *arr[i]; }; @0x10000000 = s + 50;" "A"
+	"*arr[5]; for i in 0..5 { *arr[i] = i + 1; }; s := 0; for i in 0..5 { s += *arr[i]; }; @0x10000000 = s + 50;" "A"
 test_output  "halfword array values" \
 	"#arr[5]; for i in 0..5 { #arr[i] = 100 * (i + 1); }; @0x10000000 = #arr[0] == 100 && #arr[4] == 500 ? 'A' : 'N';" "A"
 test_output  "array access on pointer to heap RAM" \
@@ -1058,7 +1058,7 @@ test_output  "array declared inside a block expression" \
 test_output  "array declared inside a function body" \
 	"fn f() { @arr[5]; @arr[0] = 65; @arr[0] } @0x10000000 = f();" "A"
 test_output  "function-local word array fill + sum" \
-	"fn sum5() { *arr[5]; for i in 0..5 { *arr[i] = i + 1; }; s = 0; for i in 0..5 { s += *arr[i]; }; s + 50 } @0x10000000 = sum5();" "A"
+	"fn sum5() { *arr[5]; for i in 0..5 { *arr[i] = i + 1; }; s := 0; for i in 0..5 { s += *arr[i]; }; s + 50 } @0x10000000 = sum5();" "A"
 test_output  "function-local byte array iteration" \
 	"fn greet() { @buf[5]; for i in 0..5 { @buf[i] = 'A' + i; }; for i in 0..5 { @0x10000000 = @buf[i]; }; 0 } v = greet();" "ABCDE"
 # Error case
@@ -1228,6 +1228,29 @@ test_error "return outside function" \
 	"Error:1:7 'return' outside function"
 
 # ============================================================================
+echo "=== String literals ==="
+test_output  "string literal first byte" \
+	"s = \"A\"; @0x10000000 = @s;" "A"
+test_output  "string literal multi-char" \
+	"s = \"Hello\"; @0x10000000 = @s; @0x10000000 = @(s+4);" "Ho"
+test_output  "string literal escape \\n" \
+	"s = \"A\\nB\"; @0x10000000 = @s; @0x10000000 = @(s+2);" "AB"
+test_output  "string literal escape \\\\  and \\\"" \
+	"s = \"A\\\\B\\\"\"; @0x10000000 = @s; @0x10000000 = @(s+1); @0x10000000 = @(s+2); @0x10000000 = @(s+3);" 'A\B"'
+test_output  "string literal null terminated" \
+	"s = \"AB\"; @0x10000000 = @(s+2) + 65;" "A"
+test_output  "string passed to function" \
+	"fn first(s) { @s } @0x10000000 = first(\"A\");" "A"
+test_output  "string in expression" \
+	"@0x10000000 = @\"A\";" "A"
+test_error "unterminated string" \
+	"s = \"hello;" \
+	"Error:1:6 unterminated string"
+test_error "invalid string escape" \
+	"s = \"\\q\";" \
+	"Error:1:8 invalid string escape"
+
+# ============================================================================
 echo "=== Comments ==="
 test_output  "line comment before statement" \
 	"// greet
@@ -1261,6 +1284,21 @@ test_error "unterminated block comment" \
 test_error "unterminated nested block comment" \
 	"/* a /* b */ rest" \
 	"Error:2:1 unterminated block comment"
+
+# ============================================================================
+echo "=== Immutability ==="
+test_error "compound += on immutable var" \
+	"x = 5; x += 1;" \
+	"Error:1:8 cannot reassign immutable"
+test_error "compound -= on immutable var" \
+	"x = 5; x -= 1;" \
+	"Error:1:8 cannot reassign immutable"
+test_error "postfix ++ on immutable var" \
+	"x = 5; x++;" \
+	"Error:1:8 cannot reassign immutable"
+test_error "prefix ++ on immutable var" \
+	"x = 5; ++x;" \
+	"Error:1:10 cannot reassign immutable"
 
 # ============================================================================
 echo "=== Error messages ==="

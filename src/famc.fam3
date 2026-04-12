@@ -3655,6 +3655,8 @@ ct_not_uc:
 	beq	t0, t1, ct_lbrace
 	addi	t1, zero, 39		# '\'' — char literal
 	beq	t0, t1, ct_char_lit
+	addi	t1, zero, 34		# '"' — string literal
+	beq	t0, t1, ct_string_lit
 	j	ct_bad
 
 ct_num:
@@ -3749,6 +3751,137 @@ ct_char_close:
 	# Emit `li a0, <t0>` via emit_li (it reads a0 as the immediate).
 	addi	a0, t0, 0
 	j	emit_li
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ct_string_lit — compile a `"..."` string literal.
+#
+# Emits: auipc a0, 0; addi a0, a0, 12; jal zero, 4+padded_len; <bytes\0 pad>
+# Result: a0 = pointer to the null-terminated string in the code stream.
+# lv_kind = 0 (not an lvalue).
+# ══════════════════════════════════════════════════════════════════════════════
+ct_string_lit:
+	lw	t0, 8(sp)
+	bnez	t0, ct_bad_literal_pp
+	addi	s2, s2, 1		# consume opening '"'
+
+	# ── Pass 1: scan to find string length (with escapes) ──────────
+	addi	t0, s2, 0		# t0 = scan cursor
+	addi	t1, zero, 0		# t1 = byte count (excl. null term)
+ct_sl_scan:
+	bge	t0, s3, ct_bad_str_unterminated
+	lbu	t2, 0(t0)
+	addi	t3, zero, 34		# '"' — closing quote
+	beq	t2, t3, ct_sl_scan_done
+	addi	t3, zero, 92		# '\\' — escape
+	beq	t2, t3, ct_sl_scan_esc
+	addi	t0, t0, 1
+	addi	t1, t1, 1
+	j	ct_sl_scan
+ct_sl_scan_esc:
+	addi	t0, t0, 2		# skip backslash + escape char
+	addi	t1, t1, 1		# one decoded byte
+	j	ct_sl_scan
+ct_sl_scan_done:
+	# t1 = string byte count (without null), t0 = ptr to closing '"'
+	addi	t1, t1, 1		# +1 for null terminator
+	# Padded length = (t1 + 3) & ~3
+	addi	t4, t1, 3
+	andi	t4, t4, -4		# t4 = padded byte count
+
+	# ── Emit: auipc a0, 0 = 0x00000517 ────────────────────────────
+	lui	a0, 0
+	addi	a0, a0, 0x517
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# ── Emit: addi a0, a0, 12 = 0x00C50513 ────────────────────────
+	lui	a0, 0xC50
+	addi	a0, a0, 0x513
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# ── Emit: jal zero, 4 + padded_len ────────────────────────────
+	# offset = 4 + t4 (the jal itself is 4 bytes, then t4 bytes of data)
+	addi	t5, t4, 4
+	# J-type encoding: imm[20|10:1|11|19:12] rd=0 opcode=0x6F
+	# offset is small and positive, so imm[20]=0, imm[19:12]=0, imm[11]=0
+	# imm[10:1] = (offset >> 1) & 0x3FF → bits[30:21]
+	srli	t6, t5, 1
+	andi	t6, t6, 0x3FF
+	slli	t6, t6, 21
+	addi	a0, zero, 0x6F
+	or	a0, a0, t6
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# ── Pass 2: copy string bytes to output buffer ─────────────────
+ct_sl_copy:
+	bge	s2, s3, ct_bad_str_unterminated
+	lbu	t2, 0(s2)
+	addi	t3, zero, 34		# '"'
+	beq	t2, t3, ct_sl_copy_done
+	addi	t3, zero, 92		# '\\'
+	beq	t2, t3, ct_sl_copy_esc
+	sb	t2, 0(s5)
+	addi	s5, s5, 1
+	addi	s2, s2, 1
+	j	ct_sl_copy
+ct_sl_copy_esc:
+	addi	s2, s2, 1		# skip backslash
+	bge	s2, s3, ct_bad_str_unterminated
+	lbu	t2, 0(s2)
+	addi	s2, s2, 1
+	addi	t3, zero, 'n'
+	beq	t2, t3, ct_sl_esc_nl
+	addi	t3, zero, 't'
+	beq	t2, t3, ct_sl_esc_tab
+	addi	t3, zero, 'r'
+	beq	t2, t3, ct_sl_esc_cr
+	addi	t3, zero, '0'
+	beq	t2, t3, ct_sl_esc_nul
+	addi	t3, zero, 92		# '\\'
+	beq	t2, t3, ct_sl_esc_ok
+	addi	t3, zero, 34		# '"'
+	beq	t2, t3, ct_sl_esc_ok
+	j	ct_bad_str_esc
+ct_sl_esc_nl:
+	addi	t2, zero, 10
+	j	ct_sl_esc_ok
+ct_sl_esc_tab:
+	addi	t2, zero, 9
+	j	ct_sl_esc_ok
+ct_sl_esc_cr:
+	addi	t2, zero, 13
+	j	ct_sl_esc_ok
+ct_sl_esc_nul:
+	addi	t2, zero, 0
+ct_sl_esc_ok:
+	sb	t2, 0(s5)
+	addi	s5, s5, 1
+	j	ct_sl_copy
+ct_sl_copy_done:
+	addi	s2, s2, 1		# consume closing '"'
+	# Write null terminator + padding to fill t4 bytes total.
+	# t4 = pre-computed padded byte count. t1 was the unpadded count
+	# (chars + null). We've written t1-1 chars so far. Need to write
+	# t4 - (t1-1) more bytes (null + padding), all zero.
+	addi	t1, t1, -1		# t1 = chars written so far
+	sub	t0, t4, t1		# t0 = remaining bytes to fill
+ct_sl_pad:
+	beqz	t0, ct_sl_pad_done
+	sb	zero, 0(s5)
+	addi	s5, s5, 1
+	addi	t0, t0, -1
+	j	ct_sl_pad
+ct_sl_pad_done:
+	j	ct_deref
+
+ct_bad_str_unterminated:
+	addi	a0, zero, 56		# err 56: unterminated string
+	j	report_err
+ct_bad_str_esc:
+	addi	a0, zero, 57		# err 57: invalid string escape
+	j	report_err
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ct_kw_loop — compile a `loop { … }` expression.
@@ -6684,6 +6817,11 @@ ct_id_prefix_emit:
 	# set, the combination isn't supported in this pass.
 	lw	t1, 8(sp)
 	bnez	t1, ct_bad_prefix_combo
+	# Check mutability — prefix ++/-- requires mutable variable.
+	lla	t3, last_ident_entry
+	lw	t3, 0(t3)
+	lbu	t4, 37(t3)
+	beqz	t4, ct_bad_immut_pp
 	addi	t2, zero, 1
 	beq	t0, t2, ct_pre_inc_emit
 	j	ct_pre_dec_emit
@@ -6711,6 +6849,10 @@ esws_pre_dec:
 	j	ct_done
 
 ct_do_post_inc:
+	lla	t3, last_ident_entry
+	lw	t3, 0(t3)
+	lbu	t4, 37(t3)
+	beqz	t4, ct_bad_immut_pp
 	# Runtime seq: a0 = old x; addi a0,a0,1; sw a0,off(fp); addi a0,a0,-1.
 	addi	gp, zero, 1		# eaa1 site 1 = eaa1_post_inc
 	j	emit_addi_a0_1
@@ -6726,6 +6868,10 @@ eaam1_post_inc_undo:
 	j	ct_done
 
 ct_do_post_dec:
+	lla	t3, last_ident_entry
+	lw	t3, 0(t3)
+	lbu	t4, 37(t3)
+	beqz	t4, ct_bad_immut_pp
 	# Runtime seq: a0 = old x; addi a0,a0,-1; sw a0,off(fp); addi a0,a0,1.
 	addi	gp, zero, 2		# eaam1 site 2 = eaam1_post_dec
 	j	emit_addi_a0_m1
@@ -7096,6 +7242,11 @@ ct_bad_literal_pp:
 	j	report_err
 ct_bad_prefix_combo:
 	addi	a0, zero, 22		# err 22: cannot combine deref and ++/--
+	j	report_err
+ct_bad_immut_pp:
+	lla	t0, ident_start
+	lw	s2, 0(t0)
+	addi	a0, zero, 55		# err 55: cannot reassign immutable
 	j	report_err
 
 ct_done:
@@ -8480,6 +8631,14 @@ cep_pre_postdec:
 	lla	t0, lv_kind
 	lw	t1, 0(t0)
 	beqz	t1, cep_bad_lvalue
+	# If IDENT, check mutability.
+	addi	t2, zero, 1
+	bne	t1, t2, cep_pf_skip_mut
+	lla	t3, last_ident_entry
+	lw	t3, 0(t3)
+	lbu	t4, 37(t3)
+	beqz	t4, cep_bad_immut_reassign
+cep_pf_skip_mut:
 	sw	t1, 16(sp)
 	lla	t0, lv_slot
 	lw	t2, 0(t0)
@@ -8626,6 +8785,14 @@ cep_pre_compound:
 	lla	t0, lv_kind
 	lw	t1, 0(t0)
 	beqz	t1, cep_bad_lvalue
+	# If IDENT, check mutability — compound assigns on immutable vars error.
+	addi	t2, zero, 1
+	bne	t1, t2, cep_pc_skip_mut
+	lla	t3, last_ident_entry
+	lw	t3, 0(t3)
+	lbu	t4, 37(t3)
+	beqz	t4, cep_bad_immut_reassign
+cep_pc_skip_mut:
 	sw	t1, 16(sp)		# scratch1 = kind
 	lla	t0, lv_slot
 	lw	t2, 0(t0)
@@ -11021,6 +11188,14 @@ err_tbl:
 	.byte	1, 25
 	.ascii	"cannot reassign immutable"
 	.zero	5
+	# slot 56 — raw: unterminated string literal
+	.byte	1, 19
+	.ascii	"unterminated string"
+	.zero	11
+	# slot 57 — raw: invalid escape in string literal
+	.byte	1, 21
+	.ascii	"invalid string escape"
+	.zero	9
 
 # ══════════════════════════════════════════════════════════════════════════════
 # End of famc image.  `tp` is initialized from this label at startup — every
