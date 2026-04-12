@@ -272,6 +272,28 @@ rd_done:
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 
+	# Shadow stack for return IDs — tp = gp + 32 KiB. Grows downward,
+	# separate from the main data stack (sp). Buffer overflows on sp
+	# can't reach return IDs stored on tp.
+	#
+	#   lui  tp, 0x8       # tp = 0x8000 = 32 KiB
+	#   add  tp, tp, gp   # tp = gp + 32 KiB
+
+	# lui tp, 0x8 → opcode=0x37, rd=tp=4, imm20=0x8
+	# word = 0x37 | (4 << 7) | (0x8 << 12) = 0x37 | 0x200 | 0x8000 = 0x00008237
+	lui	a0, 0x8
+	addi	a0, a0, 0x237
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# add tp, tp, gp → rd=tp=4, rs1=tp=4, rs2=gp=3
+	# word = 0x33 | (4 << 7) | (4 << 15) | (3 << 20)
+	#      = 0x33 | 0x200 | 0x20000 | 0x300000 = 0x00320233
+	lui	a0, 0x320
+	addi	a0, a0, 0x233
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
 	# Frame allocator — 3 instructions, always emitted, always patched in
 	# Phase 5 with the real frame_size computed during statement compilation.
 	#
@@ -509,7 +531,7 @@ md_emit_done:
 	slli	t2, t1, 12
 	addi	t3, zero, 0x2B7
 	or	t2, t2, t3
-	sw	t2, 28(s4)
+	sw	t2, 36(s4)		# offset 36 (shifted +8 for shadow stack init)
 
 	# addi t0, t0, lower12 word:  (lower12 << 20) | 0x00028293
 	# (slli naturally keeps only the low 12 bits of t0 in the imm slot)
@@ -517,7 +539,7 @@ md_emit_done:
 	lui	t3, 0x28
 	addi	t3, t3, 0x293
 	or	t2, t2, t3
-	sw	t2, 32(s4)
+	sw	t2, 40(s4)		# offset 40 (shifted +8 for shadow stack init)
 
 # ── Phase 6: stream output buffer to UART, then poweroff ───────────────────
 out_loop:
@@ -5637,14 +5659,14 @@ ew_cs_fn_prol1:
 	addi	gp, zero, 45		# emit_word site 45 = ew_cs_fn_prol2
 	j	emit_word
 ew_cs_fn_prol2:
-	# addi sp, sp, -4 (reserve slot for saved ra)
-	lui	a0, 0xFFC10
-	addi	a0, a0, 0x113
+	# Shadow stack push: addi tp, tp, -4  (word 0xFFC20213)
+	lui	a0, 0xFFC20
+	addi	a0, a0, 0x213
 	addi	gp, zero, 46		# emit_word site 46 = ew_cs_fn_prol3
 	j	emit_word
 ew_cs_fn_prol3:
-	# sw ra, 0(sp)   word 0x00112023
-	lui	a0, 0x112
+	# Shadow stack save: sw ra, 0(tp)  (word 0x00122023)
+	lui	a0, 0x122
 	addi	a0, a0, 0x023
 	addi	gp, zero, 47		# emit_word site 47 = ew_cs_fn_prol4
 	j	emit_word
@@ -5804,27 +5826,27 @@ ew_cs_fn_ep1:
 	addi	gp, zero, 59		# emit_word site 59 = ew_cs_fn_ep2
 	j	emit_word
 ew_cs_fn_ep2:
-	# Emit: lw ra, 0(sp)   word 0x00012083
+	# Emit: lw fp, 0(sp)   word 0x00012403 — restore fp from DATA stack.
 	lui	a0, 0x12
-	addi	a0, a0, 0x083
+	addi	a0, a0, 0x403
 	addi	gp, zero, 60		# emit_word site 60 = ew_cs_fn_ep3
 	j	emit_word
 ew_cs_fn_ep3:
-	# Emit: addi sp, sp, 4   word 0x00410113
+	# Emit: addi sp, sp, 4   word 0x00410113 — pop fp slot.
 	lui	a0, 0x410
 	addi	a0, a0, 0x113
 	addi	gp, zero, 61		# emit_word site 61 = ew_cs_fn_ep4
 	j	emit_word
 ew_cs_fn_ep4:
-	# Emit: lw fp, 0(sp)   word 0x00012403
-	lui	a0, 0x12
-	addi	a0, a0, 0x403
+	# Shadow stack pop: lw ra, 0(tp)  word 0x00022083
+	lui	a0, 0x22
+	addi	a0, a0, 0x083
 	addi	gp, zero, 62		# emit_word site 62 = ew_cs_fn_ep5
 	j	emit_word
 ew_cs_fn_ep5:
-	# Emit: addi sp, sp, 4   word 0x00410113
-	lui	a0, 0x410
-	addi	a0, a0, 0x113
+	# Shadow stack pop: addi tp, tp, 4  word 0x00420213
+	lui	a0, 0x420
+	addi	a0, a0, 0x213
 	addi	gp, zero, 63		# emit_word site 63 = ew_cs_fn_ep6
 	j	emit_word
 ew_cs_fn_ep6:
