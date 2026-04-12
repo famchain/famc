@@ -1658,6 +1658,10 @@ la_in_tok:
 	addi	t1, t1, 1
 	j	la_cmp
 la_match:
+	lla	t1, last_ident_entry
+	sw	t0, 0(t1)
+	lla	t1, lookup_was_new
+	sw	zero, 0(t1)		# existing entry
 	lw	a0, 32(t0)
 	j	lookup_or_alloc_disp
 la_next:
@@ -1691,6 +1695,8 @@ lo_in_tok:
 	addi	t1, t1, 1
 	j	lo_cmp
 lo_match:
+	lla	t1, last_ident_entry
+	sw	t0, 0(t1)
 	lw	a0, 32(t0)
 	j	lookup_or_alloc_disp
 lo_next:
@@ -1748,11 +1754,15 @@ la_cp:
 	j	la_cp
 la_cp_done:
 	# New entry: store byte offset of this local in the frame (= current
-	# frame_size), plus its size in bytes in the (formerly pad) size field.
-	# All vars are 4 bytes today; arrays/structs will pass a size later.
+	# frame_size). Byte 37 = mutability flag (0=immutable, 1=mutable) —
+	# set by the caller after this function returns, based on = vs :=.
 	sw	s9, 32(s8)		# offset field = s9 (= next free byte offset)
-	addi	t0, zero, 4		# size in bytes (hardcoded int = 4 for now)
-	sw	t0, 36(s8)		# size field (was pad)
+	# Save entry pointer and new-entry flag for mutability tracking.
+	lla	t0, last_ident_entry
+	sw	s8, 0(t0)
+	lla	t0, lookup_was_new
+	addi	t1, zero, 1
+	sw	t1, 0(t0)		# new entry
 	addi	a0, s9, 0		# return byte offset
 	addi	s9, s9, 4		# advance frame_size by this var's size
 	addi	s8, s8, 40
@@ -4559,6 +4569,11 @@ ct_for_name_ok:
 	addi	gp, zero, 4		# lookup_or_alloc site 4 = la_ct_for
 	j	la_new
 la_ct_for:
+	# For-loop variable is always mutable (the loop increments it).
+	lla	t0, last_ident_entry
+	lw	t1, 0(t0)
+	addi	t2, zero, 1
+	sb	t2, 37(t1)
 	sw	a0, 144(sp)		# x_slot = newly-allocated offset
 
 	# Allocate two hidden slots (hi, last) by bumping s9 directly.
@@ -5596,6 +5611,11 @@ pi_cs_fn_param:
 	addi	gp, zero, 5		# lookup_or_alloc site 5 = la_cs_fn_param
 	j	la_new
 la_cs_fn_param:
+	# Function parameters are mutable (caller can modify locally).
+	lla	t0, last_ident_entry
+	lw	t1, 0(t0)
+	addi	t2, zero, 1
+	sb	t2, 37(t1)
 	# a0 = slot offset (= (count * 4), since s9 started at 0). Increment
 	# param count.
 	lw	t2, 24(sp)
@@ -6361,6 +6381,10 @@ pk_ws_loop:
 pk_non_ws:
 	addi	t1, zero, '('
 	beq	t0, t1, pk_fn_call	# ident followed by '(' → function call
+	# Check ':=' (mutable assign)
+	addi	t1, zero, ':'
+	beq	t0, t1, pk_chk_mut
+	# Check '=' (immutable assign) — but not '=='
 	addi	t1, zero, '='
 	bne	t0, t1, pk_read_ctx
 	addi	t3, t3, 1
@@ -6371,6 +6395,13 @@ pk_non_ws:
 pk_write_ctx:
 	addi	gp, zero, 0
 	j	lookup_or_alloc
+pk_chk_mut:
+	addi	t3, t3, 1
+	bge	t3, s3, pk_read_ctx
+	lbu	t0, 0(t3)
+	addi	t1, zero, '='
+	bne	t0, t1, pk_read_ctx	# bare ':' → not assignment
+	j	pk_write_ctx		# ':=' → write context
 pk_read_ctx:
 	addi	gp, zero, 0
 	j	lookup
@@ -7217,6 +7248,8 @@ sw_cep_op:
 	beq	t0, t1, cep_op_bang
 	addi	t1, zero, '?'
 	beq	t0, t1, cep_op_question
+	addi	t1, zero, ':'
+	beq	t0, t1, cep_op_colon
 	j	cep_done
 
 # — '*' or '*=' ———————————————————————————————————————————————————————————————
@@ -7589,6 +7622,20 @@ cep_op_bang:
 	j	cep_bp_check
 
 # — '?' : ternary — handled via a dedicated path in cep_bp_check ———————————————
+# — ':' : only ':=' recognized (mutable assign). Bare ':' is ternary-else /
+# struct-init and handled by other paths, NOT cep_loop.
+cep_op_colon:
+	addi	t5, s2, 1
+	bge	t5, s3, cep_done
+	lbu	t0, 0(t5)
+	addi	t1, zero, '='
+	bne	t0, t1, cep_done	# bare ':' → not our op
+	addi	t2, zero, 28		# op = MUTASSIGN
+	addi	t3, zero, 0		# l_bp = 0 (same as assign)
+	addi	t4, zero, -1		# r_bp = -1 (right-assoc)
+	addi	t1, zero, 2
+	j	cep_bp_check
+
 cep_op_question:
 	addi	t2, zero, 26		# op = TERN
 	addi	t3, zero, 1		# l_bp = 1 (looser than '||' at 2)
@@ -7617,6 +7664,8 @@ cep_bp_check:
 	beq	t2, t1, cep_pre_tern
 	addi	t1, zero, 27
 	beq	t2, t1, cep_pre_assign
+	addi	t1, zero, 28
+	beq	t2, t1, cep_pre_assign	# :=  shares the same handler
 	# Compound assign: bit 7 of op_kind is set. Divert before the normal
 	# push-recurse-pop path so we can stash the lvalue slot first.
 	andi	t1, t2, 0x80
@@ -8086,6 +8135,32 @@ cep_pre_assign:
 	lla	t0, lv_kind
 	lw	t1, 0(t0)
 	beqz	t1, cep_bad_lvalue	# not an lvalue → halt
+
+	# If this is an IDENT target, enforce mutability.
+	addi	t2, zero, 1
+	bne	t1, t2, cep_asg_skip_mut_check
+	lw	t3, 8(sp)		# op_kind (27 = '=', 28 = ':=')
+	lla	t4, lookup_was_new
+	lw	t4, 0(t4)
+	bnez	t4, cep_asg_new
+	# EXISTING var.
+	lla	t5, last_ident_entry
+	lw	t5, 0(t5)
+	lbu	t6, 37(t5)
+	addi	t2, zero, 27
+	beq	t3, t2, cep_bad_immut_reassign	# '=' on existing → error
+	beqz	t6, cep_bad_immut_reassign	# ':=' on immutable → error
+	j	cep_asg_skip_mut_check
+cep_asg_new:
+	# NEW var — set mutability from op_kind.
+	lla	t5, last_ident_entry
+	lw	t5, 0(t5)
+	addi	t2, zero, 28
+	bne	t3, t2, cep_asg_skip_mut_check	# '=' → immutable (default 0)
+	addi	t2, zero, 1
+	sb	t2, 37(t5)		# ':=' → mark mutable
+cep_asg_skip_mut_check:
+
 	sw	t1, 16(sp)		# save kind in frame scratch1
 	lla	t0, lv_slot
 	lw	t1, 0(t0)
@@ -8155,6 +8230,11 @@ ew_cep_asg_sh:
 
 cep_bad_lvalue:
 	addi	a0, zero, 20		# err 20: left of '=' is not an lvalue
+	j	report_err
+cep_bad_immut_reassign:
+	lla	t0, ident_start
+	lw	s2, 0(t0)
+	addi	a0, zero, 55		# err 55: cannot reassign immutable
 	j	report_err
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -8566,20 +8646,58 @@ sw_cs_var_decide:
 	lbu	t0, 0(s2)
 	addi	t1, zero, '('
 	beq	t0, t1, cs_fb
+	# Check ':=' (mutable assignment).
+	addi	t1, zero, ':'
+	beq	t0, t1, cs_chk_mut_assign
+	# Check '=' (immutable assignment) — but not '=='.
 	addi	t1, zero, '='
 	bne	t0, t1, cs_var_read
 	addi	t2, s2, 1
-	bge	t2, s3, cs_var_write
+	bge	t2, s3, cs_var_immut_write
 	lbu	t3, 0(t2)
 	addi	t1, zero, '='
 	beq	t3, t1, cs_var_read	# '==' is a read
-cs_var_write:
-	addi	gp, zero, 1		# lookup_or_alloc site 1 = la_cs
+cs_var_immut_write:
+	lla	t0, assign_is_mut
+	sw	zero, 0(t0)		# flag = 0 (immutable)
+	addi	gp, zero, 1
+	j	lookup_or_alloc
+cs_chk_mut_assign:
+	addi	t2, s2, 1
+	bge	t2, s3, cs_var_read
+	lbu	t3, 0(t2)
+	addi	t1, zero, '='
+	bne	t3, t1, cs_var_read	# bare ':' → not an op here
+	lla	t0, assign_is_mut
+	addi	t1, zero, 1
+	sw	t1, 0(t0)		# flag = 1 (mutable)
+	addi	gp, zero, 1
 	j	lookup_or_alloc
 cs_var_read:
 	addi	gp, zero, 1		# lookup site 1 = la_cs (shared dispatch)
 	j	lookup
 la_cs:
+	# Enforce mutability rules.
+	lla	t0, lookup_was_new
+	lw	t4, 0(t0)
+	bnez	t4, la_cs_new_entry
+	# EXISTING entry — check mutability.
+	lla	t0, assign_is_mut
+	lw	t3, 0(t0)
+	lla	t0, last_ident_entry
+	lw	t1, 0(t0)
+	lbu	t2, 37(t1)		# existing mutable flag
+	beqz	t3, cs_bad_immut_reassign	# '=' on existing → error
+	beqz	t2, cs_bad_immut_reassign	# ':=' on immutable → error
+	j	la_cs_ok			# ':=' on mutable → OK
+la_cs_new_entry:
+	# NEW entry — set mutability from the assign_is_mut flag.
+	lla	t0, assign_is_mut
+	lw	t3, 0(t0)
+	lla	t0, last_ident_entry
+	lw	t1, 0(t0)
+	sb	t3, 37(t1)
+la_cs_ok:
 	# Spill slot to famc's stack.
 	addi	sp, sp, -4
 	sw	a0, 0(sp)
@@ -8589,16 +8707,25 @@ la_cs:
 sw_cs_eq1:
 	bge	s2, s3, cs_bad
 	lbu	t0, 0(s2)
+	# ':=' (mutable assign) — consume 2 chars.
+	addi	t1, zero, ':'
+	beq	t0, t1, cs_chk_colon_eq
+	# '=' (immutable assign) — but not '=='.
 	addi	t1, zero, '='
 	bne	t0, t1, sw_cs_eq1_try_plus
-	# '=' found. Could be bare '=' (assignment) or '==' (equality). Peek
-	# ahead; if it's '==', divert via cs_bad (which pops la_cs's spill)
-	# into the expression-statement fallback path.
 	addi	t3, s2, 1
 	bge	t3, s3, cs_op_eq
 	lbu	t4, 0(t3)
 	addi	t5, zero, '='
-	beq	t4, t5, cs_bad
+	beq	t4, t5, cs_bad		# '==' → expression fallback
+	j	cs_op_eq
+cs_chk_colon_eq:
+	addi	t3, s2, 1
+	bge	t3, s3, cs_bad
+	lbu	t4, 0(t3)
+	addi	t5, zero, '='
+	bne	t4, t5, cs_bad		# bare ':' → not assignment
+	addi	s2, s2, 1		# skip ':' (cs_op_eq will skip the '=')
 	j	cs_op_eq
 sw_cs_eq1_try_plus:
 	addi	t1, zero, '+'
@@ -9237,6 +9364,11 @@ ce_cs_exprstmt:
 
 cs_halt:
 	addi	a0, zero, 1		# err 1: expected ';'
+	j	report_err
+cs_bad_immut_reassign:
+	lla	t0, ident_start
+	lw	s2, 0(t0)
+	addi	a0, zero, 55		# err 55: cannot reassign immutable
 	j	report_err
 
 cs_done:
@@ -10265,6 +10397,24 @@ lv_slot:
 ident_start:
 	.word	0
 
+# Pointer to the most recent symtab entry returned by lookup/lookup_or_alloc.
+# Used by the assignment handler to read/write the mutability flag (byte 37).
+last_ident_entry:
+	.word	0
+
+# Flag set before lookup_or_alloc to indicate whether the upcoming
+# assignment is mutable (:=) or immutable (=). Read in la_cs to
+# set byte 37 of the symtab entry and enforce rules.
+#   0 = immutable (via '=')
+#   1 = mutable   (via ':=')
+assign_is_mut:
+	.word	0
+
+# Set to 1 by la_new (new entry created), 0 by la_match (existing found).
+# Read after lookup_or_alloc returns to distinguish new vs existing.
+lookup_was_new:
+	.word	0
+
 # ── Function compilation state ─────────────────────────────────────────────
 # Function symtab: separate growable table, independent of the variable
 # symtab so that functions and locals share a namespace without stepping on
@@ -10568,6 +10718,10 @@ err_tbl:
 	.byte	1, 19
 	.ascii	"unknown struct type"
 	.zero	11
+	# slot 55 — raw: immutable variable reassignment
+	.byte	1, 25
+	.ascii	"cannot reassign immutable"
+	.zero	5
 
 # ══════════════════════════════════════════════════════════════════════════════
 # End of famc image.  `tp` is initialized from this label at startup — every

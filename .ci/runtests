@@ -202,7 +202,7 @@ test_output  "two-digit hex"         "@0x10000000 = 0x42;" "B"
 # ============================================================================
 echo "=== Variables ==="
 test_output  "assign and use"        "x = 65; @0x10000000 = x;"                "A"
-test_output  "reassign same slot"    "x = 1; x = 65; @0x10000000 = x;"         "A"
+test_output  "reassign same slot"    "x := 1; x := 65; @0x10000000 = x;"         "A"
 test_output  "two variables"         "x = 60; y = 5; @0x10000000 = x + y;"     "A"
 test_output  "var copies other"      "x = 65; y = x; @0x10000000 = y;"         "A"
 test_output  "underscore in ident"   "my_var = 65; @0x10000000 = my_var;"      "A"
@@ -766,10 +766,10 @@ test_output  "no-else ternary true path returns value" \
 echo "=== Assignment as expression (Pratt) ==="
 # Simple IDENT assignment as an expression
 test_output  "assign in parens contributes its value" \
-	"x = 5; y = (x = 10) + 55; @0x10000000 = y;" "A"
+	"x := 5; y = (x := 10) + 55; @0x10000000 = y;" "A"
 # Chained right-associative assignment: a = b = c = 5
 test_output  "chained assignment right-associative" \
-	"a = 0; b = 0; x = a = b = 20; @0x10000000 = a + b + x + 5;" "A"
+	"a := 0; b := 0; x = a := b := 20; @0x10000000 = a + b + x + 5;" "A"
 # @ deref assignment as an expression — writes to address, produces value.
 test_output  "@addr = val as an expression" \
 	"p = 0x10000000; @p = 65;" "A"
@@ -799,7 +799,7 @@ test_output  "single-expr block as primary" \
 test_output  "block with trailing bare value" \
 	"@0x10000000 = { x = 10; x + 55 };" "A"
 test_output  "block with only assignments; last assign is value" \
-	"a = 0; @0x10000000 = { a = 66 };" "B"
+	"a := 0; @0x10000000 = { a := 66 };" "B"
 test_output  "block participates in addition" \
 	"@0x10000000 = { 30 } + { 35 };" "A"
 test_output  "block in ternary true branch" \
@@ -809,7 +809,7 @@ test_output  "block in ternary false branch" \
 test_output  "user repro — block in both ternary branches" \
 	"$(cat <<'EOT'
 x = 4;
-y = x > 3 ? { t = x + 1; t } : { t = x + 2; t };
+y := x > 3 ? { t = x + 1; t } : { u = x + 2; u };
 @0x10000000 = y + 48;
 EOT
 )" "5"
@@ -820,7 +820,7 @@ test_output  "deeply nested blocks (3 levels)" \
 test_output  "block with many statements" \
 	"@0x10000000 = { a = 1; b = 2; c = 3; d = 4; e = 5; a + b + c + d + e + 50 };" "A"
 test_output  "block side-effect on outer variable" \
-	"x = 0; { x = 65 }; @0x10000000 = x;" "A"
+	"x := 0; { x := 65 }; @0x10000000 = x;" "A"
 test_output  "block discards non-final expression value" \
 	"@0x10000000 = { 999; 65 };" "A"
 test_output  "block with @deref store as last expression" \
@@ -836,11 +836,11 @@ test_output  "block with inner ternary as last expr" \
 test_output  "block with inner && as last expr (true path)" \
 	"@0x10000000 = { 1 && 1 } + 64;" "A"
 test_output  "block with loop-shaped sum" \
-	"@0x10000000 = { a = 0; a = a + 10; a = a + 20; a = a + 35; a };" "A"
+	"@0x10000000 = { a := 0; a := a + 10; a := a + 20; a := a + 35; a };" "A"
 test_output  "empty-effect block followed by addition" \
 	"@0x10000000 = { x = 1 } + 64;" "A"
 test_output  "block expression-statement (value discarded)" \
-	"x = 5; { x = x + 60 }; @0x10000000 = x + 0;" "A"
+	"x := 5; { x := x + 60 }; @0x10000000 = x + 0;" "A"
 test_output  "double-nested block via deref store target" \
 	"p = 0x10000000; @p = { { 65 } };" "A"
 
@@ -931,9 +931,9 @@ test_output  "loop sum 1..10" \
 # The full user repro: sum 1..100 == 5050.
 test_output  "user repro — sum 1..100 via loop+break" \
 	"$(cat <<'EOT'
-y = 0;
-x = 0;
-x = loop {
+y := 0;
+x := 0;
+x := loop {
     ++y > 100 ? break x;
     x += y;
 };
@@ -949,8 +949,8 @@ test_output  "loop result used in addition" \
 # continue skips the rest of the loop body.
 test_output  "continue skips rest of body" \
 	"$(cat <<'EOT'
-i = 0; sum = 0;
-sum = loop {
+i := 0; sum := 0;
+sum := loop {
     ++i > 10 ? break sum;
     i == 5 ? continue;
     sum += i;
@@ -970,7 +970,7 @@ EOT
 )" "1357"
 test_output  "continue target is innermost loop only" \
 	"$(cat <<'EOT'
-outer = 0; hits = 0;
+outer := 0; hits := 0;
 loop {
     outer += 1;
     loop {
@@ -987,11 +987,11 @@ EOT
 # Nested loops: the inner break only exits the inner loop.
 test_output  "nested loops — inner break doesn't escape outer" \
 	"$(cat <<'EOT'
-o = 0;
-total = 0;
-total = loop {
+o := 0;
+total := 0;
+total := loop {
     o += 1;
-    inner = loop { break 7; };
+    inner := loop { break 7; };
     total += inner;
     o > 4 ? break total + 30;
 };
@@ -1250,17 +1250,17 @@ echo "=== Error messages ==="
 # Note: compile() pipes via `echo "$src"` which appends a trailing newline,
 # so EOF errors report one line past the last source line, col 1.
 test_error "missing ';' at EOF" \
-	"x = 5" \
+	"x := 5" \
 	"Error:2:1 Expected ';' at end of input"
 test_error "missing ';' before next stmt" \
-	"x = 5 y = 6;" \
-	"Error:1:7 Expected ';' found 'y'"
+	"x := 5 y := 6;" \
+	"Error:1:8 Expected ';' found 'y'"
 test_error "missing ';' after multi-line input" \
-	"$(printf 'a = 1;\nb = 2')" \
+	"$(printf 'a = 1;\nb := 2')" \
 	"Error:3:1 Expected ';' at end of input"
 test_error "column tracking on same line" \
-	"a = 5; b = 5 c = 0;" \
-	"Error:1:14 Expected ';' found 'c'"
+	"a = 5; b := 5 c := 0;" \
+	"Error:1:15 Expected ';' found 'c'"
 # Missing ')'.
 test_error "missing ')' at EOF" \
 	"@0x10000000 = (1 + 2" \
@@ -1293,7 +1293,7 @@ test_error "'++' on numeric literal" \
 	"x = ++5;" \
 	"Error:1:7 '++'/'--' requires an lvalue"
 test_error "line tracking — error on line 3" \
-	"$(printf 'a = 1;\nb = 2;\nc = 3')" \
+	"$(printf 'a = 1;\nb = 2;\nc := 3')" \
 	"Error:4:1 Expected ';' at end of input"
 # for-loop parse errors
 test_error "for without ident" \
