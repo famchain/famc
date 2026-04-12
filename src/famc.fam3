@@ -337,6 +337,93 @@ rd_done:
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 
+	# addi s1, zero, 0   →  stack guard disabled (s1=0 means no check)
+	#   opcode=0x13, rd=s1=9, rs1=zero=0, f3=0, imm=0
+	#   word = 0x13 | (9<<7) = 0x00000493
+	lui	a0, 0
+	addi	a0, a0, 0x493
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# j past_panic — skip over the inline panic handler
+	# jal zero, offset   opcode=0x6F, rd=0 → base word 0x0000006F
+	# offset = 11 instructions * 4 = 44 bytes (the panic handler is 10 insns)
+	# J-type encoding for imm=44 (0x2C):
+	#   imm[20|10:1|11|19:12]  → 44 = 0b...0_0000101100
+	#   imm[10:1]=0b0000010110 → bits[30:21]=0x16 → 0x16<<21 = 0x02C00000
+	#   all other imm bits are 0
+	#   word = 0x02C0006F
+	lui	a0, 0x2C00
+	addi	a0, a0, 0x06F
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# ── Inline panic handler (10 instructions) ──
+	# Entered via bltu sp, s1 from any stack-check site.
+	# Writes "S\n" to UART at 0x10000000, then powers off QEMU.
+	lla	t0, panic_handler_addr
+	sw	s5, 0(t0)		# record address for bltu encoding
+
+	# lui t0, 0x10000   →  t0 = 0x10000000 (UART)  word = 0x100002B7
+	lui	a0, 0x10000
+	addi	a0, a0, 0x2B7
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi t1, zero, 0x53   →  t1 = 'S'  word = 0x05300313
+	lui	a0, 0x5300
+	addi	a0, a0, 0x313
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# sb t1, 0(t0)   →  word = 0x00628023
+	lui	a0, 0x628
+	addi	a0, a0, 0x023
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi t1, zero, 0x0A   →  t1 = '\n'  word = 0x00A00313
+	lui	a0, 0xA00
+	addi	a0, a0, 0x313
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# sb t1, 0(t0)   →  word = 0x00628023
+	lui	a0, 0x628
+	addi	a0, a0, 0x023
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# Poweroff: lui t0, 0x100 → 0x001002B7
+	lui	a0, 0x100
+	addi	a0, a0, 0x2B7
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# lui t1, 0x5 → 0x00005337
+	lui	a0, 0x5
+	addi	a0, a0, 0x337
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# addi t1, t1, 0x555 → 0x55530313
+	lui	a0, 0x55530
+	addi	a0, a0, 0x313
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# sw t1, 0(t0) → 0x0062A023
+	lui	a0, 0x62A
+	addi	a0, a0, 0x023
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# jal zero, 0 (hang) → 0x0000006F
+	lui	a0, 0
+	addi	a0, a0, 0x6F
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
 # ── Phase 3: compile all statements ────────────────────────────────────────
 compile_loop:
 	addi	gp, zero, 0
@@ -2213,6 +2300,9 @@ ew_push_addi:
 	addi	gp, zero, 8		# ew site 8 = ew_push_sw
 	j	emit_word
 ew_push_sw:
+	addi	gp, zero, 0		# esc site 0 = esc_ret_push
+	j	emit_stack_check
+esc_ret_push:
 	lw	gp, 0(sp)
 	addi	sp, sp, 4
 	j	emit_push_a0_disp
@@ -3307,6 +3397,63 @@ esb_d2:
 	j	esb_cep_compound
 esb_d3:
 	j	esb_cep_postfix
+
+# ══════════════════════════════════════════════════════════════════════════════
+# emit_stack_check — emit `bgeu sp, s1, +8 ; jal zero, panic_handler`.
+# When s1=0 (guard disabled), bgeu always branches (nothing is unsigned < 0),
+# so the jal never fires. When s1 = stack floor, sp < s1 skips the bgeu and
+# hits the jal, branching to the panic handler emitted in the prologue.
+#
+# Call sites: 0: esc_ret_push (emit_push_a0, after sp decrement)
+#             1: esc_ret_fn   (function prologue, after frame alloc)
+# gp = return site (set by caller, NOT saved — no sub-calls here).
+# ══════════════════════════════════════════════════════════════════════════════
+emit_stack_check:
+	# Emit bgeu sp, s1, +8 (constant word 0x00917463)
+	# B-type: opcode=0x63 funct3=7 rs1=sp(2) rs2=s1(9) offset=+8
+	# offset +8: imm[4:1]=0100→bits[11:8]=4→0x400
+	lui	a0, 0x917
+	addi	a0, a0, 0x463
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	# Emit jal zero, panic_handler
+	# offset = panic_handler_addr - s5
+	lla	t0, panic_handler_addr
+	lw	t0, 0(t0)
+	sub	t0, t0, s5		# signed offset
+
+	# J-type encoding: imm[20|10:1|11|19:12] rd opcode
+	# base = 0x0000006F (jal zero, 0)
+	# imm[10:1] → bits[30:21]
+	srli	t1, t0, 1
+	andi	t1, t1, 0x3FF
+	slli	t1, t1, 21
+	# imm[11] → bit[20]
+	srli	t2, t0, 11
+	andi	t2, t2, 1
+	slli	t2, t2, 20
+	# imm[19:12] → bits[19:12]
+	srli	t3, t0, 12
+	andi	t3, t3, 0xFF
+	slli	t3, t3, 12
+	# imm[20] → bit[31]
+	srli	t4, t0, 20
+	andi	t4, t4, 1
+	slli	t4, t4, 31
+
+	addi	a0, zero, 0x6F
+	or	a0, a0, t1
+	or	a0, a0, t2
+	or	a0, a0, t3
+	or	a0, a0, t4
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+
+	bnez	gp, esc_d1
+	j	esc_ret_push
+esc_d1:
+	j	esc_ret_fn
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Expression compilation — precedence-climbing, three layers:
@@ -5761,6 +5908,9 @@ ew_cs_fn_prol4:
 ew_cs_fn_prol5:
 	addi	t0, s5, -4
 	sw	t0, 12(sp)		# frame_alloc addr
+	addi	gp, zero, 1		# esc site 1 = esc_ret_fn
+	j	emit_stack_check
+esc_ret_fn:
 	# addi fp, sp, 0   word 0x00010413
 	lui	a0, 0x10
 	addi	a0, a0, 0x413
@@ -10559,6 +10709,9 @@ assign_is_mut:
 # Set to 1 by la_new (new entry created), 0 by la_match (existing found).
 # Read after lookup_or_alloc returns to distinguish new vs existing.
 lookup_was_new:
+	.word	0
+
+panic_handler_addr:
 	.word	0
 
 # ── Function compilation state ─────────────────────────────────────────────
