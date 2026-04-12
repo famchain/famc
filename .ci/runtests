@@ -1027,6 +1027,13 @@ test_output  "non-literal range bounds" \
 	"lo = 2; hi = 5; v = for x in lo..hi { x }; @0x10000000 = v + 61;" "A"
 test_output  "inclusive with expression bounds" \
 	"lo = 1; hi = 4; for i in lo..=hi { @0x10000000 = '0' + i; };" "1234"
+# Semicolon optional after brace-terminated expressions.
+test_output  "loop without trailing semicolon" \
+	"x := 64; loop { x++; x > 65 ? break 0 } @0x10000000 = x;" "B"
+test_output  "for without trailing semicolon" \
+	"for i in 0..3 { @0x10000000 = 'A' + i } @0x10000000 = '!';" "ABC!"
+test_output  "block without trailing semicolon" \
+	"x = { 65 } @0x10000000 = x;" "A"
 
 # ============================================================================
 echo "=== Arrays ==="

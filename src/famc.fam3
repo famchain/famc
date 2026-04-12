@@ -3499,10 +3499,11 @@ compile_unary:
 	sw	zero, 4(sp)
 	sw	zero, 8(sp)
 
-	# Reset the lvalue marker at entry. It'll be set to 1/2/3 below if the
-	# primary we parse turns out to be a simple lvalue form (IDENT / @expr /
-	# *expr) with no prefix/postfix operators that would invalidate it.
+	# Reset the lvalue marker at entry.
 	lla	t0, lv_kind
+	sw	zero, 0(t0)
+	# Reset brace flag — set to 1 by block/loop/for on closing '}'.
+	lla	t0, last_was_brace
 	sw	zero, 0(t0)
 
 	addi	gp, zero, 1
@@ -3988,6 +3989,9 @@ ct_loop_patch_done:
 	addi	sp, sp, 144
 	lla	t0, lv_kind
 	sw	zero, 0(t0)
+	lla	t0, last_was_brace
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
 	j	ct_done
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5169,6 +5173,9 @@ ct_for_break_patch_done:
 	addi	sp, sp, 192
 	lla	t0, lv_kind
 	sw	zero, 0(t0)
+	lla	t0, last_was_brace
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
 	j	ct_done
 
 ct_bad_loop_lbrace:
@@ -7118,10 +7125,11 @@ sw_ct_blk_sep:
 	j	ct_blk_loop
 ct_blk_end:
 	addi	s2, s2, 1
-	# The block result is never an lvalue (even if its last expr was an
-	# IDENT) — reset lv_kind so `{ x } = 5` isn't silently accepted.
 	lla	t0, lv_kind
 	sw	zero, 0(t0)
+	lla	t0, last_was_brace
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
 	j	ct_deref
 
 ct_deref:
@@ -9222,15 +9230,18 @@ esws_ret:
 	addi	gp, zero, 6
 	j	skip_ws
 sw_cs_semi1:
-	# la_cs's spill slot was already popped in ce_cs_rhs, so sp is back at
-	# compile_stmt's entry frame. Any failure here goes direct to cs_fb, not
-	# via cs_bad (which would double-pop).
-	bge	s2, s3, cs_fb
+	# Semicolon optional after brace-terminated RHS (block/loop/for).
+	bge	s2, s3, cs_semi1_check_brace
 	lbu	t0, 0(s2)
 	addi	t1, zero, ';'
-	bne	t0, t1, cs_fb
+	bne	t0, t1, cs_semi1_check_brace
 	addi	s2, s2, 1
 	j	cs_done
+cs_semi1_check_brace:
+	lla	t0, last_was_brace
+	lw	t1, 0(t0)
+	bnez	t1, cs_done
+	j	cs_fb
 
 # ── '+' after IDENT: distinguish '+=' and '++' ───────────────────────────────
 cs_op_plus:
@@ -9812,13 +9823,19 @@ cs_fb:
 	addi	gp, zero, 24		# compile_expr site 24 = ce_cs_exprstmt
 	j	compile_expr_p
 ce_cs_exprstmt:
-	# compile_expr_p leaves s2 at the first non-op char — should be ';'.
-	bge	s2, s3, cs_halt
+	# If ';' follows, consume it. If expression ended with '}' (block/loop/for),
+	# the semicolon is optional.
+	bge	s2, s3, cs_exprstmt_check_brace
 	lbu	t0, 0(s2)
 	addi	t1, zero, ';'
-	bne	t0, t1, cs_halt
+	bne	t0, t1, cs_exprstmt_check_brace
 	addi	s2, s2, 1
 	j	cs_done
+cs_exprstmt_check_brace:
+	lla	t0, last_was_brace
+	lw	t1, 0(t0)
+	bnez	t1, cs_done
+	j	cs_halt
 
 cs_halt:
 	addi	a0, zero, 1		# err 1: expected ';'
@@ -10863,6 +10880,8 @@ ident_start:
 # Pointer to the most recent symtab entry returned by lookup/lookup_or_alloc.
 # Used by the assignment handler to read/write the mutability flag (byte 37).
 last_ident_entry:
+	.word	0
+last_was_brace:
 	.word	0
 
 # Flag set before lookup_or_alloc to indicate whether the upcoming
