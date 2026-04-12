@@ -178,6 +178,20 @@ _start:
 	sw	t2, 0(t1)
 	addi	tp, t2, 0
 
+	# ── Struct symtab: initial 16 entries × 320 bytes = 5120 bytes ─
+	lla	t1, struct_base
+	sw	tp, 0(t1)
+	lla	t1, struct_top
+	sw	tp, 0(t1)
+	addi	t0, zero, 1280		# 1280 bytes per group of 4 entries
+	add	t2, tp, t0
+	add	t2, t2, t0
+	add	t2, t2, t0
+	add	t2, t2, t0		# total: 5120 bytes = 16 entries
+	lla	t1, struct_end
+	sw	t2, 0(t1)
+	addi	tp, t2, 0
+
 	addi	s9, zero, 0		# next var slot
 	addi	s11, zero, 0		# token length
 
@@ -929,7 +943,79 @@ sw_d54:
 	bnez	gp, sw_d55
 	j	sw_cs_decl_semi
 sw_d55:
+	addi	gp, gp, -1
+	bnez	gp, sw_d56
 	j	sw_cad_probe
+sw_d56:
+	addi	gp, gp, -1
+	bnez	gp, sw_d57
+	j	sw_cs_struct_name
+sw_d57:
+	addi	gp, gp, -1
+	bnez	gp, sw_d58
+	j	sw_cs_struct_lbrace
+sw_d58:
+	addi	gp, gp, -1
+	bnez	gp, sw_d59
+	j	sw_cs_struct_field
+sw_d59:
+	addi	gp, gp, -1
+	bnez	gp, sw_d60
+	j	sw_cs_struct_field_after_comma
+sw_d60:
+	addi	gp, gp, -1
+	bnez	gp, sw_d61
+	j	sw_ct_stl_lbrace
+sw_d61:
+	addi	gp, gp, -1
+	bnez	gp, sw_d62
+	j	sw_ct_stl_peek
+sw_d62:
+	addi	gp, gp, -1
+	bnez	gp, sw_d63
+	j	sw_ct_stl_elem
+sw_d63:
+	addi	gp, gp, -1
+	bnez	gp, sw_d64
+	j	sw_ct_stl_after_comma
+sw_d64:
+	addi	gp, gp, -1
+	bnez	gp, sw_d65
+	j	sw_ct_stl_colon
+sw_d65:
+	addi	gp, gp, -1
+	bnez	gp, sw_d66
+	j	sw_ct_sa_ptr
+sw_d66:
+	addi	gp, gp, -1
+	bnez	gp, sw_d67
+	j	sw_ct_sa_peek
+sw_d67:
+	addi	gp, gp, -1
+	bnez	gp, sw_d68
+	j	halt_err
+sw_d68:
+	addi	gp, gp, -1
+	bnez	gp, sw_d69
+	j	sw_ct_sa_rbrack
+sw_d69:
+	addi	gp, gp, -1
+	bnez	gp, sw_d70
+	j	sw_ct_sa_dot
+sw_d70:
+	addi	gp, gp, -1
+	bnez	gp, sw_d71
+	j	sw_ct_sa_field
+sw_d71:
+	addi	gp, gp, -1
+	bnez	gp, sw_d72
+	j	sw_ct_so_lparen
+sw_d72:
+	addi	gp, gp, -1
+	bnez	gp, sw_d73
+	j	sw_ct_so_name
+sw_d73:
+	j	sw_ct_so_rparen
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_word — store a0 as 4 bytes at s5, advance s5.
@@ -1282,7 +1368,55 @@ ewd_77:
 	bnez	gp, ewd_78
 	j	ew_cep_pe_sh
 ewd_78:
+	addi	gp, gp, -1
+	bnez	gp, ewd_79
 	j	ew_cs_decl_addi
+ewd_79:
+	addi	gp, gp, -1
+	bnez	gp, ewd_80
+	j	ew_ct_stl_addi
+ewd_80:
+	addi	gp, gp, -1
+	bnez	gp, ewd_81
+	j	ew_ct_stl_lw_base
+ewd_81:
+	addi	gp, gp, -1
+	bnez	gp, ewd_82
+	j	ew_ct_stl_sw_zero
+ewd_82:
+	addi	gp, gp, -1
+	bnez	gp, ewd_83
+	j	ew_ct_stl_lw_base2
+ewd_83:
+	addi	gp, gp, -1
+	bnez	gp, ewd_84
+	j	ew_ct_stl_sw_val
+ewd_84:
+	addi	gp, gp, -1
+	bnez	gp, ewd_85
+	j	ew_ct_sa_lw
+ewd_85:
+	addi	gp, gp, -1
+	bnez	gp, ewd_86
+	j	ew_ct_stl_pop_a0
+ewd_86:
+	addi	gp, gp, -1
+	bnez	gp, ewd_87
+	j	ew_ct_stl_spadj
+ewd_87:
+	addi	gp, gp, -1
+	bnez	gp, ewd_88
+	j	ew_ct_sa_addi
+ewd_88:
+	addi	gp, gp, -1
+	bnez	gp, ewd_89
+	j	ew_ct_sa_slli
+ewd_89:
+	addi	gp, gp, -1
+	bnez	gp, ewd_90
+	j	ew_ct_sa_li_sizeof
+ewd_90:
+	j	ew_ct_sa_chain_lw
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_ident — reads an identifier at s2 into token buffer.
@@ -1364,7 +1498,35 @@ pid_8:
 	bnez	gp, pid_9
 	j	pi_cs_decl
 pid_9:
+	addi	gp, gp, -1
+	bnez	gp, pid_10
 	j	pi_cad_probe
+pid_10:
+	addi	gp, gp, -1
+	bnez	gp, pid_11
+	j	pi_cs_struct
+pid_11:
+	addi	gp, gp, -1
+	bnez	gp, pid_12
+	j	pi_cs_struct_field
+pid_12:
+	addi	gp, gp, -1
+	bnez	gp, pid_13
+	j	pi_ct_stl_field
+pid_13:
+	addi	gp, gp, -1
+	bnez	gp, pid_14
+	j	pi_ct_sa_ptr
+pid_14:
+	addi	gp, gp, -1
+	bnez	gp, pid_15
+	j	pi_ct_sa_field
+pid_15:
+	addi	gp, gp, -1
+	bnez	gp, pid_16
+	j	pi_ct_so
+pid_16:
+	j	pi_blk_struct
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_num — parse decimal or hex at s2, returns value in a0.
@@ -1438,7 +1600,11 @@ pn_done:
 	bnez	gp, pn_d1
 	j	pn_ct
 pn_d1:
+	addi	gp, gp, -1
+	bnez	gp, pn_d2
 	j	pn_cs_decl
+pn_d2:
+	j	halt_err
 
 # ══════════════════════════════════════════════════════════════════════════════
 # lookup_or_alloc — find/allocate a variable slot.
@@ -1594,7 +1760,11 @@ la_d5:
 	bnez	gp, la_d6
 	j	la_cs_fn_param
 la_d6:
+	addi	gp, gp, -1
+	bnez	gp, la_d7
 	j	la_cs_decl
+la_d7:
+	j	la_ct_sa
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_li — emit "li a0, imm". imm passed in a0.
@@ -1754,7 +1924,11 @@ elws_d14:
 	bnez	gp, elws_d15
 	j	elws_ct_for_hi_load
 elws_d15:
+	addi	gp, gp, -1
+	bnez	gp, elws_d16
 	j	elws_ct_for_last_load
+elws_d16:
+	j	elws_ct_sa
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sw_sp — emit "sw a0, offset(fp)". offset (bytes, positive) in a0.
@@ -2087,7 +2261,19 @@ epa_d25:
 	bnez	gp, epa_d26
 	j	push_ct_call_arg
 epa_d26:
+	addi	gp, gp, -1
+	bnez	gp, epa_d27
 	j	push_ct_idx
+epa_d27:
+	addi	gp, gp, -1
+	bnez	gp, epa_d28
+	j	push_ct_stl
+epa_d28:
+	addi	gp, gp, -1
+	bnez	gp, epa_d29
+	j	push_ct_sa_base
+epa_d29:
+	j	push_ct_sa_idx_val
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_pop_t0 — emit "lw t0,0(sp) ; addi sp,sp,4"  (pops top of the compiled
@@ -2248,7 +2434,19 @@ ept_d26:
 	bnez	gp, ept_d27
 	j	pop_ct_idx
 ept_d27:
+	addi	gp, gp, -1
+	bnez	gp, ept_d28
 	j	pop_cep_compound_addr_h
+ept_d28:
+	addi	gp, gp, -1
+	bnez	gp, ept_d29
+	j	pop_ct_sa_idx_val	# site 28 unused, routed to next
+ept_d29:
+	addi	gp, gp, -1
+	bnez	gp, ept_d30
+	j	pop_ct_sa_idx_val
+ept_d30:
+	j	pop_ct_sa_base
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_add — emit "add a0, t0, a0"    (caller just popped LHS into t0).
@@ -2282,7 +2480,11 @@ ead_2:
 	bnez	gp, ead_3
 	j	ea_cep
 ead_3:
+	addi	gp, gp, -1
+	bnez	gp, ead_4
 	j	ea_ct_idx
+ead_4:
+	j	ea_ct_sa
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sub — emit "sub a0, t0, a0"    (caller popped LHS into t0).
@@ -3535,6 +3737,627 @@ pjt_ct_continue:
 	j	ct_done
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ct_struct_literal — compile `Name { v1, v2, v3 }` (positional) or
+#   `Name { f1: v1, f2: v2 }` (named).
+#
+# Entry: s10/s11 = struct name, a0 = struct entry pointer (from lookup).
+# Allocates sizeof(Name) = count*4 bytes on the current frame (bump s9),
+# then zero-fills all fields, then parses and stores the specified ones.
+# Returns: a0 = runtime pointer to the allocated block.
+#
+# Frame (24 bytes on top of compile_unary's 12):
+#    0(sp): struct entry ptr
+#    4(sp): block offset in frame
+#    8(sp): field count
+#   12(sp): positional-or-named flag (0 = positional, 1 = named)
+#   16(sp): ident_start copy (for error positions)
+#   20(sp): reserved
+# ══════════════════════════════════════════════════════════════════════════════
+ct_struct_literal:
+	addi	sp, sp, -24
+	sw	a0, 0(sp)
+	lw	t0, 32(a0)		# field count
+	sw	t0, 8(sp)
+
+	# Reserve count*4 bytes on frame for the new block.
+	slli	t1, t0, 2
+	addi	t2, s9, 0
+	sw	t2, 4(sp)
+	add	s9, s9, t1
+
+	# Consume '{'.
+	addi	gp, zero, 60		# skip_ws site 60 = sw_ct_stl_lbrace
+	j	skip_ws
+sw_ct_stl_lbrace:
+	lbu	t0, 0(s2)
+	addi	t1, zero, '{'
+	bne	t0, t1, ct_bad_stl_lbrace
+	addi	s2, s2, 1
+
+	# Emit: addi a0, fp, <block_offset>  (runtime a0 = block base addr)
+	lw	t3, 4(sp)
+	addi	t4, zero, 2047
+	blt	t4, t3, ct_bad_stl_frame
+	lui	a0, 0x40
+	addi	a0, a0, 0x513
+	andi	t3, t3, 0xFFF
+	slli	t3, t3, 20
+	or	a0, a0, t3
+	addi	gp, zero, 79		# emit_word site 79 = ew_ct_stl_addi
+	j	emit_word
+ew_ct_stl_addi:
+
+	# Push base (runtime) onto the program stack so we can load it
+	# before each field store.
+	addi	gp, zero, 27		# push site 27 = push_ct_stl
+	j	emit_push_a0
+push_ct_stl:
+
+	# Zero all N fields: for i in 0..count, emit `lw t0, 0(sp);
+	# sw zero, i*4(t0)`.
+	# Compile-time loop over fields.
+	sw	zero, 16(sp)		# index counter (reusing the slot)
+ct_stl_zero_loop:
+	lw	t0, 16(sp)
+	lw	t1, 8(sp)
+	beq	t0, t1, ct_stl_zero_done
+	# Emit: `lw t0, 0(sp)` — base in compiled program's t0.
+	#   opcode=0x03, rd=5, f3=2, rs1=2, imm=0 → 0x00012283
+	lui	a0, 0x12
+	addi	a0, a0, 0x283
+	addi	gp, zero, 80		# emit_word site 80 = ew_ct_stl_lw_base
+	j	emit_word
+ew_ct_stl_lw_base:
+	# Emit: `sw zero, (i*4)(t0)`
+	#   opcode=0x23, f3=2, rs1=5(t0), rs2=0(zero), imm=i*4
+	#   imm S-type: imm[11:5] at bits 31..25, imm[4:0] at bits 11..7
+	lw	t0, 16(sp)
+	slli	t0, t0, 2		# byte offset
+	andi	t1, t0, 0x1F
+	slli	t1, t1, 7		# imm[4:0] bits
+	srli	t2, t0, 5
+	andi	t2, t2, 0x7F
+	slli	t2, t2, 25		# imm[11:5] bits
+	# base = opcode 0x23 | f3=2 << 12 | rs1=5 << 15
+	#      = 0x23 | 0x2000 | 0x28000 = 0x2A023
+	lui	a0, 0x2A
+	addi	a0, a0, 0x023
+	or	a0, a0, t1
+	or	a0, a0, t2
+	addi	gp, zero, 81		# emit_word site 81 = ew_ct_stl_sw_zero
+	j	emit_word
+ew_ct_stl_sw_zero:
+	lw	t0, 16(sp)
+	addi	t0, t0, 1
+	sw	t0, 16(sp)
+	j	ct_stl_zero_loop
+ct_stl_zero_done:
+
+	# Parse initializer entries. Empty `{}` is allowed (all zero).
+	addi	gp, zero, 61		# skip_ws site 61 = sw_ct_stl_peek
+	j	skip_ws
+sw_ct_stl_peek:
+	bge	s2, s3, ct_bad_stl_rbrace
+	lbu	t0, 0(s2)
+	addi	t1, zero, '}'
+	beq	t0, t1, ct_stl_done
+	# Decide positional vs named by a local peek: look past the first
+	# token (ident or number/expr) for a ':'. For simplicity, we peek
+	# for an ident followed by ':'. If found, named mode; else
+	# positional.
+	# Positional init: the first value is either an ident (NOT followed
+	# by ':'), a digit, a char literal, a paren, etc.
+	# Named init: an ident followed by ':'.
+	#
+	# Conservative rule: if s2[0] is a letter, scan past ident chars and
+	# check if next non-ws is ':'. If yes → named; else → positional.
+	addi	t1, zero, 'a'
+	blt	t0, t1, ct_stl_pos_mode_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, ct_stl_try_named
+ct_stl_pos_mode_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, ct_stl_pos_mode
+	addi	t1, zero, 91
+	blt	t0, t1, ct_stl_try_named
+ct_stl_pos_mode:
+	sw	zero, 12(sp)		# flag = 0 (positional)
+	j	ct_stl_parse_first
+ct_stl_try_named:
+	# Peek past the ident for a colon.
+	addi	t2, s2, 0
+ct_stl_pn_loop:
+	bge	t2, s3, ct_stl_pos_mode
+	lbu	t3, 0(t2)
+	addi	t4, zero, 'a'
+	blt	t3, t4, ct_stl_pn_chk_uc
+	addi	t4, zero, 123
+	blt	t3, t4, ct_stl_pn_next
+ct_stl_pn_chk_uc:
+	addi	t4, zero, 'A'
+	blt	t3, t4, ct_stl_pn_chk_d
+	addi	t4, zero, 91
+	blt	t3, t4, ct_stl_pn_next
+ct_stl_pn_chk_d:
+	addi	t4, zero, '0'
+	blt	t3, t4, ct_stl_pn_chk_us
+	addi	t4, zero, 58
+	blt	t3, t4, ct_stl_pn_next
+ct_stl_pn_chk_us:
+	addi	t4, zero, '_'
+	beq	t3, t4, ct_stl_pn_next
+	j	ct_stl_pn_done
+ct_stl_pn_next:
+	addi	t2, t2, 1
+	j	ct_stl_pn_loop
+ct_stl_pn_done:
+	# skip ws
+ct_stl_pn_ws:
+	bge	t2, s3, ct_stl_pos_mode
+	lbu	t3, 0(t2)
+	addi	t4, zero, 33
+	bge	t3, t4, ct_stl_pn_chk_colon
+	addi	t2, t2, 1
+	j	ct_stl_pn_ws
+ct_stl_pn_chk_colon:
+	addi	t4, zero, ':'
+	bne	t3, t4, ct_stl_pos_mode
+	addi	t0, zero, 1
+	sw	t0, 12(sp)		# flag = 1 (named)
+ct_stl_parse_first:
+	# Iterate: reset the positional index at 16(sp).
+	sw	zero, 16(sp)
+ct_stl_parse_loop:
+	addi	gp, zero, 62		# skip_ws site 62 = sw_ct_stl_elem
+	j	skip_ws
+sw_ct_stl_elem:
+	bge	s2, s3, ct_bad_stl_rbrace
+	lbu	t0, 0(s2)
+	addi	t1, zero, '}'
+	beq	t0, t1, ct_stl_done
+	# After the first element we expect ',' to separate.
+	lw	t2, 16(sp)
+	beqz	t2, ct_stl_elem_body
+	addi	t1, zero, ','
+	bne	t0, t1, ct_bad_stl_rbrace
+	addi	s2, s2, 1
+	addi	gp, zero, 63		# skip_ws site 63 = sw_ct_stl_after_comma
+	j	skip_ws
+sw_ct_stl_after_comma:
+	bge	s2, s3, ct_bad_stl_rbrace
+	lbu	t0, 0(s2)
+	addi	t1, zero, '}'
+	beq	t0, t1, ct_stl_done
+ct_stl_elem_body:
+	# If in named mode, parse `name:` prefix.
+	lw	t2, 12(sp)
+	beqz	t2, ct_stl_elem_val_pos
+	# Named: parse ident, expect ':', look up field index.
+	addi	gp, zero, 12		# parse_ident site 12 = pi_ct_stl_field
+	j	parse_ident
+pi_ct_stl_field:
+	beqz	s11, ct_bad_stl_field
+	lw	a0, 0(sp)		# struct entry ptr
+	addi	gp, zero, 1		# struct_field_lookup site 1 = sfl_ret_literal
+	j	struct_field_lookup
+sfl_ret_literal:
+	addi	t0, zero, -1
+	beq	a0, t0, ct_bad_stl_field
+	# Field index in a0. Store temporarily in 16(sp) (it's the working
+	# index slot anyway, we'll overwrite).
+	sw	a0, 16(sp)
+	addi	gp, zero, 64		# skip_ws site 64 = sw_ct_stl_colon
+	j	skip_ws
+sw_ct_stl_colon:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ':'
+	bne	t0, t1, ct_bad_stl_field
+	addi	s2, s2, 1
+	j	ct_stl_emit_value
+ct_stl_elem_val_pos:
+	# Positional: use the current index at 16(sp). Bounds check against
+	# field count.
+	lw	t0, 16(sp)
+	lw	t1, 8(sp)
+	bge	t0, t1, ct_bad_stl_too_many
+ct_stl_emit_value:
+	# Compile the value expression (min_bp = 0 stops at ',' / '}').
+	addi	t6, zero, 0
+	addi	gp, zero, 36		# compile_expr site 36 = ce_ct_stl_val
+	j	compile_expr_p
+ce_ct_stl_val:
+	# Emit `lw t0, 0(sp)` — reload base from runtime stack.
+	lui	a0, 0x12
+	addi	a0, a0, 0x283
+	addi	gp, zero, 82		# emit_word site 82 = ew_ct_stl_lw_base2
+	j	emit_word
+ew_ct_stl_lw_base2:
+	# Emit `sw a0, (idx*4)(t0)` to store the field value.
+	lw	t0, 16(sp)
+	slli	t0, t0, 2
+	andi	t1, t0, 0x1F
+	slli	t1, t1, 7
+	srli	t2, t0, 5
+	andi	t2, t2, 0x7F
+	slli	t2, t2, 25
+	# sw a0, 0(t0): opcode 0x23 | f3=2 | rs1=5 | rs2=10
+	#   = 0x23 | 0x2000 | 0x28000 | 0xA00000 = 0x00A2A023
+	lui	a0, 0xA2A
+	addi	a0, a0, 0x023
+	or	a0, a0, t1
+	or	a0, a0, t2
+	addi	gp, zero, 83		# emit_word site 83 = ew_ct_stl_sw_val
+	j	emit_word
+ew_ct_stl_sw_val:
+	# Advance the index (positional) or reset it (named, the next ident
+	# will overwrite). For positional, next element uses next slot. For
+	# named, next element sets its own slot.
+	lw	t2, 12(sp)
+	bnez	t2, ct_stl_next_named
+	lw	t0, 16(sp)
+	addi	t0, t0, 1
+	sw	t0, 16(sp)
+	j	ct_stl_parse_loop
+ct_stl_next_named:
+	# Leave 16(sp) as-is — the next iteration will overwrite it when
+	# parsing the next field name. But we need the loop-entry check
+	# (which uses 16(sp) as "is-first flag") to see non-zero. So store
+	# 1 there.
+	addi	t0, zero, 1
+	sw	t0, 16(sp)
+	j	ct_stl_parse_loop
+
+ct_stl_done:
+	addi	s2, s2, 1		# consume '}'
+	# Emit `lw a0, 0(sp)` directly to pop base into a0 as the literal's
+	# result. Then `addi sp, sp, 4` to free the stack slot.
+	lui	a0, 0x12
+	addi	a0, a0, 0x503
+	addi	gp, zero, 85		# emit_word site 85 = ew_ct_stl_pop_a0
+	j	emit_word
+ew_ct_stl_pop_a0:
+	lui	a0, 0x410
+	addi	a0, a0, 0x113
+	addi	gp, zero, 86		# emit_word site 86 = ew_ct_stl_spadj
+	j	emit_word
+ew_ct_stl_spadj:
+	addi	sp, sp, 24
+	lla	t0, lv_kind
+	sw	zero, 0(t0)
+	j	ct_done
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ct_struct_access — compile `Name@x.field` or `Name@x[LIT].field`.
+#
+# Entry: s10/s11 = struct name, a0 = struct entry pointer.
+# Emits: load pointer var x → a0, optional index offset, then
+#   `lw a0, field_offset(a0)` to read the field. Sets lv_kind = 3 so
+# the cep_pre_assign path handles writes via peephole store.
+# ══════════════════════════════════════════════════════════════════════════════
+ct_struct_access:
+	addi	sp, sp, -8
+	sw	a0, 0(sp)		# struct entry ptr
+	addi	s2, s2, 1		# consume '@'
+	addi	gp, zero, 65		# skip_ws site 65 = sw_ct_sa_ptr
+	j	skip_ws
+sw_ct_sa_ptr:
+	# Parse pointer ident.
+	addi	gp, zero, 13		# parse_ident site 13 = pi_ct_sa_ptr
+	j	parse_ident
+pi_ct_sa_ptr:
+	beqz	s11, ct_bad_sa_ptr
+	addi	gp, zero, 7		# lookup site 7 = la_ct_sa
+	j	lookup
+la_ct_sa:
+	# a0 = slot offset of ptr var. Emit `lw a0, off(fp)`.
+	addi	gp, zero, 16		# elws site 16 = elws_ct_sa
+	j	emit_lw_sp
+elws_ct_sa:
+	# Peek for '[LIT]' or '.field'.
+	addi	gp, zero, 66		# skip_ws site 66 = sw_ct_sa_peek
+	j	skip_ws
+sw_ct_sa_peek:
+	lbu	t0, 0(s2)
+	addi	t1, zero, '['
+	beq	t0, t1, ct_sa_idx
+	addi	t1, zero, '.'
+	beq	t0, t1, ct_sa_dot
+	j	ct_bad_sa_dot
+ct_sa_idx:
+	# Runtime index: push base, compile index expression, scale by
+	# sizeof, pop base, add. For power-of-2 sizeofs we emit a single
+	# slli; for other sizes we fall back to the general emit_mul.
+	addi	s2, s2, 1		# consume '['
+	# Push base (runtime a0 has it from `lw a0, var(fp)`).
+	addi	gp, zero, 28		# push site 28 = push_ct_sa_base
+	j	emit_push_a0
+push_ct_sa_base:
+	# Compile index expression.
+	addi	t6, zero, 0
+	addi	gp, zero, 37		# compile_expr site 37 = ce_ct_sa_idx
+	j	compile_expr_p
+ce_ct_sa_idx:
+	# Expect ']'.
+	addi	gp, zero, 68		# skip_ws site 68 = sw_ct_sa_rbrack
+	j	skip_ws
+sw_ct_sa_rbrack:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ']'
+	bne	t0, t1, ct_bad_sa_rbrack
+	addi	s2, s2, 1
+	# Compute sizeof = field count * 4. Save for emitting later.
+	lw	t0, 0(sp)		# struct entry ptr
+	lw	t1, 32(t0)
+	slli	t1, t1, 2
+	sw	t1, 4(sp)		# saved sizeof
+	# Is sizeof a power of 2? (sizeof & (sizeof - 1) == 0)
+	addi	t2, t1, -1
+	and	t3, t1, t2
+	bnez	t3, ct_sa_scale_mul
+	# Power of 2: compute log2 and emit slli.
+	addi	t4, t1, 0
+	addi	t2, zero, 0
+ct_sa_log2_loop:
+	addi	t5, zero, 1
+	beq	t4, t5, ct_sa_log2_done
+	srli	t4, t4, 1
+	addi	t2, t2, 1
+	j	ct_sa_log2_loop
+ct_sa_log2_done:
+	beqz	t2, ct_sa_scale_done
+	# Emit `slli a0, a0, t2`. Word 0x00051513 | (shamt << 20).
+	andi	t3, t2, 0x1F
+	slli	t3, t3, 20
+	lui	a0, 0x51
+	addi	a0, a0, 0x513
+	or	a0, a0, t3
+	addi	gp, zero, 88		# emit_word site 88 = ew_ct_sa_slli
+	j	emit_word
+ew_ct_sa_slli:
+	j	ct_sa_scale_done
+ct_sa_scale_mul:
+	# Non-power-of-2: push index, load sizeof as a literal, pop index
+	# into t0, call emit_mul (t0=lhs, a0=rhs → a0=lhs*rhs).
+	addi	gp, zero, 29		# push site 29 = push_ct_sa_idx_val
+	j	emit_push_a0
+push_ct_sa_idx_val:
+	lw	t1, 4(sp)		# sizeof
+	andi	t2, t1, 0xFFF
+	slli	t2, t2, 20
+	lui	a0, 0
+	addi	a0, a0, 0x513
+	or	a0, a0, t2
+	addi	gp, zero, 89		# emit_word site 89 = ew_ct_sa_li_sizeof
+	j	emit_word
+ew_ct_sa_li_sizeof:
+	addi	gp, zero, 29		# pop site 29 = pop_ct_sa_idx_val
+	j	emit_pop_t0
+pop_ct_sa_idx_val:
+	addi	gp, zero, 3		# emul site 3 = emul_ct_sa
+	j	emit_mul
+emul_ct_sa:
+ct_sa_scale_done:
+	# Pop base → t0, add a0 = base + i*sizeof.
+	addi	gp, zero, 30		# pop site 30 = pop_ct_sa_base
+	j	emit_pop_t0
+pop_ct_sa_base:
+	addi	gp, zero, 4		# ea site 4 = ea_ct_sa
+	j	emit_add
+ea_ct_sa:
+	# Expect '.' next.
+	addi	gp, zero, 69		# skip_ws site 69 = sw_ct_sa_dot
+	j	skip_ws
+sw_ct_sa_dot:
+	lbu	t0, 0(s2)
+	addi	t1, zero, '.'
+	bne	t0, t1, ct_bad_sa_dot
+	addi	s2, s2, 1
+	# Index offset is now 0 at compile time — the runtime address in
+	# a0 already includes the i*sizeof contribution.
+	sw	zero, 4(sp)
+	j	ct_sa_parse_field
+ct_sa_dot:
+	# No '[i]' — index offset is 0, a0 already holds base.
+	sw	zero, 4(sp)
+	addi	s2, s2, 1		# consume '.'
+ct_sa_parse_field:
+	# Parse field name ident.
+	addi	gp, zero, 70		# skip_ws site 70 = sw_ct_sa_field
+	j	skip_ws
+sw_ct_sa_field:
+	addi	gp, zero, 14		# parse_ident site 14 = pi_ct_sa_field
+	j	parse_ident
+pi_ct_sa_field:
+	beqz	s11, ct_bad_sa_field
+	lw	a0, 0(sp)		# struct entry ptr
+	addi	gp, zero, 0		# struct_field_lookup site 0 = sfl_ret_access
+	j	struct_field_lookup
+sfl_ret_access:
+	addi	t0, zero, -1
+	beq	a0, t0, ct_bad_sa_field
+	# Total offset = (index offset saved at 4(sp)) + (field index * 4)
+	slli	a0, a0, 2
+	lw	t0, 4(sp)
+	add	a0, a0, t0
+	addi	t1, zero, 2047
+	blt	t1, a0, ct_bad_sa_offset
+	# If offset != 0, emit `addi a0, a0, offset` so runtime a0 = base +
+	# offset before the load. We need this because cep_pre_assign un-
+	# emits the last instruction on write, and the store must go to the
+	# correct address. For offset == 0, skip the addi entirely.
+	beqz	a0, ct_sa_no_addi
+	# Word = 0x00050513 | (offset << 20), where 0x00050513 = addi a0, a0, 0
+	andi	t2, a0, 0xFFF
+	slli	t2, t2, 20
+	lui	a0, 0x50
+	addi	a0, a0, 0x513
+	or	a0, a0, t2
+	addi	gp, zero, 87		# emit_word site 87 = ew_ct_sa_addi
+	j	emit_word
+ew_ct_sa_addi:
+ct_sa_no_addi:
+	# Peek for another '.': if found, this is an intermediate pointer
+	# dereference in a chain like `Outer@x.inner.field`. Emit an lw
+	# (non-lvalue, can't be un-emitted) and loop back to parse the
+	# next field name using the SAME struct type.
+	addi	t3, s2, 0
+ct_sa_chain_ws:
+	bge	t3, s3, ct_sa_final_lw
+	lbu	t0, 0(t3)
+	addi	t1, zero, 33
+	bge	t0, t1, ct_sa_chain_peek
+	addi	t3, t3, 1
+	j	ct_sa_chain_ws
+ct_sa_chain_peek:
+	addi	t1, zero, '.'
+	bne	t0, t1, ct_sa_final_lw
+	# Another '.' follows — intermediate dereference.
+	addi	s2, t3, 1		# consume '.'
+	# Emit lw a0, 0(a0) — runtime loads the intermediate pointer.
+	lui	a0, 0x52
+	addi	a0, a0, 0x503
+	addi	gp, zero, 90		# emit_word site 90 = ew_ct_sa_chain_lw
+	j	emit_word
+ew_ct_sa_chain_lw:
+	# Clear index offset and loop back to parse the next field.
+	sw	zero, 4(sp)
+	j	ct_sa_parse_field
+
+ct_sa_final_lw:
+	# This is the LAST field in the chain. Emit `lw a0, 0(a0)` and
+	# set lv_kind = 3 so cep_pre_assign can peephole it for writes.
+	lui	a0, 0x52
+	addi	a0, a0, 0x503
+	addi	gp, zero, 84		# emit_word site 84 = ew_ct_sa_lw
+	j	emit_word
+ew_ct_sa_lw:
+	addi	sp, sp, 8
+	# lv_kind = 3 (word deref) so cep_pre_assign can peephole the lw.
+	lla	t0, lv_kind
+	addi	t1, zero, 3
+	sw	t1, 0(t0)
+	j	ct_done
+
+ct_bad_struct_use:
+	addi	a0, zero, 49		# err 49: struct used outside literal/access
+	j	report_err
+ct_bad_stl_lbrace:
+	addi	a0, zero, 9		# err 9: expected '{'
+	j	report_err
+ct_bad_stl_rbrace:
+	addi	a0, zero, 48		# err 48: expected ',' or '}'
+	j	report_err
+ct_bad_stl_field:
+	addi	a0, zero, 50		# err 50: unknown field name
+	j	report_err
+ct_bad_stl_too_many:
+	addi	a0, zero, 51		# err 51: too many initializers
+	j	report_err
+ct_bad_stl_frame:
+	addi	a0, zero, 40		# err 40: frame too large
+	j	report_err
+ct_bad_sa_ptr:
+	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+ct_bad_sa_dot:
+	addi	a0, zero, 52		# err 52: expected '.'
+	j	report_err
+ct_bad_sa_lit:
+	addi	a0, zero, 46		# err 46: array size must be a literal
+	j	report_err
+ct_bad_sa_rbrack:
+	addi	a0, zero, 44		# err 44: expected ']'
+	j	report_err
+ct_bad_sa_field:
+	addi	a0, zero, 50		# err 50: unknown field name
+	j	report_err
+ct_bad_sa_offset:
+	addi	a0, zero, 40		# err 40: frame too large (offset overflow)
+	j	report_err
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ct_kw_sizeof — compile a `sizeof(StructName)` expression.
+#
+# Returns a compile-time integer literal: the struct's instance size in
+# bytes (= field count × 4). Only struct types are supported in v1;
+# primitives already have implicit stride via the @/#/* prefixes.
+# ══════════════════════════════════════════════════════════════════════════════
+ct_kw_sizeof:
+	# Expect '('.
+	addi	gp, zero, 71		# skip_ws site 71 = sw_ct_so_lparen
+	j	skip_ws
+sw_ct_so_lparen:
+	bge	s2, s3, ct_bad_so_lparen
+	lbu	t0, 0(s2)
+	addi	t1, zero, '('
+	bne	t0, t1, ct_bad_so_lparen
+	addi	s2, s2, 1
+	# Parse struct name ident.
+	addi	gp, zero, 72		# skip_ws site 72 = sw_ct_so_name
+	j	skip_ws
+sw_ct_so_name:
+	bge	s2, s3, ct_bad_so_name
+	lbu	t0, 0(s2)
+	addi	t1, zero, '_'
+	beq	t0, t1, ct_so_name_ok
+	addi	t1, zero, 'a'
+	blt	t0, t1, ct_so_name_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, ct_so_name_ok
+ct_so_name_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, ct_bad_so_name
+	addi	t1, zero, 91
+	bge	t0, t1, ct_bad_so_name
+ct_so_name_ok:
+	addi	gp, zero, 15		# parse_ident site 15 = pi_ct_so
+	j	parse_ident
+pi_ct_so:
+	# Look up struct type.
+	addi	gp, zero, 3		# struct_lookup site 3 = stlk_ret_so
+	j	struct_lookup
+stlk_ret_so:
+	beqz	a0, ct_bad_so_unknown
+	# a0 = struct entry ptr. size = count * 4.
+	lw	t0, 32(a0)		# field count
+	slli	t0, t0, 2		# * 4
+	# Expect ')'.
+	addi	gp, zero, 73		# skip_ws site 73 = sw_ct_so_rparen
+	# Stash size across skip_ws — use famc stack.
+	addi	sp, sp, -4
+	sw	t0, 0(sp)
+	j	skip_ws
+sw_ct_so_rparen:
+	bge	s2, s3, ct_bad_so_rparen
+	lbu	t0, 0(s2)
+	addi	t1, zero, ')'
+	bne	t0, t1, ct_bad_so_rparen
+	addi	s2, s2, 1
+	# Emit `li a0, size` via emit_li.
+	lw	a0, 0(sp)
+	addi	sp, sp, 4
+	j	emit_li
+	# emit_li falls through to eli_ret → ct_deref → ct_done. Since we
+	# have no prefix (deref_kind = 0 at compile_unary entry, still 0),
+	# ct_deref sees kind 0 and jumps to ct_done.
+	# lv_kind stays 0 (sizeof result is not an lvalue).
+
+ct_bad_so_lparen:
+	addi	a0, zero, 12		# err 12: expected '('
+	j	report_err
+ct_bad_so_name:
+	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+ct_bad_so_unknown:
+	lla	t0, ident_start
+	lw	s2, 0(t0)
+	addi	a0, zero, 53		# err 53: sizeof of non-struct
+	j	report_err
+ct_bad_so_rparen:
+	addi	a0, zero, 2		# err 2: expected ')'
+	j	report_err
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ct_kw_for — compile a `for IDENT in LOWER..UPPER { BODY }` expression.
 #
 # Desugars to (roughly):
@@ -4146,6 +4969,239 @@ fna_cp_done:
 fn_alloc_disp:
 	j	fna_ret_def
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Struct symtab helpers: struct_lookup, struct_alloc, struct_field_lookup
+# ══════════════════════════════════════════════════════════════════════════════
+# struct_lookup — scan struct_base..struct_top for a struct matching s10/s11.
+# Returns a0 = entry pointer (non-zero) on match, a0 = 0 if not found.
+# Dispatches via gp.
+struct_lookup:
+	lla	t0, struct_base
+	lw	t0, 0(t0)
+	lla	t1, struct_top
+	lw	t1, 0(t1)
+stlk_scan:
+	beq	t0, t1, stlk_missing
+	addi	t2, zero, 0
+stlk_cmp:
+	addi	t3, zero, 32
+	beq	t2, t3, stlk_match
+	add	t4, t0, t2
+	lbu	t5, 0(t4)
+	blt	t2, s11, stlk_in_tok
+	bnez	t5, stlk_next
+	addi	t2, t2, 1
+	j	stlk_cmp
+stlk_in_tok:
+	add	t6, s10, t2
+	lbu	a1, 0(t6)
+	bne	t5, a1, stlk_next
+	addi	t2, t2, 1
+	j	stlk_cmp
+stlk_match:
+	addi	a0, t0, 0		# entry pointer
+	j	struct_lookup_disp
+stlk_next:
+	addi	t0, t0, 320
+	j	stlk_scan
+stlk_missing:
+	addi	a0, zero, 0
+	j	struct_lookup_disp
+
+struct_lookup_disp:
+	bnez	gp, stlkd_1
+	j	stlk_ret_def
+stlkd_1:
+	addi	gp, gp, -1
+	bnez	gp, stlkd_2
+	j	stlk_ret_ct_id
+stlkd_2:
+	addi	gp, gp, -1
+	bnez	gp, stlkd_3
+	j	stlk_ret_cs
+stlkd_3:
+	addi	gp, gp, -1
+	bnez	gp, stlkd_4
+	j	stlk_ret_so
+stlkd_4:
+	addi	gp, gp, -1
+	bnez	gp, stlkd_5
+	j	stlk_ret_ct_primary
+stlkd_5:
+	j	stlk_blk_struct
+
+# struct_alloc — append a new struct entry at struct_top. Grows the table
+# if needed. Inputs: s10/s11 = struct name (field names copied separately
+# via struct_add_field later). Sets all 320 bytes to zero except the name.
+# Returns: a0 = entry pointer.
+struct_alloc:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lla	t0, struct_top
+	lw	t1, 0(t0)
+	lla	t0, struct_end
+	lw	t2, 0(t0)
+	bne	t1, t2, sta_ok
+	# Grow: copy existing entries to fresh heap region at tp.
+	lla	t0, struct_base
+	lw	t3, 0(t0)
+	sub	t4, t2, t3		# old cap (bytes)
+	slli	t5, t4, 1		# new cap
+	addi	t6, tp, 0		# new base
+	addi	a2, t3, 0		# src
+	addi	a3, t6, 0		# dst
+sta_copy:
+	beq	a2, t1, sta_copy_done
+	lw	a4, 0(a2)
+	sw	a4, 0(a3)
+	addi	a2, a2, 4
+	addi	a3, a3, 4
+	j	sta_copy
+sta_copy_done:
+	lla	t0, struct_base
+	sw	t6, 0(t0)
+	add	a2, t6, t4
+	lla	t0, struct_top
+	sw	a2, 0(t0)
+	add	a3, t6, t5
+	lla	t0, struct_end
+	sw	a3, 0(t0)
+	add	tp, tp, t5
+	lla	t0, struct_top
+	lw	t1, 0(t0)
+sta_ok:
+	# Zero 320 bytes at t1.
+	addi	t2, zero, 0
+sta_zero:
+	addi	t3, zero, 320
+	beq	t2, t3, sta_zero_done
+	add	t4, t1, t2
+	sb	zero, 0(t4)
+	addi	t2, t2, 1
+	j	sta_zero
+sta_zero_done:
+	# Copy struct name (s11 bytes from s10) into bytes 0..s11.
+	addi	t2, zero, 0
+sta_cp:
+	beq	t2, s11, sta_cp_done
+	add	t3, s10, t2
+	lbu	t4, 0(t3)
+	add	t5, t1, t2
+	sb	t4, 0(t5)
+	addi	t2, t2, 1
+	j	sta_cp
+sta_cp_done:
+	# Bump struct_top by 320.
+	addi	a0, t1, 0		# return entry pointer
+	addi	t1, t1, 320
+	lla	t0, struct_top
+	sw	t1, 0(t0)
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	struct_alloc_disp
+
+struct_alloc_disp:
+	j	sta_ret_def
+
+# struct_add_field — append a field name to an existing struct entry. The
+# entry pointer is in a0; the field name is in s10/s11. Field count (at
+# byte 32) must already be the INDEX (0-based) at which to write; we bump
+# it after writing.
+struct_add_field:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lw	t0, 32(a0)		# current field count
+	addi	t1, zero, 16
+	bge	t0, t1, saf_too_many
+	# Offset of the new field name = 40 + 16*count
+	slli	t2, t0, 4		# count * 16
+	addi	t2, t2, 40
+	add	t3, a0, t2
+	# Zero 16 bytes
+	addi	t4, zero, 0
+saf_zero:
+	addi	t5, zero, 16
+	beq	t4, t5, saf_zero_done
+	add	t6, t3, t4
+	sb	zero, 0(t6)
+	addi	t4, t4, 1
+	j	saf_zero
+saf_zero_done:
+	# Copy name (min of s11 and 16 bytes)
+	addi	t4, zero, 0
+saf_cp:
+	beq	t4, s11, saf_cp_done
+	addi	t5, zero, 16
+	beq	t4, t5, saf_cp_done
+	add	t6, s10, t4
+	lbu	a1, 0(t6)
+	add	a2, t3, t4
+	sb	a1, 0(a2)
+	addi	t4, t4, 1
+	j	saf_cp
+saf_cp_done:
+	# Bump field count
+	lw	t0, 32(a0)
+	addi	t0, t0, 1
+	sw	t0, 32(a0)
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	struct_add_field_disp
+saf_too_many:
+	addi	a0, zero, 47		# err 47: too many struct fields
+	j	report_err
+
+struct_add_field_disp:
+	j	saf_ret_def
+
+# struct_field_lookup — find a field's index within a struct. Inputs:
+# a0 = entry pointer, s10/s11 = field name. Returns: a0 = field index
+# (0-based), or -1 if not found. Dispatches via gp.
+struct_field_lookup:
+	lw	t0, 32(a0)		# field count
+	addi	t1, zero, 0		# index
+sfl_loop:
+	beq	t1, t0, sfl_missing
+	# Compare s10/s11 with field t1's name at offset 40 + 16*t1
+	slli	t2, t1, 4
+	addi	t2, t2, 40
+	add	t3, a0, t2		# field name address
+	addi	t4, zero, 0
+sfl_cmp:
+	addi	t5, zero, 16
+	beq	t4, t5, sfl_match
+	add	t6, t3, t4
+	lbu	a1, 0(t6)
+	blt	t4, s11, sfl_in_tok
+	bnez	a1, sfl_next
+	addi	t4, t4, 1
+	j	sfl_cmp
+sfl_in_tok:
+	add	a2, s10, t4
+	lbu	a3, 0(a2)
+	bne	a1, a3, sfl_next
+	addi	t4, t4, 1
+	j	sfl_cmp
+sfl_match:
+	addi	a0, t1, 0
+	j	struct_field_lookup_disp
+sfl_next:
+	addi	t1, t1, 1
+	j	sfl_loop
+sfl_missing:
+	addi	a0, zero, -1
+	j	struct_field_lookup_disp
+
+struct_field_lookup_disp:
+	bnez	gp, sfld_1
+	j	sfl_ret_access
+sfld_1:
+	j	sfl_ret_literal
+
+# Stub return sites — replaced by real call sites as each feature is added.
+stlk_ret_ct_primary:
+	j	halt_err
+
 # ── cs_kw_fn — compile a `fn name(params) { body }` definition ───────────────
 # Syntax:  fn IDENT '(' (IDENT (',' IDENT)*)? ')' '{' body '}'
 # Restrictions (v1):  function must be top-level (no nesting).
@@ -4161,6 +5217,130 @@ fn_alloc_disp:
 #    28(sp):  saved outer ret_list_top (reset during body compile)
 #    32(sp):  (spare)
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# cs_kw_struct — compile a `struct Name { f1, f2, f3 }` declaration.
+#
+# Parses the struct name (must be a fresh identifier, not shared with vars
+# or functions), then a brace-delimited list of field identifiers. Builds
+# a new entry in the struct symtab via struct_alloc + struct_add_field.
+# Emits no runtime code — struct definitions are purely compile-time.
+# ══════════════════════════════════════════════════════════════════════════════
+cs_kw_struct:
+	# Parse struct name.
+	addi	gp, zero, 56		# skip_ws site 56 = sw_cs_struct_name
+	j	skip_ws
+sw_cs_struct_name:
+	bge	s2, s3, cs_bad_struct_name
+	lbu	t0, 0(s2)
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_struct_name_ok
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_struct_name_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, cs_struct_name_ok
+cs_struct_name_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_bad_struct_name
+	addi	t1, zero, 91
+	bge	t0, t1, cs_bad_struct_name
+cs_struct_name_ok:
+	addi	gp, zero, 10		# parse_ident site 10 = pi_cs_struct
+	j	parse_ident
+pi_cs_struct:
+	# Check not already a struct.
+	addi	gp, zero, 0		# struct_lookup site 0 = stlk_ret_def
+	j	struct_lookup
+stlk_ret_def:
+	bnez	a0, cs_bad_struct_redefined
+	# Allocate the struct entry.
+	addi	gp, zero, 0		# struct_alloc site 0 = sta_ret_def
+	j	struct_alloc
+sta_ret_def:
+	# Save entry pointer in a reg so we can keep adding fields. Use
+	# s0 temporarily... no, s0 is symtab end. Use t5? But t5 gets
+	# clobbered by skip_ws. Use a frame slot.
+	addi	sp, sp, -8
+	sw	a0, 0(sp)		# struct entry ptr
+	sw	gp, 4(sp)
+
+	# Expect '{'.
+	addi	gp, zero, 57		# skip_ws site 57 = sw_cs_struct_lbrace
+	j	skip_ws
+sw_cs_struct_lbrace:
+	bge	s2, s3, cs_bad_struct_lbrace
+	lbu	t0, 0(s2)
+	addi	t1, zero, '{'
+	bne	t0, t1, cs_bad_struct_lbrace
+	addi	s2, s2, 1
+
+	# Parse zero-or-more comma-separated field names, terminated by '}'.
+cs_struct_field_loop:
+	addi	gp, zero, 58		# skip_ws site 58 = sw_cs_struct_field
+	j	skip_ws
+sw_cs_struct_field:
+	bge	s2, s3, cs_bad_struct_rbrace
+	lbu	t0, 0(s2)
+	addi	t1, zero, '}'
+	beq	t0, t1, cs_struct_fields_done
+	# If not the first field, expect ','
+	lw	t0, 0(sp)		# entry ptr
+	lw	t2, 32(t0)		# current field count
+	beqz	t2, cs_struct_field_name
+	lbu	t0, 0(s2)
+	addi	t1, zero, ','
+	bne	t0, t1, cs_bad_struct_rbrace
+	addi	s2, s2, 1
+	addi	gp, zero, 59		# skip_ws site 59 = sw_cs_struct_field_after_comma
+	j	skip_ws
+sw_cs_struct_field_after_comma:
+cs_struct_field_name:
+	bge	s2, s3, cs_bad_struct_field
+	lbu	t0, 0(s2)
+	# Letter-start check.
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_struct_field_start_ok
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_struct_field_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, cs_struct_field_start_ok
+cs_struct_field_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_bad_struct_field
+	addi	t1, zero, 91
+	bge	t0, t1, cs_bad_struct_field
+cs_struct_field_start_ok:
+	addi	gp, zero, 11		# parse_ident site 11 = pi_cs_struct_field
+	j	parse_ident
+pi_cs_struct_field:
+	beqz	s11, cs_bad_struct_field
+	# Append field to entry.
+	lw	a0, 0(sp)		# entry ptr
+	addi	gp, zero, 0		# struct_add_field site 0 = saf_ret_def
+	j	struct_add_field
+saf_ret_def:
+	j	cs_struct_field_loop
+
+cs_struct_fields_done:
+	addi	s2, s2, 1		# consume '}'
+	addi	sp, sp, 8
+	j	cs_done
+
+cs_bad_struct_name:
+	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+cs_bad_struct_redefined:
+	addi	a0, zero, 45		# err 45: already defined
+	j	report_err
+cs_bad_struct_lbrace:
+	addi	a0, zero, 9		# err 9: expected '{'
+	j	report_err
+cs_bad_struct_rbrace:
+	addi	a0, zero, 48		# err 48: expected ',' or '}'
+	j	report_err
+cs_bad_struct_field:
+	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+
 cs_kw_fn:
 	# Nesting check: current_fn must be 0.
 	lla	t0, current_fn
@@ -5052,27 +6232,97 @@ pi_ct_not_continue:
 pi_ct_not_for:
 	# 'return' (6 chars) — early return from the current function.
 	addi	t0, zero, 6
-	bne	s11, t0, pi_ct_var
+	bne	s11, t0, pi_ct_not_return
 	lbu	t1, 0(s10)
 	addi	t2, zero, 'r'
-	bne	t1, t2, pi_ct_var
+	bne	t1, t2, pi_ct_not_return
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'e'
-	bne	t1, t2, pi_ct_var
+	bne	t1, t2, pi_ct_not_return
 	lbu	t1, 2(s10)
 	addi	t2, zero, 't'
-	bne	t1, t2, pi_ct_var
+	bne	t1, t2, pi_ct_not_return
 	lbu	t1, 3(s10)
 	addi	t2, zero, 'u'
-	bne	t1, t2, pi_ct_var
+	bne	t1, t2, pi_ct_not_return
 	lbu	t1, 4(s10)
 	addi	t2, zero, 'r'
-	bne	t1, t2, pi_ct_var
+	bne	t1, t2, pi_ct_not_return
 	lbu	t1, 5(s10)
 	addi	t2, zero, 'n'
-	bne	t1, t2, pi_ct_var
+	bne	t1, t2, pi_ct_not_return
 	j	ct_kw_return
+pi_ct_not_return:
+	# 'sizeof' (6 chars) — compile-time size query. Currently only
+	# struct types are supported.
+	addi	t0, zero, 6
+	bne	s11, t0, pi_ct_var
+	lbu	t1, 0(s10)
+	addi	t2, zero, 's'
+	bne	t1, t2, pi_ct_var
+	lbu	t1, 1(s10)
+	addi	t2, zero, 'i'
+	bne	t1, t2, pi_ct_var
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'z'
+	bne	t1, t2, pi_ct_var
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'e'
+	bne	t1, t2, pi_ct_var
+	lbu	t1, 4(s10)
+	addi	t2, zero, 'o'
+	bne	t1, t2, pi_ct_var
+	lbu	t1, 5(s10)
+	addi	t2, zero, 'f'
+	bne	t1, t2, pi_ct_var
+	j	ct_kw_sizeof
 pi_ct_var:
+	# First — check if this ident names a known struct type. If so,
+	# peek for '{' (struct literal) or '@' (struct access). Otherwise
+	# fall through to the regular variable/function logic below.
+	addi	gp, zero, 1		# struct_lookup site 1 = stlk_ret_ct_id
+	j	struct_lookup
+stlk_ret_ct_id:
+	beqz	a0, pi_ct_not_struct
+	# a0 = struct entry pointer. Peek next non-ws char.
+	addi	t3, s2, 0
+	j	pk_sct_ws
+pi_ct_not_struct:
+	# Peek: if next non-ws char is '@', user tried a struct access with
+	# an unknown type — give a specific error instead of "undefined var".
+	addi	t3, s2, 0
+pct_ns_ws:
+	bge	t3, s3, pi_ct_not_struct_var
+	lbu	t0, 0(t3)
+	addi	t1, zero, 33
+	bge	t0, t1, pct_ns_check
+	addi	t3, t3, 1
+	j	pct_ns_ws
+pct_ns_check:
+	addi	t1, zero, '@'
+	bne	t0, t1, pi_ct_not_struct_var
+	lla	t0, ident_start
+	lw	s2, 0(t0)
+	addi	a0, zero, 54		# err 54: unknown struct type
+	j	report_err
+pi_ct_not_struct_var:
+	# Fall through to the regular variable lookup logic below.
+	j	pk_ws_loop
+
+	# ── Struct-found path continues here (from stlk_ret_ct_id above).
+pk_sct_ws:
+	bge	t3, s3, ct_bad_struct_use
+	lbu	t0, 0(t3)
+	addi	t1, zero, 33
+	bge	t0, t1, pk_sct_non_ws
+	addi	t3, t3, 1
+	j	pk_sct_ws
+pk_sct_non_ws:
+	addi	t1, zero, '{'
+	beq	t0, t1, ct_struct_literal
+	addi	t1, zero, '@'
+	beq	t0, t1, ct_struct_access
+	j	ct_bad_struct_use
 	# Decide between "lookup-or-alloc" (if this ident is about to be the
 	# LHS of a bare '=' assignment — definition or reuse) and "lookup
 	# only, error if missing" (otherwise). We peek the first non-ws char
@@ -5272,7 +6522,157 @@ sw_ct_blk_lead:
 	beq	t0, t1, blk_chk_decl_hash
 	addi	t1, zero, '*'
 	beq	t0, t1, blk_chk_decl_star
+	# Check for struct-typed array decl: StructName@ident[LIT]; where
+	# first char is a letter. Uses an inline peek scan (no shared
+	# cad_probe) to avoid stack-leak issues with the outer rewind.
+	addi	t1, zero, 'a'
+	blt	t0, t1, blk_chk_struct_uc
+	addi	t1, zero, 123
+	blt	t0, t1, blk_try_struct_decl
+blk_chk_struct_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, blk_compile_expr
+	addi	t1, zero, 91
+	blt	t0, t1, blk_try_struct_decl
 	j	blk_compile_expr
+
+blk_try_struct_decl:
+	# Save s2 for rewind. Parse the ident, check struct symtab, then
+	# do a simplified inline peek for @IDENT[LITERAL]; without the
+	# shared scan (which has the cad_probe issue).
+	addi	sp, sp, -4
+	sw	s2, 0(sp)
+	addi	gp, zero, 16		# parse_ident site 16 = pi_blk_struct
+	j	parse_ident
+pi_blk_struct:
+	addi	gp, zero, 5		# struct_lookup site 5 = stlk_blk_struct
+	j	struct_lookup
+stlk_blk_struct:
+	beqz	a0, blk_struct_rewind
+	bge	s2, s3, blk_struct_rewind
+	lbu	t0, 0(s2)
+	addi	t1, zero, '@'
+	bne	t0, t1, blk_struct_rewind
+	# Struct found, '@' present. Inline peek for IDENT[LITERAL];
+	# starting from s2 (which is at '@').
+	addi	t0, s2, 1
+bsd_ws1:
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, bsd_id_start
+	addi	t0, t0, 1
+	j	bsd_ws1
+bsd_id_start:
+	addi	t2, zero, '_'
+	beq	t1, t2, bsd_id_loop
+	addi	t2, zero, 'a'
+	blt	t1, t2, bsd_id_uc
+	addi	t2, zero, 123
+	blt	t1, t2, bsd_id_loop
+bsd_id_uc:
+	addi	t2, zero, 'A'
+	blt	t1, t2, blk_struct_rewind
+	addi	t2, zero, 91
+	bge	t1, t2, blk_struct_rewind
+bsd_id_loop:
+	addi	t0, t0, 1
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, 'a'
+	blt	t1, t2, bsd_id_uc2
+	addi	t2, zero, 123
+	blt	t1, t2, bsd_id_loop
+bsd_id_uc2:
+	addi	t2, zero, 'A'
+	blt	t1, t2, bsd_id_dig
+	addi	t2, zero, 91
+	blt	t1, t2, bsd_id_loop
+bsd_id_dig:
+	addi	t2, zero, '0'
+	blt	t1, t2, bsd_id_us
+	addi	t2, zero, 58
+	blt	t1, t2, bsd_id_loop
+bsd_id_us:
+	addi	t2, zero, '_'
+	beq	t1, t2, bsd_id_loop
+bsd_ws2:
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, bsd_lbrack
+	addi	t0, t0, 1
+	j	bsd_ws2
+bsd_lbrack:
+	addi	t2, zero, '['
+	bne	t1, t2, blk_struct_rewind
+	addi	t0, t0, 1
+bsd_ws3:
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, bsd_digit
+	addi	t0, t0, 1
+	j	bsd_ws3
+bsd_digit:
+	addi	t2, zero, '0'
+	blt	t1, t2, blk_struct_rewind
+	addi	t2, zero, 58
+	bge	t1, t2, blk_struct_rewind
+bsd_d_loop:
+	addi	t0, t0, 1
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, '0'
+	blt	t1, t2, bsd_chk_hex
+	addi	t2, zero, 58
+	blt	t1, t2, bsd_d_loop
+bsd_chk_hex:
+	addi	t2, zero, 'a'
+	blt	t1, t2, bsd_chk_HEX
+	addi	t2, zero, 123
+	blt	t1, t2, bsd_d_loop
+bsd_chk_HEX:
+	addi	t2, zero, 'A'
+	blt	t1, t2, bsd_after_lit
+	addi	t2, zero, 91
+	blt	t1, t2, bsd_d_loop
+bsd_after_lit:
+bsd_ws4:
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, bsd_rbrack
+	addi	t0, t0, 1
+	j	bsd_ws4
+bsd_rbrack:
+	addi	t2, zero, ']'
+	bne	t1, t2, blk_struct_rewind
+	addi	t0, t0, 1
+bsd_ws5:
+	bge	t0, s3, blk_struct_rewind
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, bsd_semi
+	addi	t0, t0, 1
+	j	bsd_ws5
+bsd_semi:
+	addi	t2, zero, ';'
+	bne	t1, t2, blk_struct_rewind
+	# Pattern matches. Commit. Drop saved s2 (no longer needed).
+	lw	t6, 32(a0)		# a0 still has struct entry from lookup
+	slli	t6, t6, 2		# stride = count * 4
+	addi	sp, sp, 4		# pop saved s2
+	# Reuse the shared cs_array_decl_go. s2 is at '@' (from the struct
+	# name parse). go expects s2 at the prefix char. Good.
+	addi	gp, zero, 1		# cs_array_decl_go return site 1 = ct_blk_loop
+	j	cs_array_decl_go
+
+blk_struct_rewind:
+	lw	s2, 0(sp)
+	addi	sp, sp, 4
+	j	blk_compile_expr
+
 blk_chk_decl_at:
 	addi	t6, zero, 1
 	addi	gp, zero, 1		# scan return site 1 = scan_ret_blk
@@ -5693,7 +7093,15 @@ ced_34:
 	bnez	gp, ced_35
 	j	ce_ct_return_val
 ced_35:
+	addi	gp, gp, -1
+	bnez	gp, ced_36
 	j	ce_ct_idx
+ced_36:
+	addi	gp, gp, -1
+	bnez	gp, ced_37
+	j	ce_ct_stl_val
+ced_37:
+	j	ce_ct_sa_idx
 
 # ══════════════════════════════════════════════════════════════════════════════
 # compile_expr_p — Pratt (top-down operator-precedence) expression parser.
@@ -7053,27 +8461,74 @@ pi_cs_not_fn:
 	# 'return' (6 chars) — diverts to the expression-statement fallback,
 	# which re-parses via the Pratt nud and hits ct_kw_return.
 	addi	t0, zero, 6
-	bne	s11, t0, pi_cs_var
+	bne	s11, t0, pi_cs_not_return
 	lbu	t1, 0(s10)
 	addi	t2, zero, 'r'
-	bne	t1, t2, pi_cs_var
+	bne	t1, t2, pi_cs_not_return
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'e'
-	bne	t1, t2, pi_cs_var
+	bne	t1, t2, pi_cs_not_return
 	lbu	t1, 2(s10)
 	addi	t2, zero, 't'
+	bne	t1, t2, pi_cs_not_return
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'u'
+	bne	t1, t2, pi_cs_not_return
+	lbu	t1, 4(s10)
+	addi	t2, zero, 'r'
+	bne	t1, t2, pi_cs_not_return
+	lbu	t1, 5(s10)
+	addi	t2, zero, 'n'
+	bne	t1, t2, pi_cs_not_return
+	j	cs_fb
+pi_cs_not_return:
+	# 'struct' (6 chars) — struct type definition at statement level.
+	addi	t0, zero, 6
+	bne	s11, t0, pi_cs_var
+	lbu	t1, 0(s10)
+	addi	t2, zero, 's'
+	bne	t1, t2, pi_cs_var
+	lbu	t1, 1(s10)
+	addi	t2, zero, 't'
+	bne	t1, t2, pi_cs_var
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'r'
 	bne	t1, t2, pi_cs_var
 	lbu	t1, 3(s10)
 	addi	t2, zero, 'u'
 	bne	t1, t2, pi_cs_var
 	lbu	t1, 4(s10)
-	addi	t2, zero, 'r'
+	addi	t2, zero, 'c'
 	bne	t1, t2, pi_cs_var
 	lbu	t1, 5(s10)
-	addi	t2, zero, 'n'
+	addi	t2, zero, 't'
 	bne	t1, t2, pi_cs_var
-	j	cs_fb
+	j	cs_kw_struct
 pi_cs_var:
+	# If the token names a struct type, check for an array-of-struct
+	# declaration (`Name@ident[LIT];`). On match → cs_array_decl_go
+	# with stride = count*4. On mismatch → cs_fb (expression fallback,
+	# which handles `Name { ... }` literals and `Name@x.field` access).
+	addi	gp, zero, 2		# struct_lookup site 2 = stlk_ret_cs
+	j	struct_lookup
+stlk_ret_cs:
+	beqz	a0, pi_cs_not_struct
+	# a0 = struct entry ptr. Check next char is '@'; if not, fall
+	# back to expression context.
+	bge	s2, s3, cs_fb
+	lbu	t0, 0(s2)
+	addi	t1, zero, '@'
+	bne	t0, t1, cs_fb
+	# Compute stride = count * 4 and run the shared array-decl scan.
+	lw	t6, 32(a0)
+	slli	t6, t6, 2
+	addi	gp, zero, 2		# scan return site 2 = scan_ret_struct
+	j	cs_array_decl_scan
+scan_ret_struct:
+	beqz	a0, cs_fb
+	addi	gp, zero, 0		# cs_array_decl_go return site 0 = cs_done
+	j	cs_array_decl_go
+pi_cs_not_struct:
 	# Skip ws to position s2 at the operator, then decide whether this
 	# is a declaration (bare '=', may create fresh binding) or a read
 	# (anything else, must refer to an existing variable). We defer the
@@ -7896,8 +9351,18 @@ scan_decl_fail:
 	addi	a0, zero, 0
 	j	scan_decl_disp
 scan_decl_disp:
-	bnez	gp, scan_ret_blk
+	bnez	gp, sdd_1
 	j	scan_ret_stmt
+sdd_1:
+	addi	gp, gp, -1
+	bnez	gp, sdd_2
+	j	scan_ret_blk
+sdd_2:
+	addi	gp, gp, -1
+	bnez	gp, sdd_3
+	j	scan_ret_struct
+sdd_3:
+	j	halt_err
 
 # ── cad_probe_nonlit — diagnostic probe for `<prefix> IDENT [<non-digit>` ──
 # The scan got far enough to know this LOOKED like an array declaration
@@ -8138,7 +9603,11 @@ emul_d1:
 	bnez	gp, emul_d2
 	j	emul_cs_mul_ret
 emul_d2:
+	addi	gp, gp, -1
+	bnez	gp, emul_d3
 	j	emul_cep_ret
+emul_d3:
+	j	emul_ct_sa
 
 # The compiled-program mul loop template. Each entry is one RV32I instruction.
 # Offsets inside the template (relative to the start of the emitted block):
@@ -8834,6 +10303,28 @@ md_patch_end:
 current_fn:
 	.word	0
 
+# ── Struct symtab ──────────────────────────────────────────────────────────
+# Growable table of struct definitions.
+#
+# Entry layout (320 bytes):
+#    0..31: struct name (null-padded)
+#    32..35: field count (1..16)
+#    36..39: reserved
+#   40..55: field 0 name (16 bytes, null-padded)
+#   56..71: field 1 name
+#   ... up to 16 fields ...
+#   280..295: field 15 name
+#   296..319: reserved
+#
+# Every field is 4 bytes (a word). Field i's byte-offset within an instance
+# is `i * 4`. Struct instance size is `count * 4`.
+struct_base:
+	.word	0
+struct_top:
+	.word	0
+struct_end:
+	.word	0
+
 # ── Loop / break / continue tracking ────────────────────────────────────────
 # break_base: pointer into famc's own stack at the current innermost loop's
 #             break-address array, or 0 outside any loop.
@@ -9023,6 +10514,38 @@ err_tbl:
 	.byte	1, 28
 	.ascii	"array size must be a literal"
 	.zero	2
+	# slot 47 — raw: too many fields in a struct (>16)
+	.byte	1, 26
+	.ascii	"struct has too many fields"
+	.zero	4
+	# slot 48 — expected ',' or '}' (struct field list)
+	.byte	0, 10
+	.ascii	"',' or '}'"
+	.zero	20
+	# slot 49 — raw: struct used outside literal or access
+	.byte	1, 26
+	.ascii	"bare struct name not valid"
+	.zero	4
+	# slot 50 — raw: unknown field name in struct literal / access
+	.byte	1, 18
+	.ascii	"unknown field name"
+	.zero	12
+	# slot 51 — raw: too many initializer values
+	.byte	1, 22
+	.ascii	"too many struct values"
+	.zero	8
+	# slot 52 — expected '.'
+	.byte	0, 3
+	.ascii	"'.'"
+	.zero	27
+	# slot 53 — raw: sizeof needs a struct type
+	.byte	1, 26
+	.ascii	"sizeof needs a struct type"
+	.zero	4
+	# slot 54 — raw: unknown struct type (used in @access)
+	.byte	1, 19
+	.ascii	"unknown struct type"
+	.zero	11
 
 # ══════════════════════════════════════════════════════════════════════════════
 # End of famc image.  `tp` is initialized from this label at startup — every

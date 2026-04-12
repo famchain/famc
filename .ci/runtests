@@ -1070,6 +1070,94 @@ test_error "array decl with non-literal size" \
 	"Error:1:9 array size must be a literal"
 
 # ============================================================================
+echo "=== Structs ==="
+# Basic declaration + positional literal + read
+test_output  "struct literal + read (positional)" \
+	"struct P { x, y, z } p = P { 10, 20, 35 }; @0x10000000 = P@p.x + P@p.y + P@p.z;" "A"
+# Named init
+test_output  "struct literal + named init" \
+	"struct P { x, y, z } p = P { x: 10, y: 20, z: 35 }; @0x10000000 = P@p.x + P@p.y + P@p.z;" "A"
+# Missing fields default to 0
+test_output  "partial named init, rest zero" \
+	"struct P { a, b, c, d } p = P { b: 65 }; @0x10000000 = P@p.a + P@p.b + P@p.c + P@p.d;" "A"
+# Write: plain
+test_output  "field write" \
+	"struct P { x, y } p = P { 0, 0 }; P@p.x = 65; @0x10000000 = P@p.x;" "A"
+# Write to non-zero offset
+test_output  "field write y offset=4" \
+	"struct P { x, y } p = P { 0, 0 }; P@p.y = 65; @0x10000000 = P@p.y;" "A"
+# Compound assign on field
+test_output  "field compound +=" \
+	"struct P { x, y } p = P { 30, 0 }; P@p.x += 35; @0x10000000 = P@p.x;" "A"
+# [0] syntax equivalent to no index
+test_output  "P@p[0].x equivalent to P@p.x" \
+	"struct P { x, y } p = P { 65, 0 }; @0x10000000 = P@p[0].x;" "A"
+# Nested struct literal in init
+test_output  "user repro — nested struct literal" \
+	"$(cat <<'EOT'
+struct MyStruct { a, b, c }
+struct MyOtherStruct { v, w }
+x = MyStruct { a: 1, b: MyOtherStruct { 1, 2 } };
+v1 = MyStruct@x.a;
+inner = MyStruct@x.b;
+v2 = MyOtherStruct@inner.v;
+v3 = MyOtherStruct@inner.w;
+v4 = MyStruct@x.c;
+@0x10000000 = v1 + v2 + v3 + v4 + 61;
+EOT
+)" "A"
+# Struct pointer passed to function
+test_output  "struct passed by pointer, read in fn" \
+	"struct P { x, y } fn getx(p) { P@p.x } pt = P { 65, 0 }; @0x10000000 = getx(pt);" "A"
+test_output  "struct passed by pointer, written in fn" \
+	"struct P { x, y } fn setx(p, v) { P@p.x = v; 0 } pt = P { 0, 0 }; setx(pt, 65); @0x10000000 = P@pt.x;" "A"
+# Error cases
+test_error "struct redefined" \
+	"struct P { x } struct P { y }" \
+	"Error:1:24 already defined"
+test_error "field access on unknown struct" \
+	"@0x10000000 = BadStruct@x.f;" \
+	"Error:1:15 unknown struct type"
+test_error "unknown field name" \
+	"struct P { x } p = P { 5 }; @0x10000000 = P@p.z;" \
+	"Error:1:48 unknown field name"
+test_error "too many positional values" \
+	"struct P { x, y } p = P { 1, 2, 3 };" \
+	"Error:1:33 too many struct values"
+test_output  "runtime index in struct access" \
+	"struct P { x } p = P { 65 }; i = 0; @0x10000000 = P@p[i].x;" "A"
+
+# ============================================================================
+echo "=== Struct arrays + sizeof ==="
+test_output  "struct array decl + indexed write/read" \
+	"struct P { x, y } P@arr[3]; P@arr[0].x = 65; P@arr[1].x = 66; P@arr[2].x = 67; @0x10000000 = P@arr[0].x; @0x10000000 = P@arr[1].x; @0x10000000 = P@arr[2].x;" "ABC"
+test_output  "struct array with runtime loop" \
+	"struct P { x, y } P@arr[3]; for i in 0..3 { P@arr[i].x = 'A' + i; }; @0x10000000 = P@arr[0].x; @0x10000000 = P@arr[1].x; @0x10000000 = P@arr[2].x;" "ABC"
+test_output  "non-pow2 struct size with multiply (3 fields)" \
+	"struct P { x, y, z } P@pts[3]; for i in 0..3 { P@pts[i].x = i + 1; }; @0x10000000 = P@pts[0].x + P@pts[1].x + P@pts[2].x + 59;" "A"
+# Chained field access: Struct@x.a.b reads a pointer chain using the same type.
+test_output  "chained access through pointer" \
+	"struct N { val, next } a = N { 0, 0 }; b = N { 65, 0 }; N@a.next = b; @0x10000000 = N@a.next.val;" "A"
+test_output  "3-level chain" \
+	"struct N { v, n } a = N { 0, 0 }; b = N { 0, 0 }; c = N { 65, 0 }; N@a.n = b; N@b.n = c; @0x10000000 = N@a.n.n.v;" "A"
+test_output  "chain write" \
+	"struct N { v, n } a = N { 0, 0 }; b = N { 0, 0 }; N@a.n = b; N@a.n.v = 65; @0x10000000 = N@b.v;" "A"
+# Struct-array declarations inside function bodies and block expressions.
+test_output  "struct array in function body" \
+	"struct P { x, y } fn f() { P@arr[3]; P@arr[0].x = 65; P@arr[0].x } @0x10000000 = f();" "A"
+test_output  "struct array in function with loop" \
+	"struct P { x, y } fn f() { P@arr[3]; for i in 0..3 { P@arr[i].x = 'A' + i; }; @0x10000000 = P@arr[0].x; @0x10000000 = P@arr[1].x; @0x10000000 = P@arr[2].x; 0 } f();" "ABC"
+test_output  "struct array in block expression" \
+	"struct P { x } v = { P@pts[2]; P@pts[0].x = 65; P@pts[0].x }; @0x10000000 = v;" "A"
+test_output  "sizeof(StructName)" \
+	"struct P { x, y, z } @0x10000000 = sizeof(P) + 53;" "A"
+test_output  "sizeof in function" \
+	"struct P { a, b } fn f() { sizeof(P) + 57 } @0x10000000 = f();" "A"
+test_error "sizeof unknown struct" \
+	"@0x10000000 = sizeof(NoSuch);" \
+	"Error:1:22 sizeof needs a struct type"
+
+# ============================================================================
 echo "=== Functions ==="
 test_output  "parameterless fn with side-effect body" \
 	"fn greet() { @0x10000000 = 65; } greet();" "A"
