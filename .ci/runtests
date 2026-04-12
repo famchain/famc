@@ -1082,13 +1082,13 @@ test_output  "partial named init, rest zero" \
 	"struct P { a, b, c, d } p = P { b: 65 }; @0x10000000 = P@p.a + P@p.b + P@p.c + P@p.d;" "A"
 # Write: plain
 test_output  "field write" \
-	"struct P { x, y } p = P { 0, 0 }; P@p.x = 65; @0x10000000 = P@p.x;" "A"
+	"struct P { x, y } p := P { 0, 0 }; P@p.x = 65; @0x10000000 = P@p.x;" "A"
 # Write to non-zero offset
 test_output  "field write y offset=4" \
-	"struct P { x, y } p = P { 0, 0 }; P@p.y = 65; @0x10000000 = P@p.y;" "A"
+	"struct P { x, y } p := P { 0, 0 }; P@p.y = 65; @0x10000000 = P@p.y;" "A"
 # Compound assign on field
 test_output  "field compound +=" \
-	"struct P { x, y } p = P { 30, 0 }; P@p.x += 35; @0x10000000 = P@p.x;" "A"
+	"struct P { x, y } p := P { 30, 0 }; P@p.x += 35; @0x10000000 = P@p.x;" "A"
 # [0] syntax equivalent to no index
 test_output  "P@p[0].x equivalent to P@p.x" \
 	"struct P { x, y } p = P { 65, 0 }; @0x10000000 = P@p[0].x;" "A"
@@ -1110,7 +1110,7 @@ EOT
 test_output  "struct passed by pointer, read in fn" \
 	"struct P { x, y } fn getx(p) { P@p.x } pt = P { 65, 0 }; @0x10000000 = getx(pt);" "A"
 test_output  "struct passed by pointer, written in fn" \
-	"struct P { x, y } fn setx(p, v) { P@p.x = v; 0 } pt = P { 0, 0 }; setx(pt, 65); @0x10000000 = P@pt.x;" "A"
+	"struct P { x, y } fn setx(p, v) { P@p.x = v; 0 } pt := P { 0, 0 }; setx(pt, 65); @0x10000000 = P@pt.x;" "A"
 # Error cases
 test_error "struct redefined" \
 	"struct P { x } struct P { y }" \
@@ -1124,6 +1124,25 @@ test_error "unknown field name" \
 test_error "too many positional values" \
 	"struct P { x, y } p = P { 1, 2, 3 };" \
 	"Error:1:33 too many struct values"
+test_error "immutable struct field write" \
+	"struct P { x, y } p = P { 1, 2 }; P@p.x = 99;" \
+	"Error:1:42 left of '=' is not an lvalue"
+test_error "immutable struct field compound" \
+	"struct P { x, y } p = P { 1, 2 }; P@p.x += 1;" \
+	"Error:1:43 left of '=' is not an lvalue"
+test_output  "postfix ++ on struct field" \
+	"struct P { x, y } p := P { 64, 0 }; P@p.x++; @0x10000000 = P@p.x;" "A"
+test_output  "postfix -- on struct field" \
+	"struct P { x, y } p := P { 66, 0 }; P@p.x--; @0x10000000 = P@p.x;" "A"
+test_output  "postfix ++ returns old value" \
+	"struct P { x, y } p := P { 64, 0 }; v = P@p.x++; @0x10000000 = v + 1;" "A"
+test_output  "postfix ++ on word deref *ptr" \
+	"*buf[1]; *buf = 64; *buf++; @0x10000000 = *buf;" "A"
+test_output  "postfix ++ on byte deref @ptr" \
+	"@buf[1]; @buf = 64; @buf++; @0x10000000 = @buf;" "A"
+test_error "postfix ++ on immutable struct" \
+	"struct P { x } p = P { 1 }; P@p.x++;" \
+	"Error:1:36 left of '=' is not an lvalue"
 test_output  "runtime index in struct access" \
 	"struct P { x } p = P { 65 }; i = 0; @0x10000000 = P@p[i].x;" "A"
 
@@ -1137,11 +1156,11 @@ test_output  "non-pow2 struct size with multiply (3 fields)" \
 	"struct P { x, y, z } P@pts[3]; for i in 0..3 { P@pts[i].x = i + 1; }; @0x10000000 = P@pts[0].x + P@pts[1].x + P@pts[2].x + 59;" "A"
 # Chained field access: Struct@x.a.b reads a pointer chain using the same type.
 test_output  "chained access through pointer" \
-	"struct N { val, next } a = N { 0, 0 }; b = N { 65, 0 }; N@a.next = b; @0x10000000 = N@a.next.val;" "A"
+	"struct N { val, next } a := N { 0, 0 }; b = N { 65, 0 }; N@a.next = b; @0x10000000 = N@a.next.val;" "A"
 test_output  "3-level chain" \
-	"struct N { v, n } a = N { 0, 0 }; b = N { 0, 0 }; c = N { 65, 0 }; N@a.n = b; N@b.n = c; @0x10000000 = N@a.n.n.v;" "A"
+	"struct N { v, n } a := N { 0, 0 }; b := N { 0, 0 }; c = N { 65, 0 }; N@a.n = b; N@b.n = c; @0x10000000 = N@a.n.n.v;" "A"
 test_output  "chain write" \
-	"struct N { v, n } a = N { 0, 0 }; b = N { 0, 0 }; N@a.n = b; N@a.n.v = 65; @0x10000000 = N@b.v;" "A"
+	"struct N { v, n } a := N { 0, 0 }; b = N { 0, 0 }; N@a.n = b; N@a.n.v = 65; @0x10000000 = N@b.v;" "A"
 # Struct-array declarations inside function bodies and block expressions.
 test_output  "struct array in function body" \
 	"struct P { x, y } fn f() { P@arr[3]; P@arr[0].x = 65; P@arr[0].x } @0x10000000 = f();" "A"

@@ -1438,7 +1438,31 @@ ewd_89:
 	bnez	gp, ewd_90
 	j	ew_ct_sa_li_sizeof
 ewd_90:
+	addi	gp, gp, -1
+	bnez	gp, ewd_91
 	j	ew_ct_sa_chain_lw
+ewd_91:
+	addi	gp, gp, -1
+	bnez	gp, ewd_92
+	j	ew_cep_pf_delta
+ewd_92:
+	addi	gp, gp, -1
+	bnez	gp, ewd_93
+	j	ew_cep_pf_lbu
+ewd_93:
+	addi	gp, gp, -1
+	bnez	gp, ewd_94
+	j	ew_cep_pf_lw
+ewd_94:
+	addi	gp, gp, -1
+	bnez	gp, ewd_95
+	j	ew_cep_pf_lhu
+ewd_95:
+	addi	gp, gp, -1
+	bnez	gp, ewd_96
+	j	ew_cep_pf_sh
+ewd_96:
+	j	ew_cep_pf_undo
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_ident — reads an identifier at s2 into token buffer.
@@ -2107,7 +2131,11 @@ esws_d23:
 	bnez	gp, esws_d24
 	j	esws_ct_for_body_save
 esws_d24:
+	addi	gp, gp, -1
+	bnez	gp, esws_d25
 	j	esws_cs_decl
+esws_d25:
+	j	esws_cep_postfix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_lw_deref  — emit "lw a0, 0(a0)"
@@ -2305,7 +2333,11 @@ epa_d28:
 	bnez	gp, epa_d29
 	j	push_ct_sa_base
 epa_d29:
+	addi	gp, gp, -1
+	bnez	gp, epa_d30
 	j	push_ct_sa_idx_val
+epa_d30:
+	j	push_cep_postfix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_pop_t0 — emit "lw t0,0(sp) ; addi sp,sp,4"  (pops top of the compiled
@@ -2478,7 +2510,11 @@ ept_d29:
 	bnez	gp, ept_d30
 	j	pop_ct_sa_idx_val
 ept_d30:
+	addi	gp, gp, -1
+	bnez	gp, ept_d31
 	j	pop_ct_sa_base
+ept_d31:
+	j	pop_cep_postfix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_add — emit "add a0, t0, a0"    (caller just popped LHS into t0).
@@ -3156,7 +3192,11 @@ eaa1_d3:
 	bnez	gp, eaa1_d4
 	j	eaa1_cs_inc_stmt
 eaa1_d4:
+	addi	gp, gp, -1
+	bnez	gp, eaa1_d5
 	j	eaa1_ct_for_inc
+eaa1_d5:
+	j	eaa1_cep_postinc
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_addi_a0_m1 — emit "addi a0, a0, -1"
@@ -3196,7 +3236,11 @@ eaam1_d3:
 	bnez	gp, eaam1_d4
 	j	eaam1_cs_dec_stmt
 eaam1_d4:
+	addi	gp, gp, -1
+	bnez	gp, eaam1_d5
 	j	eaam1_ct_for_low
+eaam1_d5:
+	j	eaam1_cep_postinc
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sw_deref — emit "sw a0, 0(t0)"   (caller just popped addr into t0).
@@ -3225,7 +3269,11 @@ esw_d1:
 	bnez	gp, esw_d2
 	j	esw_cep_asg
 esw_d2:
+	addi	gp, gp, -1
+	bnez	gp, esw_d3
 	j	esw_cep_compound
+esw_d3:
+	j	esw_cep_postfix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sb_deref — emit "sb a0, 0(t0)"
@@ -3254,7 +3302,11 @@ esb_d1:
 	bnez	gp, esb_d2
 	j	esb_cep_asg
 esb_d2:
+	addi	gp, gp, -1
+	bnez	gp, esb_d3
 	j	esb_cep_compound
+esb_d3:
+	j	esb_cep_postfix
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Expression compilation — precedence-climbing, three layers:
@@ -4067,7 +4119,7 @@ ew_ct_stl_spadj:
 # the cep_pre_assign path handles writes via peephole store.
 # ══════════════════════════════════════════════════════════════════════════════
 ct_struct_access:
-	addi	sp, sp, -8
+	addi	sp, sp, -12
 	sw	a0, 0(sp)		# struct entry ptr
 	addi	s2, s2, 1		# consume '@'
 	addi	gp, zero, 65		# skip_ws site 65 = sw_ct_sa_ptr
@@ -4081,6 +4133,11 @@ pi_ct_sa_ptr:
 	addi	gp, zero, 7		# lookup site 7 = la_ct_sa
 	j	lookup
 la_ct_sa:
+	# Save mutability flag before sub-expressions overwrite last_ident_entry.
+	lla	t0, last_ident_entry
+	lw	t0, 0(t0)
+	lbu	t0, 37(t0)
+	sw	t0, 8(sp)
 	# a0 = slot offset of ptr var. Emit `lw a0, off(fp)`.
 	addi	gp, zero, 16		# elws site 16 = elws_ct_sa
 	j	emit_lw_sp
@@ -4263,11 +4320,16 @@ ct_sa_final_lw:
 	addi	gp, zero, 84		# emit_word site 84 = ew_ct_sa_lw
 	j	emit_word
 ew_ct_sa_lw:
-	addi	sp, sp, 8
-	# lv_kind = 3 (word deref) so cep_pre_assign can peephole the lw.
+	# Check saved mutability flag: 0 = immutable → lv_kind = 0 (read-only).
+	lw	t1, 8(sp)
+	addi	sp, sp, 12
 	lla	t0, lv_kind
+	beqz	t1, ct_sa_immut
 	addi	t1, zero, 3
 	sw	t1, 0(t0)
+	j	ct_done
+ct_sa_immut:
+	sw	zero, 0(t0)
 	j	ct_done
 
 ct_bad_struct_use:
@@ -7335,11 +7397,19 @@ cep_op_plus:
 	lbu	t0, 0(t5)
 	addi	t1, zero, '='
 	beq	t0, t1, cep_op_plus_compound
+	addi	t1, zero, '+'
+	beq	t0, t1, cep_op_postinc
 cep_op_plus_plain:
 	addi	t2, zero, 6		# op = ADD
 	addi	t3, zero, 18
 	addi	t4, zero, 19
 	addi	t1, zero, 1
+	j	cep_bp_check
+cep_op_postinc:
+	addi	t2, zero, 29		# op = POSTINC
+	addi	t3, zero, 30		# l_bp = 30 (highest)
+	addi	t4, zero, 0		# r_bp unused
+	addi	t1, zero, 2		# consume 2 chars
 	j	cep_bp_check
 cep_op_plus_compound:
 	addi	t2, zero, 134		# op = ADD | 0x80 (compound)
@@ -7355,11 +7425,19 @@ cep_op_minus:
 	lbu	t0, 0(t5)
 	addi	t1, zero, '='
 	beq	t0, t1, cep_op_minus_compound
+	addi	t1, zero, '-'
+	beq	t0, t1, cep_op_postdec
 cep_op_minus_plain:
 	addi	t2, zero, 7		# op = SUB
 	addi	t3, zero, 18
 	addi	t4, zero, 19
 	addi	t1, zero, 1
+	j	cep_bp_check
+cep_op_postdec:
+	addi	t2, zero, 30		# op = POSTDEC
+	addi	t3, zero, 30		# l_bp = 30 (highest)
+	addi	t4, zero, 0		# r_bp unused
+	addi	t1, zero, 2		# consume 2 chars
 	j	cep_bp_check
 cep_op_minus_compound:
 	addi	t2, zero, 135		# op = SUB | 0x80
@@ -7666,6 +7744,10 @@ cep_bp_check:
 	beq	t2, t1, cep_pre_assign
 	addi	t1, zero, 28
 	beq	t2, t1, cep_pre_assign	# :=  shares the same handler
+	addi	t1, zero, 29
+	beq	t2, t1, cep_pre_postinc
+	addi	t1, zero, 30
+	beq	t2, t1, cep_pre_postdec
 	# Compound assign: bit 7 of op_kind is set. Divert before the normal
 	# push-recurse-pop path so we can stash the lvalue slot first.
 	andi	t1, t2, 0x80
@@ -8238,6 +8320,137 @@ cep_bad_immut_reassign:
 	j	report_err
 
 # ══════════════════════════════════════════════════════════════════════════════
+# cep_pre_postfix — postfix '++' (op_kind 29) and '--' (op_kind 30).
+# No RHS expression. Emits: adjust(±1), store-back, undo(∓1) for postfix value.
+# Saves pre-computed delta/undo instruction words in 8(sp)/12(sp) so a single
+# code path handles both ++ and --.
+# ══════════════════════════════════════════════════════════════════════════════
+cep_pre_postinc:
+cep_pre_postdec:
+	lla	t0, lv_kind
+	lw	t1, 0(t0)
+	beqz	t1, cep_bad_lvalue
+	sw	t1, 16(sp)
+	lla	t0, lv_slot
+	lw	t2, 0(t0)
+	sw	t2, 20(sp)
+	# Prepare delta/undo instruction words.
+	# addi a0,a0,1 = 0x00150513  addi a0,a0,-1 = 0xFFF50513
+	lw	t0, 8(sp)		# op_kind: 29=++, 30=--
+	addi	t1, zero, 29
+	beq	t0, t1, cep_pf_inc_words
+	# -- : delta=-1, undo=+1
+	lui	t2, 0xFFF50
+	addi	t2, t2, 0x513
+	sw	t2, 8(sp)
+	lui	t2, 0x150
+	addi	t2, t2, 0x513
+	sw	t2, 12(sp)
+	j	cep_pf_begin
+cep_pf_inc_words:
+	# ++ : delta=+1, undo=-1
+	lui	t2, 0x150
+	addi	t2, t2, 0x513
+	sw	t2, 8(sp)
+	lui	t2, 0xFFF50
+	addi	t2, t2, 0x513
+	sw	t2, 12(sp)
+cep_pf_begin:
+	lw	t1, 16(sp)
+	addi	t2, zero, 1
+	beq	t1, t2, cep_pf_ident
+	# ── Deref path: un-emit load, push addr, re-emit load ──────────────
+	addi	s5, s5, -4
+	addi	gp, zero, 30		# push site 30 = push_cep_postfix
+	j	emit_push_a0
+push_cep_postfix:
+	lw	t1, 16(sp)
+	addi	t2, zero, 3
+	beq	t1, t2, cep_pf_reload_w
+	addi	t2, zero, 4
+	beq	t1, t2, cep_pf_reload_h
+	# kind 2 (byte): lbu a0, 0(a0) = 0x00054503
+	lui	a0, 0x54
+	addi	a0, a0, 0x503
+	addi	gp, zero, 92		# emit_word site 92 = ew_cep_pf_lbu
+	j	emit_word
+ew_cep_pf_lbu:
+	j	cep_pf_emit_delta
+cep_pf_reload_w:
+	# kind 3 (word): lw a0, 0(a0) = 0x00052503
+	lui	a0, 0x52
+	addi	a0, a0, 0x503
+	addi	gp, zero, 93		# emit_word site 93 = ew_cep_pf_lw
+	j	emit_word
+ew_cep_pf_lw:
+	j	cep_pf_emit_delta
+cep_pf_reload_h:
+	# kind 4 (half): lhu a0, 0(a0) = 0x00055503
+	lui	a0, 0x55
+	addi	a0, a0, 0x503
+	addi	gp, zero, 94		# emit_word site 94 = ew_cep_pf_lhu
+	j	emit_word
+ew_cep_pf_lhu:
+cep_pf_emit_delta:
+	# Emit delta instruction (addi a0,a0,±1)
+	lw	a0, 8(sp)
+	addi	gp, zero, 91		# emit_word site 91 = ew_cep_pf_delta
+	j	emit_word
+ew_cep_pf_delta:
+	# Pop address → t0
+	addi	gp, zero, 31		# pop site 31 = pop_cep_postfix
+	j	emit_pop_t0
+pop_cep_postfix:
+	# Store back based on kind
+	lw	t5, 16(sp)
+	addi	t1, zero, 3
+	beq	t5, t1, cep_pf_store_w
+	addi	t1, zero, 2
+	beq	t5, t1, cep_pf_store_b
+	# kind 4 (half): sh a0, 0(t0) = 0x00A29023
+	lui	a0, 0xA29
+	addi	a0, a0, 0x023
+	addi	gp, zero, 95		# emit_word site 95 = ew_cep_pf_sh
+	j	emit_word
+ew_cep_pf_sh:
+	j	cep_pf_emit_undo
+cep_pf_store_w:
+	addi	gp, zero, 3		# esw site 3 = esw_cep_postfix
+	j	emit_sw_deref
+esw_cep_postfix:
+	j	cep_pf_emit_undo
+cep_pf_store_b:
+	addi	gp, zero, 3		# esb site 3 = esb_cep_postfix
+	j	emit_sb_deref
+esb_cep_postfix:
+cep_pf_emit_undo:
+	# Emit undo instruction (addi a0,a0,∓1)
+	lw	a0, 12(sp)
+	addi	gp, zero, 96		# emit_word site 96 = ew_cep_pf_undo
+	j	emit_word
+ew_cep_pf_undo:
+	j	cep_post_emit_reset
+	# ── IDENT path ──────────────────────────────────────────────────────
+cep_pf_ident:
+	# Emit delta (addi a0,a0,±1)
+	lw	a0, 8(sp)
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	# Emit sw a0, slot(fp)
+	lw	a0, 20(sp)
+	addi	gp, zero, 25		# esws site 25 = esws_cep_postfix
+	j	emit_sw_sp
+esws_cep_postfix:
+	# Emit undo (addi a0,a0,∓1)
+	lw	a0, 12(sp)
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	cep_post_emit_reset
+eaa1_cep_postinc:
+eaam1_cep_postinc:
+	j	halt_err
+
+# ══════════════════════════════════════════════════════════════════════════════
 # cep_pre_compound — compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`,
 #   `|=`, `^=`, `<<=`, `>>=`, `>>u=`). The underlying arithmetic op is in bits
 #   0..6 of op_kind; bit 7 is the compound flag.
@@ -8440,23 +8653,9 @@ scan_ret_stmt:
 	addi	gp, zero, 0		# cs_array_decl_go return site 0 = cs_done
 	j	cs_array_decl_go
 cs_normal_dispatch:
-	addi	t1, zero, 42		# '*'
-	beq	t0, t1, cs_star
-	addi	t1, zero, 64		# '@'
-	beq	t0, t1, cs_at
-	addi	t1, zero, '#'
-	beq	t0, t1, cs_fb
-	addi	t1, zero, '+'
-	beq	t0, t1, cs_chk_pre_pp
-	addi	t1, zero, '-'
-	beq	t0, t1, cs_chk_pre_mm
-
-	# IDENT <op> ... ';' — the IDENT-LHS fast path only fires for tokens
-	# that start with a letter or underscore. For anything else (digits,
-	# parens, char literals, etc.) we divert straight to the expression-
-	# statement fallback so that `0x10000000 = '\n';` errors cleanly on
-	# the bad lvalue instead of silently allocating a variable named
-	# "0x10000000". (parse_ident itself would happily accept digits.)
+	# Only IDENT-start characters need the special declaration path.
+	# Everything else (*, @, #, ++, --, digits, etc.) falls through to
+	# cs_fb which routes through the Pratt expression parser.
 	addi	t1, zero, '_'
 	beq	t0, t1, cs_ident_start_ok
 	addi	t1, zero, 'a'
@@ -8631,32 +8830,25 @@ scan_ret_struct:
 	addi	gp, zero, 0		# cs_array_decl_go return site 0 = cs_done
 	j	cs_array_decl_go
 pi_cs_not_struct:
-	# Skip ws to position s2 at the operator, then decide whether this
-	# is a declaration (bare '=', may create fresh binding) or a read
-	# (anything else, must refer to an existing variable). We defer the
-	# lookup until after this decision so that `y += 3;` on a fresh `y`
-	# errors instead of silently auto-allocating. If we see '(', the
-	# token is the head of a function call — divert to the expression-
-	# statement fallback which will route into ct_fn_call via the Pratt
-	# nud.
+	# Only handle new-variable declarations (IDENT = expr / IDENT := expr).
+	# Everything else (compound assigns, postfix, function calls, reads)
+	# goes through cs_fb and the Pratt expression parser.
 	addi	gp, zero, 39		# skip_ws site 39 = sw_cs_var_decide
 	j	skip_ws
 sw_cs_var_decide:
-	bge	s2, s3, cs_var_read
+	bge	s2, s3, cs_fb
 	lbu	t0, 0(s2)
-	addi	t1, zero, '('
-	beq	t0, t1, cs_fb
 	# Check ':=' (mutable assignment).
 	addi	t1, zero, ':'
 	beq	t0, t1, cs_chk_mut_assign
 	# Check '=' (immutable assignment) — but not '=='.
 	addi	t1, zero, '='
-	bne	t0, t1, cs_var_read
+	bne	t0, t1, cs_fb
 	addi	t2, s2, 1
 	bge	t2, s3, cs_var_immut_write
 	lbu	t3, 0(t2)
 	addi	t1, zero, '='
-	beq	t3, t1, cs_var_read	# '==' is a read
+	beq	t3, t1, cs_fb		# '==' is a read
 cs_var_immut_write:
 	lla	t0, assign_is_mut
 	sw	zero, 0(t0)		# flag = 0 (immutable)
@@ -8664,91 +8856,40 @@ cs_var_immut_write:
 	j	lookup_or_alloc
 cs_chk_mut_assign:
 	addi	t2, s2, 1
-	bge	t2, s3, cs_var_read
+	bge	t2, s3, cs_fb
 	lbu	t3, 0(t2)
 	addi	t1, zero, '='
-	bne	t3, t1, cs_var_read	# bare ':' → not an op here
+	bne	t3, t1, cs_fb		# bare ':' → not an op here
 	lla	t0, assign_is_mut
 	addi	t1, zero, 1
 	sw	t1, 0(t0)		# flag = 1 (mutable)
 	addi	gp, zero, 1
 	j	lookup_or_alloc
-cs_var_read:
-	addi	gp, zero, 1		# lookup site 1 = la_cs (shared dispatch)
-	j	lookup
+sw_cs_eq1:
+	j	halt_err
 la_cs:
-	# Enforce mutability rules.
+	# If lookup_or_alloc found an existing entry, the Pratt expression
+	# parser already handles =/:/compound/postfix correctly. Fall to cs_fb.
 	lla	t0, lookup_was_new
 	lw	t4, 0(t0)
-	bnez	t4, la_cs_new_entry
-	# EXISTING entry — check mutability.
-	lla	t0, assign_is_mut
-	lw	t3, 0(t0)
-	lla	t0, last_ident_entry
-	lw	t1, 0(t0)
-	lbu	t2, 37(t1)		# existing mutable flag
-	beqz	t3, cs_bad_immut_reassign	# '=' on existing → error
-	beqz	t2, cs_bad_immut_reassign	# ':=' on immutable → error
-	j	la_cs_ok			# ':=' on mutable → OK
-la_cs_new_entry:
+	beqz	t4, cs_fb
 	# NEW entry — set mutability from the assign_is_mut flag.
 	lla	t0, assign_is_mut
 	lw	t3, 0(t0)
 	lla	t0, last_ident_entry
 	lw	t1, 0(t0)
 	sb	t3, 37(t1)
-la_cs_ok:
 	# Spill slot to famc's stack.
 	addi	sp, sp, -4
 	sw	a0, 0(sp)
-
-	# s2 is already at the operator char (or EOF) — we pre-skipped
-	# whitespace in pi_cs_var.
-sw_cs_eq1:
-	bge	s2, s3, cs_bad
+	# s2 is at the operator. Consume '=' or ':=' and compile RHS.
 	lbu	t0, 0(s2)
-	# ':=' (mutable assign) — consume 2 chars.
 	addi	t1, zero, ':'
-	beq	t0, t1, cs_chk_colon_eq
-	# '=' (immutable assign) — but not '=='.
-	addi	t1, zero, '='
-	bne	t0, t1, sw_cs_eq1_try_plus
-	addi	t3, s2, 1
-	bge	t3, s3, cs_op_eq
-	lbu	t4, 0(t3)
-	addi	t5, zero, '='
-	beq	t4, t5, cs_bad		# '==' → expression fallback
+	beq	t0, t1, cs_cs_colon_eq
+	# Single '=' — consume and compile RHS.
 	j	cs_op_eq
-cs_chk_colon_eq:
-	addi	t3, s2, 1
-	bge	t3, s3, cs_bad
-	lbu	t4, 0(t3)
-	addi	t5, zero, '='
-	bne	t4, t5, cs_bad		# bare ':' → not assignment
-	addi	s2, s2, 1		# skip ':' (cs_op_eq will skip the '=')
-	j	cs_op_eq
-sw_cs_eq1_try_plus:
-	addi	t1, zero, '+'
-	beq	t0, t1, cs_op_plus
-	addi	t1, zero, '-'
-	beq	t0, t1, cs_op_minus
-	addi	t1, zero, '^'
-	beq	t0, t1, cs_op_xor
-	addi	t1, zero, '<'
-	beq	t0, t1, cs_op_lshift
-	addi	t1, zero, '>'
-	beq	t0, t1, cs_op_rshift
-	addi	t1, zero, '&'
-	beq	t0, t1, cs_op_and
-	addi	t1, zero, '|'
-	beq	t0, t1, cs_op_or
-	addi	t1, zero, '*'
-	beq	t0, t1, cs_op_mul
-	addi	t1, zero, '/'
-	beq	t0, t1, cs_op_div
-	addi	t1, zero, '%'
-	beq	t0, t1, cs_op_mod
-	j	cs_bad
+cs_cs_colon_eq:
+	addi	s2, s2, 1		# skip ':' (cs_op_eq skips '=')
 
 cs_op_eq:
 	addi	s2, s2, 1
@@ -9676,6 +9817,11 @@ cad_sz_mul_done:
 	j	la_new
 la_cs_decl:
 	sw	a0, 16(sp)		# variable slot offset
+	# Array declarations are always mutable.
+	lla	t0, last_ident_entry
+	lw	t0, 0(t0)
+	addi	t1, zero, 1
+	sb	t1, 37(t0)
 
 	# Emit `addi a0, fp, <block_offset>` (word 0x00040513 + imm<<20).
 	lw	t3, 12(sp)
