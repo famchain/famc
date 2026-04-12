@@ -897,7 +897,39 @@ sw_d46:
 	bnez	gp, sw_d47
 	j	sw_ct_call_arg
 sw_d47:
+	addi	gp, gp, -1
+	bnez	gp, sw_d48
 	j	sw_ct_return_peek
+sw_d48:
+	addi	gp, gp, -1
+	bnez	gp, sw_d49
+	j	sw_ct_hash
+sw_d49:
+	addi	gp, gp, -1
+	bnez	gp, sw_d50
+	j	sw_ct_idx_rbrace
+sw_d50:
+	addi	gp, gp, -1
+	bnez	gp, sw_d51
+	j	sw_cs_decl_name
+sw_d51:
+	addi	gp, gp, -1
+	bnez	gp, sw_d52
+	j	sw_cs_decl_lbrack
+sw_d52:
+	addi	gp, gp, -1
+	bnez	gp, sw_d53
+	j	sw_cs_decl_lit
+sw_d53:
+	addi	gp, gp, -1
+	bnez	gp, sw_d54
+	j	sw_cs_decl_rbrack
+sw_d54:
+	addi	gp, gp, -1
+	bnez	gp, sw_d55
+	j	sw_cs_decl_semi
+sw_d55:
+	j	sw_cad_probe
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_word — store a0 as 4 bytes at s5, advance s5.
@@ -1222,7 +1254,35 @@ ewd_70:
 	bnez	gp, ewd_71
 	j	ew_ct_return_li0
 ewd_71:
+	addi	gp, gp, -1
+	bnez	gp, ewd_72
 	j	ew_ct_return_jal
+ewd_72:
+	addi	gp, gp, -1
+	bnez	gp, ewd_73
+	j	ew_ct_idx_shl2
+ewd_73:
+	addi	gp, gp, -1
+	bnez	gp, ewd_74
+	j	ew_ct_idx_shl1
+ewd_74:
+	addi	gp, gp, -1
+	bnez	gp, ewd_75
+	j	ew_ct_deref_h
+ewd_75:
+	addi	gp, gp, -1
+	bnez	gp, ewd_76
+	j	ew_cep_asg_sh
+ewd_76:
+	addi	gp, gp, -1
+	bnez	gp, ewd_77
+	j	ew_cep_compound_rh
+ewd_77:
+	addi	gp, gp, -1
+	bnez	gp, ewd_78
+	j	ew_cep_pe_sh
+ewd_78:
+	j	ew_cs_decl_addi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_ident — reads an identifier at s2 into token buffer.
@@ -1296,7 +1356,15 @@ pid_6:
 	bnez	gp, pid_7
 	j	pi_cs_fn
 pid_7:
+	addi	gp, gp, -1
+	bnez	gp, pid_8
 	j	pi_cs_fn_param
+pid_8:
+	addi	gp, gp, -1
+	bnez	gp, pid_9
+	j	pi_cs_decl
+pid_9:
+	j	pi_cad_probe
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_num — parse decimal or hex at s2, returns value in a0.
@@ -1367,7 +1435,10 @@ pn_dec_loop:
 	j	pn_dec_loop
 
 pn_done:
+	bnez	gp, pn_d1
 	j	pn_ct
+pn_d1:
+	j	pn_cs_decl
 
 # ══════════════════════════════════════════════════════════════════════════════
 # lookup_or_alloc — find/allocate a variable slot.
@@ -1519,7 +1590,11 @@ la_d4:
 	bnez	gp, la_d5
 	j	la_ct_for
 la_d5:
+	addi	gp, gp, -1
+	bnez	gp, la_d6
 	j	la_cs_fn_param
+la_d6:
+	j	la_cs_decl
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_li — emit "li a0, imm". imm passed in a0.
@@ -1822,7 +1897,11 @@ esws_d22:
 	bnez	gp, esws_d23
 	j	esws_ct_for_x_inc
 esws_d23:
+	addi	gp, gp, -1
+	bnez	gp, esws_d24
 	j	esws_ct_for_body_save
+esws_d24:
+	j	esws_cs_decl
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_lw_deref  — emit "lw a0, 0(a0)"
@@ -2004,7 +2083,11 @@ epa_d24:
 	bnez	gp, epa_d25
 	j	push_cep_compound_addr
 epa_d25:
+	addi	gp, gp, -1
+	bnez	gp, epa_d26
 	j	push_ct_call_arg
+epa_d26:
+	j	push_ct_idx
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_pop_t0 — emit "lw t0,0(sp) ; addi sp,sp,4"  (pops top of the compiled
@@ -2157,7 +2240,15 @@ ept_d24:
 	bnez	gp, ept_d25
 	j	pop_cep_compound_addr_w
 ept_d25:
+	addi	gp, gp, -1
+	bnez	gp, ept_d26
 	j	pop_cep_compound_addr_b
+ept_d26:
+	addi	gp, gp, -1
+	bnez	gp, ept_d27
+	j	pop_ct_idx
+ept_d27:
+	j	pop_cep_compound_addr_h
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_add — emit "add a0, t0, a0"    (caller just popped LHS into t0).
@@ -2187,7 +2278,11 @@ ead_1:
 	bnez	gp, ead_2
 	j	ea_cs_plus
 ead_2:
+	addi	gp, gp, -1
+	bnez	gp, ead_3
 	j	ea_cep
+ead_3:
+	j	ea_ct_idx
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_sub — emit "sub a0, t0, a0"    (caller popped LHS into t0).
@@ -2987,6 +3082,8 @@ sw_ct_pre:
 	beq	t0, t1, ct_is_star
 	addi	t1, zero, 64		# '@'
 	beq	t0, t1, ct_is_at
+	addi	t1, zero, '#'
+	beq	t0, t1, ct_is_hash
 	addi	t1, zero, '+'
 	beq	t0, t1, ct_chk_pp
 	addi	t1, zero, '-'
@@ -3012,6 +3109,16 @@ ct_is_at:
 	sw	t1, 4(sp)
 	addi	gp, zero, 3
 	j	skip_ws
+
+ct_is_hash:
+	# '#' — halfword deref prefix. deref_kind = 3.
+	addi	s2, s2, 1
+	addi	t1, zero, 3
+	sw	t1, 4(sp)
+	addi	gp, zero, 48		# skip_ws site 48 = sw_ct_hash
+	j	skip_ws
+sw_ct_hash:
+	j	ct_primary
 sw_ct_at:
 	j	ct_primary
 
@@ -3121,6 +3228,7 @@ ct_num:
 	# '++'/'--' are invalid on numeric literals.
 	lw	t0, 8(sp)
 	bnez	t0, ct_bad_literal_pp
+	addi	gp, zero, 0
 	j	parse_num
 pn_ct:
 	j	emit_li
@@ -5155,6 +5263,33 @@ sw_ct_blk_lead:
 	lbu	t0, 0(s2)
 	addi	t1, zero, '}'
 	beq	t0, t1, ct_blk_end
+	# Try array declaration — `@IDENT[LIT];`, `#IDENT[LIT];`, or
+	# `*IDENT[LIT];`. These are block-level statements (no value), and
+	# after they run we fall back to the block loop via gp=1 exit.
+	addi	t1, zero, '@'
+	beq	t0, t1, blk_chk_decl_at
+	addi	t1, zero, '#'
+	beq	t0, t1, blk_chk_decl_hash
+	addi	t1, zero, '*'
+	beq	t0, t1, blk_chk_decl_star
+	j	blk_compile_expr
+blk_chk_decl_at:
+	addi	t6, zero, 1
+	addi	gp, zero, 1		# scan return site 1 = scan_ret_blk
+	j	cs_array_decl_scan
+blk_chk_decl_hash:
+	addi	t6, zero, 2
+	addi	gp, zero, 1
+	j	cs_array_decl_scan
+blk_chk_decl_star:
+	addi	t6, zero, 4
+	addi	gp, zero, 1
+	j	cs_array_decl_scan
+scan_ret_blk:
+	beqz	a0, blk_compile_expr
+	addi	gp, zero, 1		# decl_go return site 1 = ct_blk_loop
+	j	cs_array_decl_go
+blk_compile_expr:
 	addi	t6, zero, 0		# min_bp = 0: full expression allowed
 	addi	gp, zero, 25		# compile_expr site 25 = ce_ct_blk_rec
 	j	compile_expr_p
@@ -5181,13 +5316,78 @@ ct_blk_end:
 ct_deref:
 	lw	t0, 4(sp)
 	beqz	t0, ct_done
+	# Check for array indexing: peek for '['. If found, compute
+	# (base + i*stride) inline and then fall through to the deref emit.
+	addi	t2, s2, 0
+ct_idx_ws:
+	bge	t2, s3, ct_deref_emit
+	lbu	t3, 0(t2)
+	addi	t4, zero, 33
+	bge	t3, t4, ct_idx_peek
+	addi	t2, t2, 1
+	j	ct_idx_ws
+ct_idx_peek:
+	addi	t4, zero, '['
+	bne	t3, t4, ct_deref_emit
+	# Consume whitespace + '['
+	addi	s2, t2, 1
+	# Push base (a0) so we can compile the index expression.
+	addi	gp, zero, 26		# push site 26 = push_ct_idx
+	j	emit_push_a0
+push_ct_idx:
+	addi	t6, zero, 0
+	addi	gp, zero, 35		# compile_expr site 35 = ce_ct_idx
+	j	compile_expr_p
+ce_ct_idx:
+	# Expect ']'.
+	addi	gp, zero, 49		# skip_ws site 49 = sw_ct_idx_rbrace
+	j	skip_ws
+sw_ct_idx_rbrace:
+	bge	s2, s3, ct_bad_idx_rbrace
+	lbu	t0, 0(s2)
+	addi	t1, zero, ']'
+	bne	t0, t1, ct_bad_idx_rbrace
+	addi	s2, s2, 1
+	# Scale index by stride. deref_kind 2 (byte) → no shift; 3 (half) →
+	# shift 1; 1 (word) → shift 2. Emit `slli a0, a0, N` directly.
+	lw	t0, 4(sp)
+	addi	t1, zero, 2
+	beq	t0, t1, ct_idx_scaled	# byte stride, no shift
+	addi	t1, zero, 3
+	beq	t0, t1, ct_idx_shift1
+	# Word stride: shift 2. Word 0x00251513 (slli a0, a0, 2).
+	lui	a0, 0x251
+	addi	a0, a0, 0x513
+	addi	gp, zero, 72		# emit_word site 72 = ew_ct_idx_shl2
+	j	emit_word
+ew_ct_idx_shl2:
+	j	ct_idx_scaled
+ct_idx_shift1:
+	# Halfword stride: shift 1. Word 0x00151513 (slli a0, a0, 1).
+	lui	a0, 0x151
+	addi	a0, a0, 0x513
+	addi	gp, zero, 73		# emit_word site 73 = ew_ct_idx_shl1
+	j	emit_word
+ew_ct_idx_shl1:
+ct_idx_scaled:
+	# Pop base → t0, emit `add a0, t0, a0`.
+	addi	gp, zero, 26		# pop site 26 = pop_ct_idx
+	j	emit_pop_t0
+pop_ct_idx:
+	addi	gp, zero, 3		# ea site 3 = ea_ct_idx
+	j	emit_add
+ea_ct_idx:
+	# Now a0 runtime = base + idx*stride. Fall through to emit the deref.
+ct_deref_emit:
+	lw	t0, 4(sp)
 	addi	t1, zero, 1
 	beq	t0, t1, ct_deref_w
+	addi	t1, zero, 3
+	beq	t0, t1, ct_deref_h
+	# Byte deref.
 	j	emit_lbu_deref
 elbud_ret:
 	# Byte deref is an lvalue: `@expr = val` is valid. Mark lv_kind = 2.
-	# (The address was in a0 before the lbu we just emitted; the assignment
-	# handler will un-emit the lbu to recover that address.)
 	lla	t0, lv_kind
 	addi	t1, zero, 2
 	sw	t1, 0(t0)
@@ -5200,6 +5400,22 @@ elwd_ret:
 	addi	t1, zero, 3
 	sw	t1, 0(t0)
 	j	ct_done
+ct_deref_h:
+	# Emit `lhu a0, 0(a0)` directly (word 0x00055503). Halfword is an
+	# lvalue: lv_kind = 4.
+	lui	a0, 0x55
+	addi	a0, a0, 0x503
+	addi	gp, zero, 74		# emit_word site 74 = ew_ct_deref_h
+	j	emit_word
+ew_ct_deref_h:
+	lla	t0, lv_kind
+	addi	t1, zero, 4
+	sw	t1, 0(t0)
+	j	ct_done
+
+ct_bad_idx_rbrace:
+	addi	a0, zero, 44		# err 44: ']'
+	j	report_err
 
 ct_bad:
 	addi	a0, zero, 5		# err 5: expected expression
@@ -5473,7 +5689,11 @@ ced_33:
 	bnez	gp, ced_34
 	j	ce_ct_call_arg
 ced_34:
+	addi	gp, gp, -1
+	bnez	gp, ced_35
 	j	ce_ct_return_val
+ced_35:
+	j	ce_ct_idx
 
 # ══════════════════════════════════════════════════════════════════════════════
 # compile_expr_p — Pratt (top-down operator-precedence) expression parser.
@@ -6463,13 +6683,15 @@ ce_cep_asg_rhs:
 	lw	t1, 16(sp)
 	addi	t2, zero, 1
 	beq	t1, t2, cep_asg_em_ident
-	# kind 2 or 3 — pop address into t0, then dispatch for sb / sw.
+	# kind 2/3/4 — pop address into t0, then dispatch for sb / sw / sh.
 	addi	gp, zero, 21		# pop site 21 = pop_cep_asg
 	j	emit_pop_t0
 pop_cep_asg:
 	lw	t1, 16(sp)
 	addi	t2, zero, 2
 	beq	t1, t2, cep_asg_em_sb
+	addi	t2, zero, 4
+	beq	t1, t2, cep_asg_em_sh
 	j	cep_asg_em_sw
 
 cep_asg_em_ident:
@@ -6490,6 +6712,15 @@ cep_asg_em_sw:
 	addi	gp, zero, 1		# esw site 1 = esw_cep_asg
 	j	emit_sw_deref
 esw_cep_asg:
+	j	cep_post_emit
+
+cep_asg_em_sh:
+	# Emit `sh a0, 0(t0)` directly (word 0x00A29023).
+	lui	a0, 0xA29
+	addi	a0, a0, 0x023
+	addi	gp, zero, 75		# emit_word site 75 = ew_cep_asg_sh
+	j	emit_word
+ew_cep_asg_sh:
 	j	cep_post_emit
 
 cep_bad_lvalue:
@@ -6538,6 +6769,8 @@ push_cep_compound_addr:
 	lw	t1, 16(sp)
 	addi	t2, zero, 3
 	beq	t1, t2, cep_pc_reload_w
+	addi	t2, zero, 4
+	beq	t1, t2, cep_pc_reload_h
 	# kind == 2 (byte deref): re-emit `lbu a0, 0(a0)` = 0x00054503.
 	lui	a0, 0x54
 	addi	a0, a0, 0x503
@@ -6552,6 +6785,14 @@ cep_pc_reload_w:
 	addi	gp, zero, 41		# emit_word site 41 = ew_cep_compound_rw
 	j	emit_word
 ew_cep_compound_rw:
+	j	cep_pc_push_value
+cep_pc_reload_h:
+	# kind == 4 (halfword deref): re-emit `lhu a0, 0(a0)` = 0x00055503.
+	lui	a0, 0x55
+	addi	a0, a0, 0x503
+	addi	gp, zero, 76		# emit_word site 76 = ew_cep_compound_rh
+	j	emit_word
+ew_cep_compound_rh:
 
 cep_pc_push_value:
 	# Push a0 (the lhs value — either the nud's load for IDENT, or the
@@ -6590,6 +6831,8 @@ cep_post_emit:
 	beq	t5, t1, cep_pe_store_ident
 	addi	t1, zero, 2
 	beq	t5, t1, cep_pe_store_byte
+	addi	t1, zero, 4
+	beq	t5, t1, cep_pe_store_half
 	# kind == 3 (word deref): pop address, emit sw.
 	addi	gp, zero, 24		# pop site 24 = pop_cep_compound_addr_w
 	j	emit_pop_t0
@@ -6605,6 +6848,17 @@ pop_cep_compound_addr_b:
 	addi	gp, zero, 2		# esb site 2 = esb_cep_compound
 	j	emit_sb_deref
 esb_cep_compound:
+	j	cep_post_emit_reset
+cep_pe_store_half:
+	addi	gp, zero, 27		# pop site 27 = pop_cep_compound_addr_h
+	j	emit_pop_t0
+pop_cep_compound_addr_h:
+	# Emit `sh a0, 0(t0)` directly.
+	lui	a0, 0xA29
+	addi	a0, a0, 0x023
+	addi	gp, zero, 77		# emit_word site 77 = ew_cep_pe_sh
+	j	emit_word
+ew_cep_pe_sh:
 	j	cep_post_emit_reset
 cep_pe_store_ident:
 	lw	a0, 20(sp)		# saved slot offset
@@ -6648,10 +6902,40 @@ compile_stmt:
 	addi	sp, sp, -4
 	sw	s2, 0(sp)
 	lbu	t0, 0(s2)
+	# Peek for array declarations '@'/'#'/'*' IDENT '[' LIT ']' ';'. We
+	# only commit to the declaration path if the whole pattern matches
+	# syntactically; otherwise we fall through to the normal dispatch
+	# below (which handles *expr=v, @expr=v, compound assigns, etc.).
+	addi	t1, zero, 42		# '*'
+	beq	t0, t1, cs_chk_decl_star
+	addi	t1, zero, 64		# '@'
+	beq	t0, t1, cs_chk_decl_at
+	addi	t1, zero, '#'
+	beq	t0, t1, cs_chk_decl_hash
+	j	cs_normal_dispatch
+cs_chk_decl_star:
+	addi	t6, zero, 4		# stride = 4 (word)
+	addi	gp, zero, 0		# scan return site 0 = scan_ret_stmt
+	j	cs_array_decl_scan
+cs_chk_decl_at:
+	addi	t6, zero, 1		# stride = 1 (byte)
+	addi	gp, zero, 0
+	j	cs_array_decl_scan
+cs_chk_decl_hash:
+	addi	t6, zero, 2		# stride = 2 (halfword)
+	addi	gp, zero, 0
+	j	cs_array_decl_scan
+scan_ret_stmt:
+	beqz	a0, cs_normal_dispatch
+	addi	gp, zero, 0		# cs_array_decl_go return site 0 = cs_done
+	j	cs_array_decl_go
+cs_normal_dispatch:
 	addi	t1, zero, 42		# '*'
 	beq	t0, t1, cs_star
 	addi	t1, zero, 64		# '@'
 	beq	t0, t1, cs_at
+	addi	t1, zero, '#'
+	beq	t0, t1, cs_fb
 	addi	t1, zero, '+'
 	beq	t0, t1, cs_chk_pre_pp
 	addi	t1, zero, '-'
@@ -7481,6 +7765,329 @@ cs_halt:
 cs_done:
 	addi	sp, sp, 4		# pop compile_stmt's entry frame
 	j	cs_after
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cs_array_decl_scan / cs_array_decl_go — peek for an array declaration
+# (`@IDENT[LIT];` / `#IDENT[LIT];` / `*IDENT[LIT];`) and commit on match.
+#
+# Inputs: t6 = stride (1, 2, or 4), s2 = prefix char ('@', '#', '*')
+# On match: jumps to cs_array_decl_go (actual parse & emit).
+# On mismatch: jumps to cs_normal_dispatch (falls into the existing * / @ /
+#   letter-IDENT dispatch, which handles writes, reads, compound assigns).
+# ══════════════════════════════════════════════════════════════════════════════
+cs_array_decl_scan:
+	addi	t0, s2, 1		# cursor past prefix
+cad_s1:
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, cad_id_start
+	addi	t0, t0, 1
+	j	cad_s1
+cad_id_start:
+	# Must start with letter or underscore.
+	addi	t2, zero, '_'
+	beq	t1, t2, cad_id_loop
+	addi	t2, zero, 'a'
+	blt	t1, t2, cad_id_chk_uc
+	addi	t2, zero, 123
+	blt	t1, t2, cad_id_loop
+cad_id_chk_uc:
+	addi	t2, zero, 'A'
+	blt	t1, t2, scan_decl_fail
+	addi	t2, zero, 91
+	bge	t1, t2, scan_decl_fail
+cad_id_loop:
+	addi	t0, t0, 1
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	addi	t2, zero, 'a'
+	blt	t1, t2, cad_id_chk_uc2
+	addi	t2, zero, 123
+	blt	t1, t2, cad_id_loop
+cad_id_chk_uc2:
+	addi	t2, zero, 'A'
+	blt	t1, t2, cad_id_chk_dig
+	addi	t2, zero, 91
+	blt	t1, t2, cad_id_loop
+cad_id_chk_dig:
+	addi	t2, zero, '0'
+	blt	t1, t2, cad_id_chk_us
+	addi	t2, zero, 58
+	blt	t1, t2, cad_id_loop
+cad_id_chk_us:
+	addi	t2, zero, '_'
+	beq	t1, t2, cad_id_loop
+	# Done with ident.
+cad_after_id:
+cad_s2:
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, cad_lbracket
+	addi	t0, t0, 1
+	j	cad_s2
+cad_lbracket:
+	addi	t2, zero, '['
+	bne	t1, t2, scan_decl_fail
+	addi	t0, t0, 1
+cad_s3:
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, cad_digit
+	addi	t0, t0, 1
+	j	cad_s3
+cad_digit:
+	# We've scanned `<prefix> IDENT [` and now expect a digit for the
+	# size literal. If the next char isn't a digit, the user either wrote
+	# an expression like `@arr[x]` (which is valid when `arr` is defined)
+	# or an illegal array declaration with a non-literal size. Branch to
+	# the diagnostic probe which distinguishes the two.
+	addi	t2, zero, '0'
+	blt	t1, t2, cad_probe_nonlit
+	addi	t2, zero, 58
+	bge	t1, t2, cad_probe_nonlit
+cad_d_loop:
+	addi	t0, t0, 1
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	# Allow digits and hex letters for 0x literals.
+	addi	t2, zero, '0'
+	blt	t1, t2, cad_chk_xaf
+	addi	t2, zero, 58
+	blt	t1, t2, cad_d_loop
+cad_chk_xaf:
+	addi	t2, zero, 'a'
+	blt	t1, t2, cad_chk_xAF
+	addi	t2, zero, 123
+	blt	t1, t2, cad_d_loop
+cad_chk_xAF:
+	addi	t2, zero, 'A'
+	blt	t1, t2, cad_after_lit
+	addi	t2, zero, 91
+	blt	t1, t2, cad_d_loop
+cad_after_lit:
+cad_s4:
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, cad_rbracket
+	addi	t0, t0, 1
+	j	cad_s4
+cad_rbracket:
+	addi	t2, zero, ']'
+	bne	t1, t2, scan_decl_fail
+	addi	t0, t0, 1
+cad_s5:
+	bge	t0, s3, scan_decl_fail
+	lbu	t1, 0(t0)
+	addi	t2, zero, 33
+	bge	t1, t2, cad_semi
+	addi	t0, t0, 1
+	j	cad_s5
+cad_semi:
+	addi	t2, zero, ';'
+	bne	t1, t2, scan_decl_fail
+	# All match. Set a0 = 1; dispatch via gp to the caller's result label.
+	addi	a0, zero, 1
+	j	scan_decl_disp
+scan_decl_fail:
+	addi	a0, zero, 0
+	j	scan_decl_disp
+scan_decl_disp:
+	bnez	gp, scan_ret_blk
+	j	scan_ret_stmt
+
+# ── cad_probe_nonlit — diagnostic probe for `<prefix> IDENT [<non-digit>` ──
+# The scan got far enough to know this LOOKED like an array declaration
+# (prefix + ident + '['), but the content inside '[' isn't a digit. Two
+# cases:
+#   1. IDENT is already a variable → this is an indexed deref expression
+#      like `@arr[i]`. Fall back to the caller's expression path.
+#   2. IDENT is new → the user was trying to declare an array but used a
+#      non-literal size. Emit a dedicated error.
+#
+# Caller context: gp holds the scan-site id (0 = statement, 1 = block).
+# We save gp and s2 on entry so we can rewind and dispatch appropriately.
+cad_probe_nonlit:
+	addi	sp, sp, -8
+	sw	gp, 0(sp)
+	sw	s2, 4(sp)		# s2 is at the prefix char
+	addi	s2, s2, 1
+	addi	gp, zero, 55		# skip_ws site 55 = sw_cad_probe
+	j	skip_ws
+sw_cad_probe:
+	addi	gp, zero, 9		# parse_ident site 9 = pi_cad_probe
+	j	parse_ident
+pi_cad_probe:
+	# Silent lookup in the variable symtab.
+	addi	t0, s8, -40
+cad_probe_scan:
+	blt	t0, s7, cad_probe_not_def
+	addi	t1, zero, 0
+cad_probe_cmp:
+	addi	t2, zero, 32
+	beq	t1, t2, cad_probe_defined
+	add	t3, t0, t1
+	lbu	t4, 0(t3)
+	blt	t1, s11, cad_probe_in_tok
+	bnez	t4, cad_probe_next
+	addi	t1, t1, 1
+	j	cad_probe_cmp
+cad_probe_in_tok:
+	add	t5, s10, t1
+	lbu	t6, 0(t5)
+	bne	t4, t6, cad_probe_next
+	addi	t1, t1, 1
+	j	cad_probe_cmp
+cad_probe_next:
+	addi	t0, t0, -40
+	j	cad_probe_scan
+cad_probe_defined:
+	# It's a real variable — this is an expression access. Restore s2
+	# to the prefix and fall back based on the original scan context.
+	lw	gp, 0(sp)
+	lw	s2, 4(sp)
+	addi	sp, sp, 8
+	bnez	gp, cad_probe_def_blk
+	j	cs_normal_dispatch
+cad_probe_def_blk:
+	j	blk_compile_expr
+cad_probe_not_def:
+	# The ident is new — declaration attempt with a non-literal size.
+	# Point at the ident start for a clean error column.
+	lw	gp, 0(sp)
+	addi	sp, sp, 8
+	lla	t0, ident_start
+	lw	s2, 0(t0)
+	addi	a0, zero, 46		# err 46: array size must be a literal
+	j	report_err
+
+# ── cs_array_decl_go — commit: parse the declaration, allocate, emit init ──
+# Stride is still in t6. s2 is still at the prefix char (unchanged by scan).
+# gp = return-site id (0 = cs_done, 1 = ct_blk_loop).
+#
+# Frame (24 bytes):
+#    0(sp): stride (1/2/4)
+#    4(sp): element count (N)
+#    8(sp): total block bytes (N*stride rounded to 4)
+#   12(sp): block offset within frame
+#   16(sp): variable's own slot offset (returned by la_new)
+#   20(sp): saved caller gp (for exit dispatch)
+cs_array_decl_go:
+	addi	sp, sp, -24
+	sw	t6, 0(sp)
+	sw	gp, 20(sp)
+	addi	s2, s2, 1		# consume prefix char
+	addi	gp, zero, 50		# skip_ws site 50 = sw_cs_decl_name
+	j	skip_ws
+sw_cs_decl_name:
+	addi	gp, zero, 8		# parse_ident site 8 = pi_cs_decl
+	j	parse_ident
+pi_cs_decl:
+	# Ensure the name is fresh in the variable symtab.
+	addi	t0, s7, 0
+cad_chk_exist:
+	beq	t0, s8, cad_name_ok
+	addi	t1, zero, 0
+cad_ce_cmp:
+	addi	t2, zero, 32
+	beq	t1, t2, cad_bad_already_defined
+	add	t3, t0, t1
+	lbu	t4, 0(t3)
+	blt	t1, s11, cad_ce_in_tok
+	bnez	t4, cad_ce_next
+	addi	t1, t1, 1
+	j	cad_ce_cmp
+cad_ce_in_tok:
+	add	t5, s10, t1
+	lbu	t6, 0(t5)
+	bne	t4, t6, cad_ce_next
+	addi	t1, t1, 1
+	j	cad_ce_cmp
+cad_ce_next:
+	addi	t0, t0, 40
+	j	cad_chk_exist
+cad_name_ok:
+	# Consume '[' (already confirmed by peek; sanity-re-check).
+	addi	gp, zero, 51		# skip_ws site 51 = sw_cs_decl_lbrack
+	j	skip_ws
+sw_cs_decl_lbrack:
+	addi	s2, s2, 1		# consume '['
+	addi	gp, zero, 52		# skip_ws site 52 = sw_cs_decl_lit
+	j	skip_ws
+sw_cs_decl_lit:
+	addi	gp, zero, 1
+	j	parse_num
+pn_cs_decl:
+	sw	a0, 4(sp)		# N
+	addi	gp, zero, 53		# skip_ws site 53 = sw_cs_decl_rbrack
+	j	skip_ws
+sw_cs_decl_rbrack:
+	addi	s2, s2, 1		# consume ']'
+	addi	gp, zero, 54		# skip_ws site 54 = sw_cs_decl_semi
+	j	skip_ws
+sw_cs_decl_semi:
+	addi	s2, s2, 1		# consume ';'
+
+	# total = N * stride rounded up to 4 bytes
+	lw	t0, 4(sp)
+	lw	t1, 0(sp)
+	addi	t2, zero, 0
+	addi	t3, zero, 0
+cad_sz_mul:
+	beq	t3, t0, cad_sz_mul_done
+	add	t2, t2, t1
+	addi	t3, t3, 1
+	j	cad_sz_mul
+cad_sz_mul_done:
+	addi	t2, t2, 3
+	andi	t2, t2, -4
+	sw	t2, 8(sp)
+
+	# Block offset = current s9; advance s9 past block.
+	addi	t3, s9, 0
+	sw	t3, 12(sp)
+	add	s9, s9, t2
+
+	# Allocate the array-variable entry via la_new. s10/s11 still hold
+	# the name parsed earlier.
+	addi	gp, zero, 6		# lookup_or_alloc site 6 = la_cs_decl
+	j	la_new
+la_cs_decl:
+	sw	a0, 16(sp)		# variable slot offset
+
+	# Emit `addi a0, fp, <block_offset>` (word 0x00040513 + imm<<20).
+	lw	t3, 12(sp)
+	addi	t4, zero, 2047
+	blt	t4, t3, cad_bad_frame_too_big
+	lui	a0, 0x40
+	addi	a0, a0, 0x513
+	andi	t3, t3, 0xFFF
+	slli	t3, t3, 20
+	or	a0, a0, t3
+	addi	gp, zero, 78		# emit_word site 78 = ew_cs_decl_addi
+	j	emit_word
+ew_cs_decl_addi:
+	# Emit `sw a0, <var_slot>(fp)` via emit_sw_sp.
+	lw	a0, 16(sp)
+	addi	gp, zero, 24		# esws site 24 = esws_cs_decl
+	j	emit_sw_sp
+esws_cs_decl:
+	lw	gp, 20(sp)
+	addi	sp, sp, 24
+	bnez	gp, decl_exit_blk
+	j	cs_done
+decl_exit_blk:
+	j	ct_blk_loop
+
+cad_bad_already_defined:
+	addi	a0, zero, 45		# err 45: variable already defined
+	j	report_err
+cad_bad_frame_too_big:
+	addi	a0, zero, 40		# err 40: frame too large
+	j	report_err
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_mul — emit the 11-instruction inline signed-multiply sequence.
@@ -8404,6 +9011,18 @@ err_tbl:
 	.byte	1, 25
 	.ascii	"'return' outside function"
 	.zero	5
+	# slot 44 — ']'
+	.byte	0, 3
+	.ascii	"']'"
+	.zero	27
+	# slot 45 — raw: variable already defined
+	.byte	1, 15
+	.ascii	"already defined"
+	.zero	15
+	# slot 46 — raw: array size must be a compile-time literal
+	.byte	1, 28
+	.ascii	"array size must be a literal"
+	.zero	2
 
 # ══════════════════════════════════════════════════════════════════════════════
 # End of famc image.  `tp` is initialized from this label at startup — every

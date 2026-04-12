@@ -568,8 +568,8 @@ test_output  "mul literals" \
 	"@0x10000000 = 13 * 5;" "A"
 test_output  "mul by one" \
 	"@0x10000000 = 1 * 65;" "A"
-test_output  "mul by zero produces NUL" \
-	"@0x10000000 = 0 * 123; @0x10000000 = 65;" "A"
+test_output  "mul by zero is zero" \
+	"@0x10000000 = 0 * 123 == 0 ? 65 : 66;" "A"
 test_output  "mul variables" \
 	"x = 8; y = 8; @0x10000000 = x * y + 1;" "A"
 # '*' binds tighter than '+' (like C).
@@ -1027,6 +1027,47 @@ test_output  "non-literal range bounds" \
 	"lo = 2; hi = 5; v = for x in lo..hi { x }; @0x10000000 = v + 61;" "A"
 test_output  "inclusive with expression bounds" \
 	"lo = 1; hi = 4; for i in lo..=hi { @0x10000000 = '0' + i; };" "1234"
+
+# ============================================================================
+echo "=== Arrays ==="
+# Stack-allocated arrays with @/#/* strides. Declarations work at top
+# level, inside block expressions, and inside function bodies.
+test_output  "byte array decl + access" \
+	"@arr[10]; @arr[0] = 65; @0x10000000 = @arr[0];" "A"
+test_output  "word array decl + access" \
+	"*arr[10]; *arr[0] = 65; @0x10000000 = *arr[0];" "A"
+test_output  "halfword array decl + access" \
+	"#arr[10]; #arr[5] = 65; @0x10000000 = #arr[5];" "A"
+test_output  "byte array iteration" \
+	"@arr[5]; for i in 0..5 { @arr[i] = 'A' + i; }; for i in 0..5 { @0x10000000 = @arr[i]; };" "ABCDE"
+test_output  "word array sum" \
+	"*arr[5]; for i in 0..5 { *arr[i] = i + 1; }; s = 0; for i in 0..5 { s += *arr[i]; }; @0x10000000 = s + 50;" "A"
+test_output  "halfword array values" \
+	"#arr[5]; for i in 0..5 { #arr[i] = 100 * (i + 1); }; @0x10000000 = #arr[0] == 100 && #arr[4] == 500 ? 'A' : 'N';" "A"
+test_output  "array access on pointer to heap RAM" \
+	"p = 0x80005000; @p[0] = 'A'; @p[1] = 'B'; @p[2] = 'C'; @0x10000000 = @p[0]; @0x10000000 = @p[1]; @0x10000000 = @p[2];" "ABC"
+test_output  "word and byte alias on same block" \
+	"*arr[4]; *arr[0] = 0x41424344; @0x10000000 = @arr[0]; @0x10000000 = @arr[1]; @0x10000000 = @arr[2]; @0x10000000 = @arr[3];" "DCBA"
+test_output  "halfword plain deref on a pointer" \
+	"p = 0x80005000; #p = 65; @0x10000000 = #p;" "A"
+test_output  "halfword indexed access on a pointer" \
+	"p = 0x80005000; #p[2] = 65; @0x10000000 = #p[2];" "A"
+# Block-level declarations (inside { ... } / function bodies).
+test_output  "array declared inside a block expression" \
+	"v = { @arr[5]; @arr[0] = 65; @arr[0] }; @0x10000000 = v;" "A"
+test_output  "array declared inside a function body" \
+	"fn f() { @arr[5]; @arr[0] = 65; @arr[0] } @0x10000000 = f();" "A"
+test_output  "function-local word array fill + sum" \
+	"fn sum5() { *arr[5]; for i in 0..5 { *arr[i] = i + 1; }; s = 0; for i in 0..5 { s += *arr[i]; }; s + 50 } @0x10000000 = sum5();" "A"
+test_output  "function-local byte array iteration" \
+	"fn greet() { @buf[5]; for i in 0..5 { @buf[i] = 'A' + i; }; for i in 0..5 { @0x10000000 = @buf[i]; }; 0 } v = greet();" "ABCDE"
+# Error case
+test_error "array decl redefines existing variable" \
+	"x = 5; @x[10];" \
+	"Error:1:10 already defined"
+test_error "array decl with non-literal size" \
+	"x = 5; @arr[x];" \
+	"Error:1:9 array size must be a literal"
 
 # ============================================================================
 echo "=== Functions ==="
