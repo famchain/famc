@@ -6771,35 +6771,36 @@ elws_ret:
 	# Was there a prefix '++' or '--'?
 	lw	t0, 12(sp)
 	bnez	t0, ct_id_prefix_emit
-	# No prefix. A deref prefix ('*'/'@') means we ignore any '++'/'--'
-	# after the ident and fall through to the deref emitter.
-	lw	t0, 8(sp)
-	bnez	t0, ct_id_pop_then_deref
-	# Otherwise check for postfix '++'/'--'.
+	# Check postfix '++'/'--' BEFORE the deref prefix so `@x++` means
+	# `@(x++)` — dereference the OLD pointer value (C-style `*p++`).
 	addi	gp, zero, 14		# skip_ws site 14 = sw_ct_post
 	j	skip_ws
 sw_ct_post:
-	bge	s2, s3, ct_id_nopf
+	bge	s2, s3, ct_post_no_pf
 	lbu	t0, 0(s2)
 	addi	t1, zero, '+'
 	beq	t0, t1, ct_pf_chkpp
 	addi	t1, zero, '-'
 	beq	t0, t1, ct_pf_chkmm
+ct_post_no_pf:
+	# No postfix. If there's a prefix '*'/'@', apply it now.
+	lw	t0, 8(sp)
+	bnez	t0, ct_id_pop_then_deref
 	j	ct_id_nopf
 ct_pf_chkpp:
 	addi	t2, s2, 1
-	bge	t2, s3, ct_id_nopf
+	bge	t2, s3, ct_post_no_pf
 	lbu	t0, 0(t2)
 	addi	t1, zero, '+'
-	bne	t0, t1, ct_id_nopf
+	bne	t0, t1, ct_post_no_pf
 	addi	s2, s2, 2
 	j	ct_do_post_inc
 ct_pf_chkmm:
 	addi	t2, s2, 1
-	bge	t2, s3, ct_id_nopf
+	bge	t2, s3, ct_post_no_pf
 	lbu	t0, 0(t2)
 	addi	t1, zero, '-'
-	bne	t0, t1, ct_id_nopf
+	bne	t0, t1, ct_post_no_pf
 	addi	s2, s2, 2
 	j	ct_do_post_dec
 
@@ -6860,38 +6861,106 @@ ct_do_post_inc:
 	lw	t3, 0(t3)
 	lbu	t4, 37(t3)
 	beqz	t4, ct_bad_immut_pp
-	# Runtime seq: a0 = old x; addi a0,a0,1; sw a0,off(fp); addi a0,a0,-1.
-	addi	gp, zero, 1		# eaa1 site 1 = eaa1_post_inc
-	j	emit_addi_a0_1
-eaa1_post_inc:
+	# Stride from deref_kind (C-style pointer arithmetic):
+	#   0 (none) → 1, 2 (byte @) → 1, 3 (half #) → 2, 1 (word *) → 4
+	lw	t5, 8(sp)		# deref_kind
+	addi	t6, zero, 1		# default stride = 1
+	addi	t3, zero, 3
+	beq	t5, t3, ct_pi_stride_h
+	addi	t3, zero, 1
+	beq	t5, t3, ct_pi_stride_w
+	j	ct_pi_stride_done
+ct_pi_stride_h:
+	addi	t6, zero, 2
+	j	ct_pi_stride_done
+ct_pi_stride_w:
+	addi	t6, zero, 4
+ct_pi_stride_done:
+	# Emit addi a0, a0, t6 = 0x00050513 | (t6 << 20)
+	andi	t3, t6, 0xFFF
+	slli	t3, t3, 20
+	lui	a0, 0x50
+	addi	a0, a0, 0x513
+	or	a0, a0, t3
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	# Emit sw a0, off(fp)
 	lw	a0, 0(sp)
 	addi	sp, sp, 4
+	# Stash stride in frame — but we already freed the offset slot.
+	# Use a scratch: push stride back via sp.
+	addi	sp, sp, -4
+	sw	t6, 0(sp)
 	addi	gp, zero, 3		# esws site 3 = esws_post_inc
 	j	emit_sw_sp
-esws_post_inc:
-	addi	gp, zero, 1		# eaam1 site 1 = eaam1_post_inc_undo
-	j	emit_addi_a0_m1
+eaa1_post_inc:
 eaam1_post_inc_undo:
-	j	ct_done
+eaam1_post_dec:
+eaa1_post_dec_undo:
+	j	halt_err
+esws_post_inc:
+	# Emit addi a0, a0, -stride to undo for postfix return value.
+	lw	t6, 0(sp)
+	addi	sp, sp, 4
+	sub	t6, zero, t6		# t6 = -stride
+	andi	t3, t6, 0xFFF
+	slli	t3, t3, 20
+	lui	a0, 0x50
+	addi	a0, a0, 0x513
+	or	a0, a0, t3
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	ct_deref
 
 ct_do_post_dec:
 	lla	t3, last_ident_entry
 	lw	t3, 0(t3)
 	lbu	t4, 37(t3)
 	beqz	t4, ct_bad_immut_pp
-	# Runtime seq: a0 = old x; addi a0,a0,-1; sw a0,off(fp); addi a0,a0,1.
-	addi	gp, zero, 2		# eaam1 site 2 = eaam1_post_dec
-	j	emit_addi_a0_m1
-eaam1_post_dec:
+	# Stride from deref_kind.
+	lw	t5, 8(sp)
+	addi	t6, zero, 1
+	addi	t3, zero, 3
+	beq	t5, t3, ct_pd_stride_h
+	addi	t3, zero, 1
+	beq	t5, t3, ct_pd_stride_w
+	j	ct_pd_stride_done
+ct_pd_stride_h:
+	addi	t6, zero, 2
+	j	ct_pd_stride_done
+ct_pd_stride_w:
+	addi	t6, zero, 4
+ct_pd_stride_done:
+	# Emit addi a0, a0, -stride
+	sub	t6, zero, t6
+	andi	t3, t6, 0xFFF
+	slli	t3, t3, 20
+	lui	a0, 0x50
+	addi	a0, a0, 0x513
+	or	a0, a0, t3
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	# Emit sw a0, off(fp)
 	lw	a0, 0(sp)
 	addi	sp, sp, 4
+	# Push stride (negated) for undo
+	addi	sp, sp, -4
+	sw	t6, 0(sp)
 	addi	gp, zero, 4		# esws site 4 = esws_post_dec
 	j	emit_sw_sp
 esws_post_dec:
-	addi	gp, zero, 2		# eaa1 site 2 = eaa1_post_dec_undo
-	j	emit_addi_a0_1
-eaa1_post_dec_undo:
-	j	ct_done
+	# Emit addi a0, a0, +stride to undo.
+	lw	t6, 0(sp)
+	addi	sp, sp, 4
+	sub	t6, zero, t6		# negate back to +stride
+	andi	t3, t6, 0xFFF
+	slli	t3, t3, 20
+	lui	a0, 0x50
+	addi	a0, a0, 0x513
+	or	a0, a0, t3
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	ct_deref
 
 ct_lparen:
 	# '(' expr ')' as a primary. Consume '(', compile expr, then expect ')'.

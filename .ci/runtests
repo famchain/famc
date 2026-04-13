@@ -1143,10 +1143,10 @@ test_output  "postfix -- on struct field" \
 	"struct P { x, y } p := P { 66, 0 }; P@p.x--; @0x10000000 = P@p.x;" "A"
 test_output  "postfix ++ returns old value" \
 	"struct P { x, y } p := P { 64, 0 }; v = P@p.x++; @0x10000000 = v + 1;" "A"
-test_output  "postfix ++ on word deref *ptr" \
-	"*buf[1]; *buf = 64; *buf++; @0x10000000 = *buf;" "A"
-test_output  "postfix ++ on byte deref @ptr" \
-	"@buf[1]; @buf = 64; @buf++; @0x10000000 = @buf;" "A"
+test_output  "@ptr++ reads byte, advances pointer (C-style *p++)" \
+	"s := \"AB\"; @0x10000000 = @s++; @0x10000000 = @s;" "AB"
+test_output  "*ptr++ reads word, advances pointer" \
+	"*buf[2]; *buf = 65; *(buf+4) = 66; p := buf; @0x10000000 = *p++; @0x10000000 = *p;" "AB"
 test_error "postfix ++ on immutable struct" \
 	"struct P { x } p = P { 1 }; P@p.x++;" \
 	"Error:1:36 left of '=' is not an lvalue"
