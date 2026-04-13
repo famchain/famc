@@ -116,6 +116,13 @@ _start:
 	lui	sp, 0x4000		# 0x04000000 = 64 MiB
 	add	sp, sp, tp		# sp = tp + 64 MiB
 
+	# heap_end = sp_initial - 4 MiB. Every `tp +=` grow path checks this
+	# to keep the heap from walking into famc's own stack.
+	lui	t0, 0x400		# 0x00400000 = 4 MiB
+	sub	t0, sp, t0
+	lla	t1, heap_end
+	sw	t0, 0(t1)
+
 	lui	s6, 0x10000		# UART
 
 	# ── Input buffer = initial sp, grows upward ───────────────────────
@@ -246,6 +253,12 @@ rd_done:
 	# Output buffer starts immediately after input
 	addi	s4, s3, 0
 	addi	s5, s4, 0
+	# bin_end = s4 + 16 MiB (0x01000000). The whole emit pipeline checks
+	# s5 against this so a runaway compile errors out cleanly.
+	lui	t0, 0x1000
+	add	t0, s4, t0
+	lla	t1, bin_end
+	sw	t0, 0(t1)
 
 # ── Phase 2: emit prologue (7 words, 28 bytes) ──────────────────────────────
 	# nop = addi x0, x0, 0 = 0x00000013
@@ -875,6 +888,11 @@ list_append_word:
 	lw	t2, 0(a1)		# base
 	sub	t3, t1, t2		# cap (bytes)
 	slli	t4, t3, 1		# new_cap
+	# heap_end check: tp + new_cap must fit below heap_end.
+	add	t5, tp, t4
+	lla	t6, heap_end
+	lw	t6, 0(t6)
+	bgeu	t5, t6, heap_full
 	addi	t5, tp, 0		# new_base
 	addi	t6, t2, 0		# src
 	addi	a4, t5, 0		# dst
@@ -1488,9 +1506,23 @@ sw_d104:
 #   28: ew_udivmod   (emit_udivmod_body — loop emitting the 13-word udivmod body)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_word:
+	# Bounds check: s5 must stay strictly below bin_end, else bail with
+	# err 71. Using t6 because emit_word is called from everywhere and
+	# t0..t5 are often live in callers.
+	lla	t6, bin_end
+	lw	t6, 0(t6)
+	bgeu	s5, t6, bin_full
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
 	j	emit_word_disp
+
+bin_full:
+	addi	a0, zero, 71		# err 71: binary output too large
+	j	report_err
+
+heap_full:
+	addi	a0, zero, 72		# err 72: compiler heap exhausted
+	j	report_err
 
 emit_word_disp:
 	bnez	gp, ewd_1
@@ -2252,6 +2284,11 @@ la_new:
 	bne	s8, s0, la_new_body
 	sub	t0, s0, s7		# old_cap (bytes)
 	slli	t1, t0, 1		# new_cap = 2 * old_cap
+	# heap_end check: tp + new_cap must fit below heap_end.
+	add	t5, tp, t1
+	lla	t6, heap_end
+	lw	t6, 0(t6)
+	bgeu	t5, t6, heap_full
 	addi	t2, tp, 0		# new_base = tp
 	addi	t3, s7, 0		# src
 	addi	t4, t2, 0		# dst
@@ -2448,6 +2485,12 @@ ew_lws:
 	j	emit_lw_sp_disp
 elws_big:
 	# Big path: lui t0, hi20; addi t0, t0, lo12; add t0, fp, t0; lw a0, 0(t0)
+	# Bounds check: we emit 16 bytes (4 words) inline without going through
+	# emit_word, so do the bin_end check up front.
+	addi	t6, s5, 16
+	lla	t1, bin_end
+	lw	t1, 0(t1)
+	bgeu	t6, t1, bin_full
 	# Compute hi20 and lo12 via (offset + 0x800) >> 12 trick so lo12 is
 	# sign-extended 12-bit.
 	addi	t1, zero, 1
@@ -2599,6 +2642,11 @@ ew_sws:
 	j	emit_sw_sp_disp
 esws_big:
 	# Big path: lui t0, hi20; addi t0, t0, lo12; add t0, fp, t0; sw a0, 0(t0)
+	# Bounds check for 16 bytes of inline emission.
+	addi	t6, s5, 16
+	lla	t1, bin_end
+	lw	t1, 0(t1)
+	bgeu	t6, t1, bin_full
 	addi	t1, zero, 1
 	slli	t1, t1, 11		# 0x800
 	add	t2, a0, t1
@@ -4300,6 +4348,15 @@ ct_sl_scan_done:
 	addi	t4, t1, 3
 	andi	t4, t4, -4		# t4 = padded byte count
 
+	# Bounds check: we're about to emit 12 bytes of prefix code + t4 bytes
+	# of literal data inline (bypassing emit_word), so verify up-front that
+	# the whole thing fits below bin_end.
+	add	t6, s5, t4
+	addi	t6, t6, 12
+	lla	t0, bin_end
+	lw	t0, 0(t0)
+	bgeu	t6, t0, bin_full
+
 	# ── Emit: auipc a0, 0 = 0x00000517 ────────────────────────────
 	lui	a0, 0
 	addi	a0, a0, 0x517
@@ -5808,6 +5865,11 @@ fn_alloc:
 	lw	t3, 0(t0)
 	sub	t4, t2, t3		# old_cap
 	slli	t5, t4, 1		# new_cap
+	# heap_end check: tp + new_cap must fit below heap_end.
+	add	t6, tp, t5
+	lla	a2, heap_end
+	lw	a2, 0(a2)
+	bgeu	t6, a2, heap_full
 	addi	t6, tp, 0		# new_base
 	addi	a2, t3, 0		# src
 	addi	a3, t6, 0		# dst
@@ -5951,6 +6013,11 @@ struct_alloc:
 	lw	t3, 0(t0)
 	sub	t4, t2, t3		# old cap (bytes)
 	slli	t5, t4, 1		# new cap
+	# heap_end check: tp + new_cap must fit below heap_end.
+	add	t6, tp, t5
+	lla	a2, heap_end
+	lw	a2, 0(a2)
+	bgeu	t6, a2, heap_full
 	addi	t6, tp, 0		# new base
 	addi	a2, t3, 0		# src
 	addi	a3, t6, 0		# dst
@@ -10271,6 +10338,13 @@ ced_37:
 # and isn't wired up yet. Short-circuit, ternary, and assignment come next.
 # ══════════════════════════════════════════════════════════════════════════════
 compile_expr_p:
+	# Stack-depth guard: if famc's own sp has descended below heap_end,
+	# deeply-nested source is about to collide with the heap region. Bail
+	# out with err 72 (same code as heap_full — same collision, opposite
+	# direction).
+	lla	t0, heap_end
+	lw	t0, 0(t0)
+	bgeu	t0, sp, heap_full
 	addi	sp, sp, -24
 	sw	gp, 0(sp)
 	sw	t6, 4(sp)		# save caller's min_bp
@@ -12890,6 +12964,11 @@ la_cs_decl:
 	j	emit_word
 cad_emit_big:
 	# Big: lui t0, hi20; addi t0, t0, lo12; add a0, fp, t0
+	# Bounds check for 12 bytes (3 words) of inline emission.
+	addi	t6, s5, 12
+	lla	t0, bin_end
+	lw	t0, 0(t0)
+	bgeu	t6, t0, bin_full
 	addi	t0, zero, 1
 	slli	t0, t0, 11		# 0x800
 	add	t1, t3, t0
@@ -13637,6 +13716,20 @@ last_ident_entry:
 last_was_brace:
 	.word	0
 
+# Upper bound for the compiled-binary write pointer s5. Set once in Phase 1
+# (after `s4 = s3`) to s4 + 16 MiB. Every emit path checks s5 against this
+# before writing, so a runaway compile fails loudly instead of scribbling
+# past the output region.
+bin_end:
+	.word	0
+
+# Upper bound for the heap bump pointer `tp`. Set once at startup to
+# sp_initial - 4 MiB, leaving a 4 MiB safety margin below famc's stack.
+# Every `tp += N` table-grow path checks this before bumping so the heap
+# can't silently collide with famc's own stack.
+heap_end:
+	.word	0
+
 # Flag set before lookup_or_alloc to indicate whether the upcoming
 # assignment is mutable (:=) or immutable (=). Read in la_cs to
 # set byte 37 of the symtab entry and enforce rules.
@@ -14063,6 +14156,14 @@ err_tbl:
 	.byte	1, 26
 	.ascii	"branch offset out of range"
 	.zero	4
+	# slot 71 — raw: compiled binary exceeds 16 MiB cap
+	.byte	1, 23
+	.ascii	"binary output too large"
+	.zero	7
+	# slot 72 — raw: compiler heap exhausted (would collide with stack)
+	.byte	1, 23
+	.ascii	"compiler heap exhausted"
+	.zero	7
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Register name tables for asm blocks.
