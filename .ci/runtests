@@ -1258,6 +1258,132 @@ test_error "invalid string escape" \
 	"Error:1:8 invalid string escape"
 
 # ============================================================================
+echo "=== Inline asm ==="
+test_output  "asm: addi with bindings" \
+	"input := 1; output := 0; asm { (t0=input) addi t0, t0, 1 (output=t0) } @0x10000000 = output + 64;" "B"
+test_output  "asm: add three regs" \
+	"a := 60; b := 5; c := 0; asm { (t0=a) (t1=b) add t2, t0, t1 (c=t2) } @0x10000000 = c;" "A"
+test_output  "asm: sub" \
+	"a := 70; b := 5; c := 0; asm { (t0=a) (t1=b) sub t2, t0, t1 (c=t2) } @0x10000000 = c;" "A"
+test_output  "asm: mv" \
+	"a := 65; b := 0; asm { (t0=a) mv t1, t0 (b=t1) } @0x10000000 = b;" "A"
+test_output  "asm: li small imm" \
+	"v := 0; asm { li t0, 65 (v=t0) } @0x10000000 = v;" "A"
+test_output  "asm: nop is legal" \
+	"a := 65; b := 0; asm { (t0=a) nop (b=t0) } @0x10000000 = b;" "A"
+test_output  "asm: wfi in unreachable branch (verifies encoding parses)" \
+	"a := 65; b := 0; asm { (t0=a) j skip wfi skip: (b=t0) } @0x10000000 = b;" "A"
+test_output  "asm: abi names" \
+	"input := 1; output := 0; asm { (a0=input) addi a0, a0, 64 (output=a0) } @0x10000000 = output;" "A"
+test_output  "asm: xori" \
+	"v := 0x43; r := 0; asm { (t0=v) xori t0, t0, 2 (r=t0) } @0x10000000 = r;" "A"
+test_output  "asm: ori" \
+	"v := 0x40; r := 0; asm { (t0=v) ori t0, t0, 1 (r=t0) } @0x10000000 = r;" "A"
+test_output  "asm: andi" \
+	"v := 0x4F; r := 0; asm { (t0=v) andi t0, t0, 0x41 (r=t0) } @0x10000000 = r;" "A"
+test_output  "asm: slli" \
+	"v := 0x20; r := 0; asm { (t0=v) slli t0, t0, 1 (r=t0) } @0x10000000 = r + 1;" "A"
+test_output  "asm: srli" \
+	"v := 0x82; r := 0; asm { (t0=v) srli t0, t0, 1 (r=t0) } @0x10000000 = r;" "A"
+test_output  "asm: srai on positive" \
+	"v := 0x82; r := 0; asm { (t0=v) srai t0, t0, 1 (r=t0) } @0x10000000 = r;" "A"
+test_output  "asm: slti true" \
+	"v := 5; r := 0; asm { (t0=v) slti t0, t0, 10 (r=t0) } @0x10000000 = r + 64;" "A"
+test_output  "asm: sltiu true" \
+	"v := 5; r := 0; asm { (t0=v) sltiu t0, t0, 10 (r=t0) } @0x10000000 = r + 64;" "A"
+test_output  "asm: xor" \
+	"a := 0x43; b := 0x02; r := 0; asm { (t0=a) (t1=b) xor t2, t0, t1 (r=t2) } @0x10000000 = r;" "A"
+test_output  "asm: or" \
+	"a := 0x40; b := 0x01; r := 0; asm { (t0=a) (t1=b) or t2, t0, t1 (r=t2) } @0x10000000 = r;" "A"
+test_output  "asm: and" \
+	"a := 0x4F; b := 0x41; r := 0; asm { (t0=a) (t1=b) and t2, t0, t1 (r=t2) } @0x10000000 = r;" "A"
+test_output  "asm: sll" \
+	"a := 0x20; b := 1; r := 0; asm { (t0=a) (t1=b) sll t2, t0, t1 (r=t2) } @0x10000000 = r + 1;" "A"
+test_output  "asm: srl" \
+	"a := 0x82; b := 1; r := 0; asm { (t0=a) (t1=b) srl t2, t0, t1 (r=t2) } @0x10000000 = r;" "A"
+test_output  "asm: sra positive" \
+	"a := 0x82; b := 1; r := 0; asm { (t0=a) (t1=b) sra t2, t0, t1 (r=t2) } @0x10000000 = r;" "A"
+test_output  "asm: slt true" \
+	"a := 5; b := 10; r := 0; asm { (t0=a) (t1=b) slt t2, t0, t1 (r=t2) } @0x10000000 = r + 64;" "A"
+test_output  "asm: sltu true" \
+	"a := 5; b := 10; r := 0; asm { (t0=a) (t1=b) sltu t2, t0, t1 (r=t2) } @0x10000000 = r + 64;" "A"
+test_output  "asm: lw" \
+	"*buf[1]; *buf = 0x41; r := 0; asm { (t0=buf) lw t1, 0(t0) (r=t1) } @0x10000000 = r;" "A"
+test_output  "asm: lw with offset" \
+	"*buf[2]; *(buf+4) = 0x41; r := 0; asm { (t0=buf) lw t1, 4(t0) (r=t1) } @0x10000000 = r;" "A"
+test_output  "asm: lh" \
+	"#buf[1]; #buf = 0x41; r := 0; asm { (t0=buf) lh t1, 0(t0) (r=t1) } @0x10000000 = r;" "A"
+test_output  "asm: lhu" \
+	"#buf[1]; #buf = 0x41; r := 0; asm { (t0=buf) lhu t1, 0(t0) (r=t1) } @0x10000000 = r;" "A"
+test_output  "asm: lb" \
+	"@buf[1]; @buf = 0x41; r := 0; asm { (t0=buf) lb t1, 0(t0) (r=t1) } @0x10000000 = r;" "A"
+test_output  "asm: lbu" \
+	"@buf[1]; @buf = 0x41; r := 0; asm { (t0=buf) lbu t1, 0(t0) (r=t1) } @0x10000000 = r;" "A"
+test_output  "asm: sw" \
+	"*buf[1]; *buf = 0; asm { (t0=buf) li t1, 0x41 sw t1, 0(t0) } @0x10000000 = *buf;" "A"
+test_output  "asm: sh" \
+	"#buf[1]; #buf = 0; asm { (t0=buf) li t1, 0x41 sh t1, 0(t0) } @0x10000000 = #buf;" "A"
+test_output  "asm: sb" \
+	"@buf[1]; @buf = 0; asm { (t0=buf) li t1, 0x41 sb t1, 0(t0) } @0x10000000 = @buf;" "A"
+test_output  "asm: sb direct to UART" \
+	"asm { lui t0, 0x10000 li t1, 0x41 sb t1, 0(t0) }" "A"
+test_output  "asm: beq taken forward" \
+	"r := 0; asm { li t0, 1 li t1, 1 beq t0, t1, skip li t2, 66 (r=t2) j done skip: li t2, 65 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: beq not taken" \
+	"r := 0; asm { li t0, 1 li t1, 2 beq t0, t1, skip li t2, 65 (r=t2) j done skip: li t2, 66 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: bne backward loop" \
+	"asm { lui t1, 0x10000 li t0, 0 start: addi t0, t0, 1 addi t2, t0, 64 sb t2, 0(t1) li t3, 3 bne t0, t3, start }" "ABC"
+test_output  "asm: bne taken" \
+	"r := 0; asm { li t0, 1 li t1, 2 bne t0, t1, yes li t2, 78 (r=t2) j done yes: li t2, 65 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: blt" \
+	"r := 0; asm { li t0, 1 li t1, 2 blt t0, t1, yes li t2, 78 (r=t2) j done yes: li t2, 65 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: bge" \
+	"r := 0; asm { li t0, 5 li t1, 3 bge t0, t1, yes li t2, 78 (r=t2) j done yes: li t2, 65 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: bltu" \
+	"r := 0; asm { li t0, 1 li t1, 2 bltu t0, t1, yes li t2, 78 (r=t2) j done yes: li t2, 65 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: bgeu" \
+	"r := 0; asm { li t0, 5 li t1, 3 bgeu t0, t1, yes li t2, 78 (r=t2) j done yes: li t2, 65 (r=t2) done: } @0x10000000 = r;" "A"
+test_output  "asm: j forward then back" \
+	"asm { j end never: li t0, 66 lui t1, 0x10000 sb t0, 0(t1) j exit end: li t0, 65 lui t1, 0x10000 sb t0, 0(t1) exit: }" "A"
+test_output  "asm: jal zero forward" \
+	"asm { jal zero, end never: li t0, 66 lui t1, 0x10000 sb t0, 0(t1) j exit end: li t0, 65 lui t1, 0x10000 sb t0, 0(t1) exit: }" "A"
+test_output  "asm: numeric label backward loop" \
+	"asm { lui t1, 0x10000 li t0, 0 1: addi t0, t0, 1 addi t2, t0, 64 sb t2, 0(t1) li t3, 3 bne t0, t3, 1b }" "ABC"
+test_output  "asm: numeric label forward ref" \
+	"r := 0; asm { li t0, 1 li t1, 1 beq t0, t1, 1f li t2, 78 (r=t2) j 2f 1: li t2, 65 (r=t2) 2: } @0x10000000 = r;" "A"
+test_output  "asm: multiple 1: labels (forward picks nearest)" \
+	"asm { lui t1, 0x10000 li t0, 65 sb t0, 0(t1) j 1f 1: li t0, 66 sb t0, 0(t1) j 2f 1: li t0, 67 sb t0, 0(t1) 2: }" "AB"
+test_output  "asm: two asm blocks with same 1: (macro hygiene)" \
+	"asm { li t0, 0 1: addi t0, t0, 1 li t1, 2 blt t0, t1, 1b } asm { li t0, 0 1: addi t0, t0, 1 li t1, 3 blt t0, t1, 1b } @0x10000000 = 65;" "A"
+test_output  "asm fn: no args" \
+	"asm hello { lui t0, 0x10000 li t1, 65 sb t1, 0(t0) } hello();" "A"
+test_output  "asm fn: one arg" \
+	"asm emit_byte { lui t0, 0x10000 sb a0, 0(t0) } emit_byte(65); emit_byte(66); emit_byte(67);" "ABC"
+test_output  "asm fn: two args" \
+	"asm add2 { add a0, a0, a1 } r := add2(30, 35); @0x10000000 = r;" "A"
+test_output  "asm fn: return value" \
+	"asm inc { addi a0, a0, 1 } r := inc(64); @0x10000000 = r;" "A"
+test_output  "asm fn: called from regular fn" \
+	"asm inc { addi a0, a0, 1 } fn wrapper(x) { inc(x) } @0x10000000 = wrapper(64);" "A"
+test_output  "asm fn: regular fn wrapping asm fn" \
+	"fn double(x) { x + x } asm inc { addi a0, a0, 1 } @0x10000000 = double(inc(32));" "B"
+test_output  "asm fn: with branches" \
+	"asm absv { li t0, 0 blt a0, t0, neg j done neg: sub a0, zero, a0 done: } r := absv(0xFFFFFFBF); @0x10000000 = r;" "A"
+test_output  "asm: .word emits instructions" \
+	"asm { .word 0x04100293 .word 0x10000337 .word 0x00530023 }" "A"
+test_output  "asm: .byte emits instructions" \
+	"asm { .byte 0x93, 0x02, 0x10, 0x04, 0x37, 0x03, 0x00, 0x10, 0x23, 0x00, 0x53, 0x00 }" "A"
+test_output  "asm: .ascii data block at end" \
+	"asm { lui t0, 0x10000 li t1, 65 sb t1, 0(t0) j done .ascii \"ignored\" done: nop }" "A"
+test_output  "asm: .zero pad" \
+	"asm { lui t0, 0x10000 li t1, 65 sb t1, 0(t0) j end .zero 12 end: nop }" "A"
+test_output  "asm fn: reads its own .byte data via auipc" \
+	"asm get_char { auipc t0, 0 addi t0, t0, 16 lbu a0, 0(t0) j ret .byte 65, 0, 0, 0 ret: } @0x10000000 = get_char();" "A"
+test_error "asm fn: redefined" \
+	"fn foo() { 0 } asm foo { nop }" \
+	"Error:1:23 'fn' already defined"
+
+# ============================================================================
 echo "=== Comments ==="
 test_output  "line comment before statement" \
 	"// greet
@@ -1306,6 +1432,88 @@ test_error "postfix ++ on immutable var" \
 test_error "prefix ++ on immutable var" \
 	"x = 5; ++x;" \
 	"Error:1:10 cannot reassign immutable"
+
+# ============================================================================
+echo "=== Limits and error detection ==="
+
+# Each limit has a pair of tests: the exact limit works, one-over errors.
+# This anchors the current behavior so future refactors/optimizations that
+# change the limits fail loudly instead of silently shrinking them.
+
+# ── Identifier length (max 32 chars) ────────────────────────────────────────
+test_output  "identifier 32 chars (max)" \
+	"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa := 65; @0x10000000 = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;" "A"
+test_error "identifier 33 chars (over)" \
+	"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa := 5;" \
+	"Error:1:33 identifier too long"
+
+# ── Frame size (max 2^20 = 1048576 bytes ≈ 262142 word-sized slots) ────────
+# Large frames are supported via a 3-instruction prologue/epilogue sequence
+# (lui/addi/sub or lui/addi/add), so we probe the limit with a large array
+# declaration inside a function rather than thousands of named locals.
+test_output  "frame just under limit (arr[262142])" \
+	"fn f() { *arr[262142]; 0 } @0x10000000 = 65;" "A"
+test_error "frame just over limit (arr[262143])" \
+	"fn f() { *arr[262143]; 0 } @0x10000000 = 65;" \
+	"Error:1:28 'fn' frame too large"
+
+# ── Function parameter count (max 8) ────────────────────────────────────────
+test_output  "fn with 8 params (max)" \
+	"fn f(a,b,c,d,e,f,g,h) { a+b+c+d+e+f+g+h } @0x10000000 = f(1,2,3,4,5,6,7,37);" "A"
+test_error "fn with 9 params (over)" \
+	"fn f(a,b,c,d,e,f,g,h,i) { a }" \
+	"Error:1:22 'fn' takes at most 8 args"
+
+# ── Struct field count (max 16) ─────────────────────────────────────────────
+test_output  "struct with 16 fields (max)" \
+	"struct P { a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p } x = P{65,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}; @0x10000000 = P@x.a;" "A"
+test_error "struct with 17 fields (over)" \
+	"struct P { a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q } x = 0;" \
+	"Error:1:45 struct has too many fields"
+
+# ── Breaks per loop (max 32) ────────────────────────────────────────────────
+# 32 unconditional breaks inside unreachable `if (0)` branches, plus one
+# real break to exit. Counts at compile time, doesn't affect runtime.
+test_output  "loop with 32 breaks (max)" \
+	"r := loop { $(for i in $(seq 1 31); do printf '0 ? break 0;'; done) break 65; }; @0x10000000 = r;" "A"
+test_error "loop with 33 breaks (over)" \
+	"y := 1; loop { $(for i in $(seq 1 33); do printf '0 ? break 0;'; done) };" \
+	"Error:1:411 loop has too many 'break's"
+
+# ── Asm symbolic labels (max 64 per program) ────────────────────────────────
+test_output  "asm 64 symbolic labels (max)" \
+	"asm { $(for i in $(seq 1 64); do printf 'L%d: nop ' $i; done) lui t0, 0x10000 li t1, 65 sb t1, 0(t0) }" "A"
+test_error "asm 65 symbolic labels (over)" \
+	"asm { $(for i in $(seq 1 65); do printf 'L%d: nop ' $i; done) }" \
+	"Error:1:578 too many asm labels"
+
+# ── Asm numeric label defs (max 64 per program) ─────────────────────────────
+test_output  "asm 64 numeric labels (max)" \
+	"asm { $(for i in $(seq 1 64); do printf '1: nop '; done) lui t0, 0x10000 li t1, 65 sb t1, 0(t0) }" "A"
+test_error "asm 65 numeric labels (over)" \
+	"asm { $(for i in $(seq 1 65); do printf '1: nop '; done) }" \
+	"Error:1:457 too many asm numeric labels"
+
+# ── Asm fixups (max 64 pending branches/jumps across all asm blocks) ────────
+# Each branch/jump creates one fixup entry. Resolved at end of compilation.
+test_output  "asm 64 fixups (max)" \
+	"asm { $(for i in $(seq 1 64); do printf 'j L%d L%d: ' $i $i; done) lui t0, 0x10000 li t1, 65 sb t1, 0(t0) }" "A"
+test_error "asm 65 fixups (over)" \
+	"asm { $(for i in $(seq 1 65); do printf 'j L%d L%d: ' $i $i; done) }" \
+	"Error:1:698 too many asm fixups"
+
+# ── Branch offset range (B-type ±4096 bytes) ────────────────────────────────
+# At ~1000 nops, we're around 4000 bytes ≈ within B-type range.
+# At 1100 nops, we exceed B-type range → should error.
+test_output  "branch within B-type range (1000 nops)" \
+	"asm { j end $(for i in $(seq 1 1000); do printf 'nop '; done) end: lui t0, 0x10000 li t1, 65 sb t1, 0(t0) }" "A"
+test_output  "branch within J-type range (10000 nops)" \
+	"asm { j end $(for i in $(seq 1 10000); do printf 'nop '; done) end: lui t0, 0x10000 li t1, 65 sb t1, 0(t0) }" "A"
+
+# ── Undefined asm label ─────────────────────────────────────────────────────
+test_error "undefined asm label reports error" \
+	"asm { j nowhere_label }" \
+	"Error:2:1 undefined label"
 
 # ============================================================================
 echo "=== Error messages ==="
