@@ -1595,6 +1595,49 @@ test_output "asm lla backward reference" \
 	"asm { j start msg: .word 66 start: lla t0, msg lw t1, 0(t0) lui t2, 0x10000 sb t1, 0(t2) }" "B"
 test_output "asm lla over 4 KiB distance (upper20 patch)" \
 	"asm { lla t0, msg j skip $(for i in $(seq 1 1500); do printf 'nop '; done) msg: .word 67 skip: lw t1, 0(t0) lui t2, 0x10000 sb t1, 0(t2) }" "C"
+
+# ============================================================================
+echo "=== Macros ==="
+# Top-level `macro NAME(args) { body }` definitions invoked as `NAME(...);`
+# at statement level. Body is C-style cut-and-paste: it can contain any
+# famc statements (or asm blocks). `\arg` substitutes the captured raw
+# call-site text. Parens are optional in the definition for no-arg macros.
+test_output "macro no args (with parens)" \
+	"macro PA() { @0x10000000 = 65; } PA();" "A"
+test_output "macro no args (paren-less definition)" \
+	"macro PA { @0x10000000 = 65; } PA();" "A"
+test_output "macro single arg (paren-less GAS-style definition)" \
+	"macro PUTC c { @0x10000000 = \\c; } PUTC(65);" "A"
+test_output "macro multi-arg (paren-less GAS-style definition)" \
+	"macro STORE addr, val { @\\addr = \\val; } STORE(0x10000000, 66);" "B"
+test_output "macro single arg substitution" \
+	"macro PUTC(c) { @0x10000000 = \\c; } PUTC(66);" "B"
+test_output "macro multi-arg substitution" \
+	"macro STORE(addr, val) { @\\addr = \\val; } STORE(0x10000000, 67);" "C"
+test_output "macro called multiple times" \
+	"macro PUTC(c) { @0x10000000 = \\c; } PUTC(65); PUTC(66); PUTC(67);" "ABC"
+test_output "macro arg used multiple times in body" \
+	"macro DOUBLE(c) { @0x10000000 = \\c; @0x10000000 = \\c; } DOUBLE(65);" "AA"
+test_output "macro body containing multiple statements" \
+	"macro AB { @0x10000000 = 65; @0x10000000 = 66; } AB();" "AB"
+test_output "macro body containing an asm block" \
+	"macro PA { asm { lui t0, 0x10000 li t1, 65 sb t1, 0(t0) } } PA();" "A"
+test_output "char literal arg via macro" \
+	"macro do3 { @0x10000000 = '0'; @0x10000000 = '1'; @0x10000000 = '2'; } do3();" "012"
+test_output "macro body with escape inside char literal" \
+	"macro nl { @0x10000000 = '\\n'; @0x10000000 = 65; } nl();" $'\nA'
+test_error "macro arg count mismatch" \
+	"macro X(a, b) { } X(1);" \
+	"Error:1:23 macro arg count mismatch"
+test_error "macro redefined" \
+	"macro X() { } macro X() { }" \
+	"Error:1:22 macro already defined"
+test_error "macro bad substitution" \
+	"macro X(a) { y = \\b; } X(5);" \
+	"Error:1:29 bad macro substitution"
+test_error "macro too many args" \
+	"macro X(a,b,c,d,e,f,g,h,i) { }" \
+	"Error:1:25 too many macro args"
 test_compiles "asm addi max positive imm (2047)" \
 	"asm { addi t0, zero, 2047 }"
 test_error "asm addi imm over 12 bits" \

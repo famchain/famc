@@ -234,6 +234,29 @@ _start:
 	sw	t2, 0(t1)
 	addi	tp, t2, 0
 
+	# ── Macro symtab: 16 entries × 320 bytes = 5120 bytes ──────────
+	lla	t1, macro_base
+	sw	tp, 0(t1)
+	lla	t1, macro_top
+	sw	tp, 0(t1)
+	addi	t0, zero, 1280
+	add	t2, tp, t0
+	add	t2, t2, t0
+	add	t2, t2, t0
+	add	t2, t2, t0		# 4 × 1280 = 5120
+	lla	t1, macro_end
+	sw	t2, 0(t1)
+	addi	tp, t2, 0
+
+	# ── Macro expansion scratch: 4 KiB ─────────────────────────────
+	lla	t1, macro_scratch
+	sw	tp, 0(t1)
+	lui	t0, 0x1			# 4 KiB
+	add	t2, tp, t0
+	lla	t1, macro_scratch_end
+	sw	t2, 0(t1)
+	addi	tp, t2, 0
+
 	addi	s9, zero, 0		# next var slot
 	addi	s11, zero, 0		# token length
 
@@ -485,8 +508,21 @@ compile_loop:
 	addi	gp, zero, 0
 	j	skip_ws
 sw_cl:
-	bge	s2, s3, compile_done
+	bge	s2, s3, sw_cl_eoi
 	j	compile_stmt
+sw_cl_eoi:
+	# End of input. If macro_active is set, the scratch buffer just got
+	# drained — restore (s2, s3) to the saved post-call resume point and
+	# keep going on the real source.
+	lla	t0, macro_active
+	lw	t1, 0(t0)
+	beqz	t1, compile_done
+	sw	zero, 0(t0)
+	lla	t0, macro_save_s2
+	lw	s2, 0(t0)
+	lla	t0, macro_save_s3
+	lw	s3, 0(t0)
+	j	compile_loop
 cs_after:
 	j	compile_loop
 compile_done:
@@ -1565,7 +1601,43 @@ sw_d107:
 	bnez	gp, sw_d108
 	j	asm_sw_lla_c
 sw_d108:
+	addi	gp, gp, -1
+	bnez	gp, sw_d109
 	j	asm_sw_lla_lbl
+sw_d109:
+	addi	gp, gp, -1
+	bnez	gp, sw_d110
+	j	sw_cs_macro_name
+sw_d110:
+	addi	gp, gp, -1
+	bnez	gp, sw_d111
+	j	sw_cs_macro_lparen
+sw_d111:
+	addi	gp, gp, -1
+	bnez	gp, sw_d112
+	j	sw_cs_macro_arg
+sw_d112:
+	addi	gp, gp, -1
+	bnez	gp, sw_d113
+	j	sw_cs_macro_arg_after_comma
+sw_d113:
+	addi	gp, gp, -1
+	bnez	gp, sw_d114
+	j	sw_cs_macro_lbrace
+sw_d114:
+	addi	gp, gp, -1
+	bnez	gp, sw_d115
+	j	sw_cs_mc_lparen
+sw_d115:
+	addi	gp, gp, -1
+	bnez	gp, sw_d116
+	j	sw_cs_mc_arg
+sw_d116:
+	addi	gp, gp, -1
+	bnez	gp, sw_d117
+	j	sw_cs_mc_arg_after_comma
+sw_d117:
+	j	sw_cs_mc_semi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_word — store a0 as 4 bytes at s5, advance s5.
@@ -2195,7 +2267,15 @@ pid_25:
 	bnez	gp, pid_26
 	j	asm_pi_dir
 pid_26:
+	addi	gp, gp, -1
+	bnez	gp, pid_27
 	j	asm_pi_lla_lbl
+pid_27:
+	addi	gp, gp, -1
+	bnez	gp, pid_28
+	j	pi_cs_macro
+pid_28:
+	j	pi_cs_macro_arg
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_num — parse decimal or hex at s2, returns value in a0.
@@ -6315,6 +6395,133 @@ sfld_1:
 stlk_ret_ct_primary:
 	j	halt_err
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Macro symtab + helpers.
+# Entry layout (320 bytes):
+#    0..31: name
+#   32..35: body_start (source ptr)
+#   36..39: body_end   (source ptr, one past last body char)
+#   40    : num_args
+#   41..43: pad
+#   44..299: arg names (8 × 32 bytes)
+#  300..319: pad
+# ══════════════════════════════════════════════════════════════════════════════
+
+# macro_lookup — scan macro_base..macro_top for a name matching s10/s11.
+# Returns the entry pointer in a0, or 0 if not found. Dispatches via gp.
+macro_lookup:
+	lla	t0, macro_base
+	lw	t0, 0(t0)
+	lla	t1, macro_top
+	lw	t1, 0(t1)
+mlk_scan:
+	beq	t0, t1, mlk_missing
+	addi	t2, zero, 0
+mlk_cmp:
+	addi	t3, zero, 32
+	beq	t2, t3, mlk_match
+	add	t4, t0, t2
+	lbu	t5, 0(t4)
+	blt	t2, s11, mlk_in_tok
+	bnez	t5, mlk_next
+	addi	t2, t2, 1
+	j	mlk_cmp
+mlk_in_tok:
+	add	t6, s10, t2
+	lbu	a1, 0(t6)
+	bne	t5, a1, mlk_next
+	addi	t2, t2, 1
+	j	mlk_cmp
+mlk_match:
+	addi	a0, t0, 0
+	j	macro_lookup_disp
+mlk_next:
+	addi	t0, t0, 320
+	j	mlk_scan
+mlk_missing:
+	addi	a0, zero, 0
+	j	macro_lookup_disp
+
+macro_lookup_disp:
+	bnez	gp, mlk_d1
+	j	mlk_ret_def
+mlk_d1:
+	j	mlk_ret_call
+
+# macro_alloc — append a new (zeroed) entry at macro_top, growing if needed.
+# Inputs: s10/s11 = name. Returns: a0 = entry pointer (the just-zeroed entry).
+# Assumes the caller has verified the name isn't already taken.
+macro_alloc:
+	addi	sp, sp, -4
+	sw	gp, 0(sp)
+	lla	t0, macro_top
+	lw	t1, 0(t0)
+	lla	t0, macro_end
+	lw	t2, 0(t0)
+	bne	t1, t2, ma_ok
+	# Grow: copy existing entries to fresh heap region at tp.
+	lla	t0, macro_base
+	lw	t3, 0(t0)
+	sub	t4, t2, t3		# old cap (bytes)
+	slli	t5, t4, 1		# new cap
+	# heap_end check
+	add	t6, tp, t5
+	lla	a2, heap_end
+	lw	a2, 0(a2)
+	bgeu	t6, a2, heap_full
+	addi	t6, tp, 0		# new base
+	addi	a2, t3, 0		# src
+	addi	a3, t6, 0		# dst
+ma_copy:
+	beq	a2, t1, ma_copy_done
+	lw	a4, 0(a2)
+	sw	a4, 0(a3)
+	addi	a2, a2, 4
+	addi	a3, a3, 4
+	j	ma_copy
+ma_copy_done:
+	lla	t0, macro_base
+	sw	t6, 0(t0)
+	add	a2, t6, t4
+	lla	t0, macro_top
+	sw	a2, 0(t0)
+	add	a3, t6, t5
+	lla	t0, macro_end
+	sw	a3, 0(t0)
+	add	tp, tp, t5
+	lla	t0, macro_top
+	lw	t1, 0(t0)
+ma_ok:
+	# Zero 320 bytes at t1.
+	addi	t2, zero, 0
+ma_zero:
+	addi	t3, zero, 320
+	beq	t2, t3, ma_zero_done
+	add	t4, t1, t2
+	sb	zero, 0(t4)
+	addi	t2, t2, 1
+	j	ma_zero
+ma_zero_done:
+	# Copy name (s11 bytes from s10).
+	addi	t2, zero, 0
+ma_cp:
+	beq	t2, s11, ma_cp_done
+	add	t3, s10, t2
+	lbu	t4, 0(t3)
+	add	t5, t1, t2
+	sb	t4, 0(t5)
+	addi	t2, t2, 1
+	j	ma_cp
+ma_cp_done:
+	addi	a0, t1, 0		# return entry pointer (still at macro_top)
+	# Caller bumps macro_top after filling in body_start/body_end/args.
+	lw	gp, 0(sp)
+	addi	sp, sp, 4
+	j	macro_alloc_disp
+
+macro_alloc_disp:
+	j	ma_ret_def
+
 # ── cs_kw_fn — compile a `fn name(params) { body }` definition ───────────────
 # Syntax:  fn IDENT '(' (IDENT (',' IDENT)*)? ')' '{' body '}'
 # Restrictions (v1):  function must be top-level (no nesting).
@@ -6452,6 +6659,537 @@ cs_bad_struct_rbrace:
 	j	report_err
 cs_bad_struct_field:
 	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cs_kw_macro — compile `macro NAME(arg1, arg2) { body }` definition.
+#
+# Parses the name + arg list, then captures the body's source-text range
+# (start ptr, end ptr) into a new macro symtab entry. The body is NOT parsed
+# at definition time — we just brace-balance to find its end. Expansion is
+# done at each call site by cs_macro_call.
+#
+# Frame (8 bytes) on top of compile_stmt's 4-byte entry frame:
+#    0(sp): num_args parsed so far
+#    4(sp): macro symtab entry pointer
+# ══════════════════════════════════════════════════════════════════════════════
+cs_kw_macro:
+	addi	sp, sp, -8
+	sw	zero, 0(sp)
+	sw	zero, 4(sp)
+
+	# Parse the macro name.
+	addi	gp, zero, 109		# skip_ws site 109 = sw_cs_macro_name
+	j	skip_ws
+sw_cs_macro_name:
+	bge	s2, s3, cs_bad_macro_name
+	lbu	t0, 0(s2)
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_macro_name_letter_ok
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_macro_name_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, cs_macro_name_letter_ok
+cs_macro_name_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_bad_macro_name
+	addi	t1, zero, 91
+	bge	t0, t1, cs_bad_macro_name
+cs_macro_name_letter_ok:
+	addi	gp, zero, 27		# parse_ident site 27 = pi_cs_macro
+	j	parse_ident
+pi_cs_macro:
+	beqz	s11, cs_bad_macro_name
+	# Reject if a macro of this name already exists.
+	addi	gp, zero, 0		# mlk site 0 = mlk_ret_def
+	j	macro_lookup
+mlk_ret_def:
+	bnez	a0, cs_bad_macro_redefined
+	# Allocate a fresh entry (zeroed, name copied from s10/s11).
+	addi	gp, zero, 0		# ma site 0 = ma_ret_def
+	j	macro_alloc
+ma_ret_def:
+	sw	a0, 4(sp)
+
+	# Both `macro NAME(args) { body }` and `macro NAME args { body }`
+	# (GAS-style, no parens) are accepted. We optionally consume the '('
+	# here and then enter the unified arg loop, which terminates on
+	# either ')' (paren mode) or '{' (no-paren mode).
+	addi	gp, zero, 110		# skip_ws site 110 = sw_cs_macro_lparen
+	j	skip_ws
+sw_cs_macro_lparen:
+	bge	s2, s3, cs_bad_macro_lparen
+	lbu	t0, 0(s2)
+	addi	t1, zero, '('
+	bne	t0, t1, cs_macro_arg_loop
+	addi	s2, s2, 1		# consume '('
+
+cs_macro_arg_loop:
+	addi	gp, zero, 111		# skip_ws site 111 = sw_cs_macro_arg
+	j	skip_ws
+sw_cs_macro_arg:
+	bge	s2, s3, cs_bad_macro_rparen
+	lbu	t0, 0(s2)
+	addi	t1, zero, ')'
+	beq	t0, t1, cs_macro_args_done
+	addi	t1, zero, '{'
+	beq	t0, t1, cs_macro_args_done_noparen
+	# Not first arg → expect ','
+	lw	t2, 0(sp)
+	beqz	t2, cs_macro_arg_name_check
+	addi	t1, zero, ','
+	bne	t0, t1, cs_bad_macro_rparen
+	addi	s2, s2, 1
+	addi	gp, zero, 112		# skip_ws site 112 = sw_cs_macro_arg_after_comma
+	j	skip_ws
+sw_cs_macro_arg_after_comma:
+	bge	s2, s3, cs_bad_macro_arg_name
+	lbu	t0, 0(s2)
+cs_macro_arg_name_check:
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_macro_arg_name_ok
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_macro_arg_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, cs_macro_arg_name_ok
+cs_macro_arg_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_bad_macro_arg_name
+	addi	t1, zero, 91
+	bge	t0, t1, cs_bad_macro_arg_name
+cs_macro_arg_name_ok:
+	# Enforce 8-arg max.
+	lw	t2, 0(sp)
+	addi	t3, zero, 8
+	bge	t2, t3, cs_bad_macro_too_many_args
+	addi	gp, zero, 28		# parse_ident site 28 = pi_cs_macro_arg
+	j	parse_ident
+pi_cs_macro_arg:
+	beqz	s11, cs_bad_macro_arg_name
+	# Copy arg name into entry at offset 44 + count*32.
+	lw	t2, 0(sp)		# count
+	lw	t3, 4(sp)		# entry ptr
+	slli	t4, t2, 5
+	addi	t4, t4, 44
+	add	t4, t3, t4		# dest in entry
+	addi	t5, zero, 0
+ma_arg_cp:
+	beq	t5, s11, ma_arg_cp_done
+	add	t6, s10, t5
+	lbu	a0, 0(t6)
+	add	a1, t4, t5
+	sb	a0, 0(a1)
+	addi	t5, t5, 1
+	j	ma_arg_cp
+ma_arg_cp_done:
+	addi	t2, t2, 1
+	sw	t2, 0(sp)
+	j	cs_macro_arg_loop
+
+cs_macro_args_done:
+	addi	s2, s2, 1		# consume ')'
+cs_macro_args_done_noparen:
+	# Save num_args at entry offset 40.
+	lw	t2, 0(sp)
+	lw	t3, 4(sp)
+	sb	t2, 40(t3)
+
+	# Parse '{'
+	addi	gp, zero, 113		# skip_ws site 113 = sw_cs_macro_lbrace
+	j	skip_ws
+sw_cs_macro_lbrace:
+	bge	s2, s3, cs_bad_macro_body
+	lbu	t0, 0(s2)
+	addi	t1, zero, '{'
+	bne	t0, t1, cs_bad_macro_body
+	addi	s2, s2, 1		# consume '{'
+
+	# Save body_start = current s2.
+	lw	t3, 4(sp)
+	sw	s2, 32(t3)
+
+	# Brace-balance to find the matching '}'. We scan as raw bytes (no
+	# tokenization), so this also catches '{' / '}' inside string/char
+	# literals — for the first cut we don't try to be clever.
+	addi	t4, zero, 1
+cs_macro_body_scan:
+	bge	s2, s3, cs_bad_macro_body
+	lbu	t0, 0(s2)
+	addi	t1, zero, '{'
+	beq	t0, t1, cs_macro_body_open
+	addi	t1, zero, '}'
+	beq	t0, t1, cs_macro_body_close
+	addi	s2, s2, 1
+	j	cs_macro_body_scan
+cs_macro_body_open:
+	addi	t4, t4, 1
+	addi	s2, s2, 1
+	j	cs_macro_body_scan
+cs_macro_body_close:
+	addi	t4, t4, -1
+	beqz	t4, cs_macro_body_done
+	addi	s2, s2, 1
+	j	cs_macro_body_scan
+cs_macro_body_done:
+	# body_end = current s2 (one past last body char, pointing at '}').
+	lw	t3, 4(sp)
+	sw	s2, 36(t3)
+	addi	s2, s2, 1		# consume '}'
+
+	# Bump macro_top now that the entry is fully populated.
+	lla	t0, macro_top
+	lw	t1, 0(t0)
+	addi	t1, t1, 320
+	sw	t1, 0(t0)
+
+	addi	sp, sp, 8
+	# Set last_was_brace so a trailing ';' is optional.
+	lla	t0, last_was_brace
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
+	j	cs_done
+
+cs_bad_macro_name:
+	addi	a0, zero, 77		# err 77: bad macro name
+	j	report_err
+cs_bad_macro_redefined:
+	addi	a0, zero, 78		# err 78: macro already defined
+	j	report_err
+cs_bad_macro_lparen:
+	addi	a0, zero, 12		# err 12: expected '('
+	j	report_err
+cs_bad_macro_rparen:
+	addi	a0, zero, 2		# err 2: expected ')'
+	j	report_err
+cs_bad_macro_arg_name:
+	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+cs_bad_macro_too_many_args:
+	addi	a0, zero, 79		# err 79: too many macro args
+	j	report_err
+cs_bad_macro_body:
+	addi	a0, zero, 9		# err 9: expected '{'
+	j	report_err
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cs_macro_call — invoke a macro: NAME(arg1, arg2, ...);
+#
+# Entry: a0 = macro entry pointer (just returned from macro_lookup), s2
+# pointing just after the macro name's last char.
+#
+# Strategy:
+#   1. Parse '(' and capture each arg as a raw (start, length) pair from the
+#      source. Args are split on top-level commas; we don't track paren depth.
+#   2. After ')' and ';', expand the body into macro_scratch with `\arg`
+#      substitution (replace `\NAME` with the captured raw text).
+#   3. Append a literal '}' to the scratch so asm_loop terminates cleanly
+#      when it reaches the end of the expanded body.
+#   4. Save s2/s3, point them at the scratch buffer, set macro_active=1, and
+#      jump to asm_loop. asm_end checks macro_active and restores s2/s3.
+#
+# Frame (80 bytes) on top of compile_stmt's 4-byte entry frame:
+#    0(sp): macro entry ptr
+#    4(sp): num_args parsed so far
+#    8(sp): saved s2 (the source position to resume after expansion)
+#   12(sp): saved s3
+#   16(sp)..79(sp): 8 × (arg_start, arg_len) pairs (8 bytes each)
+# ══════════════════════════════════════════════════════════════════════════════
+cs_macro_call:
+	addi	sp, sp, -80
+	sw	a0, 0(sp)
+	sw	zero, 4(sp)
+
+	# Skip ws and expect '('.
+	addi	gp, zero, 114		# skip_ws site 114 = sw_cs_mc_lparen
+	j	skip_ws
+sw_cs_mc_lparen:
+	bge	s2, s3, cs_bad_mc_lparen
+	lbu	t0, 0(s2)
+	addi	t1, zero, '('
+	bne	t0, t1, cs_bad_mc_lparen
+	addi	s2, s2, 1
+
+cs_mc_arg_loop:
+	# Skip ws, peek for ')' or first arg.
+	addi	gp, zero, 115		# skip_ws site 115 = sw_cs_mc_arg
+	j	skip_ws
+sw_cs_mc_arg:
+	bge	s2, s3, cs_bad_mc_rparen
+	lbu	t0, 0(s2)
+	addi	t1, zero, ')'
+	beq	t0, t1, cs_mc_args_done
+	# If not the first arg, expect a ','.
+	lw	t2, 4(sp)
+	beqz	t2, cs_mc_arg_capture
+	addi	t1, zero, ','
+	bne	t0, t1, cs_bad_mc_rparen
+	addi	s2, s2, 1
+	addi	gp, zero, 116		# skip_ws site 116 = sw_cs_mc_arg_after_comma
+	j	skip_ws
+sw_cs_mc_arg_after_comma:
+cs_mc_arg_capture:
+	# Capture the arg text: from current s2 up to next ',' or ')'.
+	# Reject empty args.
+	bge	s2, s3, cs_bad_mc_rparen
+	# Enforce 8-arg max.
+	lw	t2, 4(sp)
+	addi	t3, zero, 8
+	bge	t2, t3, cs_bad_mc_too_many_args
+	addi	t4, s2, 0		# arg start
+cs_mc_scan_arg:
+	bge	t4, s3, cs_bad_mc_rparen
+	lbu	t0, 0(t4)
+	addi	t1, zero, ','
+	beq	t0, t1, cs_mc_scan_arg_done
+	addi	t1, zero, ')'
+	beq	t0, t1, cs_mc_scan_arg_done
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg
+cs_mc_scan_arg_done:
+	# t4 points at ',' or ')'. Trim trailing ws back from t4.
+	addi	t5, t4, 0
+cs_mc_trim:
+	beq	t5, s2, cs_mc_trim_done
+	addi	t6, t5, -1
+	lbu	a0, 0(t6)
+	addi	a1, zero, 33
+	bge	a0, a1, cs_mc_trim_done
+	addi	t5, t5, -1
+	j	cs_mc_trim
+cs_mc_trim_done:
+	# Save (start=s2, length = t5 - s2) at frame slot 16 + count*8.
+	lw	t2, 4(sp)
+	slli	t6, t2, 3
+	addi	t6, t6, 16
+	add	a0, sp, t6
+	sw	s2, 0(a0)
+	sub	a1, t5, s2
+	sw	a1, 4(a0)
+	addi	t2, t2, 1
+	sw	t2, 4(sp)
+	# Advance s2 past the arg (up to the ',' or ')').
+	addi	s2, t4, 0
+	j	cs_mc_arg_loop
+
+cs_mc_args_done:
+	addi	s2, s2, 1		# consume ')'
+	# Expect num_args == macro's declared arg count.
+	lw	t2, 4(sp)
+	lw	t3, 0(sp)
+	lbu	t4, 40(t3)		# declared
+	bne	t2, t4, cs_bad_mc_arg_count
+	# Skip ws and expect ';'.
+	addi	gp, zero, 117		# skip_ws site 117 = sw_cs_mc_semi
+	j	skip_ws
+sw_cs_mc_semi:
+	bge	s2, s3, cs_bad_mc_semi
+	lbu	t0, 0(s2)
+	addi	t1, zero, ';'
+	bne	t0, t1, cs_bad_mc_semi
+	addi	s2, s2, 1
+
+	# ── Begin expansion ────────────────────────────────────────────
+	# Refuse nested expansion.
+	lla	t0, macro_active
+	lw	t1, 0(t0)
+	bnez	t1, cs_bad_mc_nested
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
+	# Save current s2/s3 (these become the resume point after expansion).
+	lla	t0, macro_save_s2
+	sw	s2, 0(t0)
+	lla	t0, macro_save_s3
+	sw	s3, 0(t0)
+
+	# Walk the body, writing into the scratch buffer with substitution.
+	lw	t3, 0(sp)		# macro entry
+	lw	a4, 32(t3)		# body_start (source ptr)
+	lw	a5, 36(t3)		# body_end
+	lla	t0, macro_scratch
+	lw	a6, 0(t0)		# scratch write ptr
+	lla	t0, macro_scratch_end
+	lw	a7, 0(t0)		# scratch end
+	# t3 stays = entry ptr (we'll re-read num_args & arg names from it).
+
+cs_mc_expand_loop:
+	beq	a4, a5, cs_mc_expand_done
+	# Bounds check the scratch buffer.
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_mc_scratch
+	lbu	t0, 0(a4)
+	addi	t1, zero, 39		# '\''
+	beq	t0, t1, cs_mc_quote_run
+	addi	t1, zero, 34		# '"'
+	beq	t0, t1, cs_mc_quote_run
+	addi	t1, zero, 92		# '\\'
+	beq	t0, t1, cs_mc_subst
+	# Plain copy.
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	a4, a4, 1
+	j	cs_mc_expand_loop
+
+cs_mc_quote_run:
+	# Inside a string or char literal: copy the opening quote, then copy
+	# bytes verbatim (treating any '\X' as a 2-byte escape sequence) until
+	# the matching closing quote. Substitution is intentionally suppressed
+	# so escapes like '\n' aren't mistaken for macro args.
+	addi	t1, t0, 0		# t1 = the quote char to match
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	a4, a4, 1
+cs_mc_quote_run_loop:
+	bge	a4, a5, cs_mc_expand_done
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_mc_scratch
+	lbu	t0, 0(a4)
+	addi	t2, zero, 92		# '\\'
+	beq	t0, t2, cs_mc_quote_esc
+	beq	t0, t1, cs_mc_quote_close
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	a4, a4, 1
+	j	cs_mc_quote_run_loop
+cs_mc_quote_esc:
+	# Copy the backslash and the next byte verbatim.
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	a4, a4, 1
+	bge	a4, a5, cs_mc_expand_done
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_mc_scratch
+	lbu	t0, 0(a4)
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	a4, a4, 1
+	j	cs_mc_quote_run_loop
+cs_mc_quote_close:
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	a4, a4, 1
+	j	cs_mc_expand_loop
+
+cs_mc_subst:
+	# Skip the backslash and read the ident name that follows.
+	addi	a4, a4, 1
+	bge	a4, a5, cs_bad_mc_subst
+	addi	t4, a4, 0		# ident start in body
+cs_mc_subst_scan:
+	bge	a4, a5, cs_mc_subst_scan_done
+	lbu	t0, 0(a4)
+	# ident chars: a-z A-Z 0-9 _
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_mc_subst_keep
+	addi	t1, zero, '0'
+	blt	t0, t1, cs_mc_subst_scan_done
+	addi	t1, zero, 58
+	blt	t0, t1, cs_mc_subst_keep
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_mc_subst_scan_done
+	addi	t1, zero, 91
+	blt	t0, t1, cs_mc_subst_keep
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_mc_subst_scan_done
+	addi	t1, zero, 123
+	blt	t0, t1, cs_mc_subst_keep
+	j	cs_mc_subst_scan_done
+cs_mc_subst_keep:
+	addi	a4, a4, 1
+	j	cs_mc_subst_scan
+cs_mc_subst_scan_done:
+	# t4..a4 is the substitution name. Look it up in arg names.
+	sub	t5, a4, t4		# name length
+	beqz	t5, cs_bad_mc_subst	# bare backslash with no name
+	# Iterate arg slots and compare.
+	addi	t6, zero, 0		# i
+cs_mc_subst_lookup:
+	lbu	t0, 40(t3)		# num_args
+	beq	t6, t0, cs_bad_mc_subst	# not found
+	# arg name pointer = entry + 44 + i*32
+	slli	t1, t6, 5
+	addi	t1, t1, 44
+	add	t1, t3, t1
+	# Compare t1[0..32] against body[t4..a4]. The arg name is null-padded
+	# to 32 bytes; the body name is t5 chars long (no null terminator).
+	addi	t2, zero, 0
+cs_mc_subst_cmp:
+	addi	a0, zero, 32
+	beq	t2, a0, cs_mc_subst_arg_overflow
+	add	a0, t1, t2
+	lbu	a1, 0(a0)
+	# In-name region (t2 < t5): compare to body byte. Past-name region
+	# (t2 >= t5): require null in arg name slot.
+	blt	t2, t5, cs_mc_subst_in_name
+	bnez	a1, cs_mc_subst_next
+	j	cs_mc_subst_found
+cs_mc_subst_in_name:
+	add	a0, t4, t2
+	lbu	a2, 0(a0)
+	bne	a1, a2, cs_mc_subst_next
+	addi	t2, t2, 1
+	j	cs_mc_subst_cmp
+cs_mc_subst_arg_overflow:
+	# We compared all 32 bytes of arg name. Match only if t5 == 32.
+	addi	a0, zero, 32
+	beq	t5, a0, cs_mc_subst_found
+cs_mc_subst_next:
+	addi	t6, t6, 1
+	j	cs_mc_subst_lookup
+cs_mc_subst_found:
+	# Copy the captured arg text (start, len) at frame slot 16 + i*8 to a6.
+	slli	t0, t6, 3
+	addi	t0, t0, 16
+	add	t0, sp, t0
+	lw	a0, 0(t0)		# arg src ptr
+	lw	a1, 4(t0)		# arg len
+	addi	t1, zero, 0
+cs_mc_subst_copy:
+	beq	t1, a1, cs_mc_subst_copy_done
+	addi	t2, a6, 1
+	bgeu	t2, a7, cs_bad_mc_scratch
+	add	t2, a0, t1
+	lbu	a2, 0(t2)
+	sb	a2, 0(a6)
+	addi	a6, a6, 1
+	addi	t1, t1, 1
+	j	cs_mc_subst_copy
+cs_mc_subst_copy_done:
+	j	cs_mc_expand_loop
+
+cs_mc_expand_done:
+	# Repoint s2/s3 at the scratch buffer. Subsequent compile_loop
+	# iterations will parse the expanded body as ordinary famc
+	# statements until s2 reaches s3, at which point the EOI hook in
+	# compile_loop restores the saved source position.
+	lla	t0, macro_scratch
+	lw	s2, 0(t0)
+	addi	s3, a6, 0
+	addi	sp, sp, 80
+	j	cs_done
+
+cs_bad_mc_lparen:
+	addi	a0, zero, 12		# err 12: expected '('
+	j	report_err
+cs_bad_mc_rparen:
+	addi	a0, zero, 2		# err 2: expected ')'
+	j	report_err
+cs_bad_mc_too_many_args:
+	addi	a0, zero, 79		# err 79: too many macro args
+	j	report_err
+cs_bad_mc_arg_count:
+	addi	a0, zero, 80		# err 80: macro arg count mismatch
+	j	report_err
+cs_bad_mc_semi:
+	addi	a0, zero, 1		# err 1: expected ';'
+	j	report_err
+cs_bad_mc_nested:
+	addi	a0, zero, 81		# err 81: nested macro expansion
+	j	report_err
+cs_bad_mc_subst:
+	addi	a0, zero, 82		# err 82: bad macro substitution
+	j	report_err
+cs_bad_mc_scratch:
+	addi	a0, zero, 83		# err 83: macro scratch buffer overflow
 	j	report_err
 
 cs_kw_fn:
@@ -12505,6 +13243,26 @@ pi_cs_not_continue:
 	bne	t1, t2, pi_cs_not_for
 	j	cs_fb
 pi_cs_not_for:
+	# 'macro' (5 chars) — top-level macro definition.
+	addi	t0, zero, 5
+	bne	s11, t0, pi_cs_not_macro
+	lbu	t1, 0(s10)
+	addi	t2, zero, 'm'
+	bne	t1, t2, pi_cs_not_macro
+	lbu	t1, 1(s10)
+	addi	t2, zero, 'a'
+	bne	t1, t2, pi_cs_not_macro
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'c'
+	bne	t1, t2, pi_cs_not_macro
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'r'
+	bne	t1, t2, pi_cs_not_macro
+	lbu	t1, 4(s10)
+	addi	t2, zero, 'o'
+	bne	t1, t2, pi_cs_not_macro
+	j	cs_kw_macro
+pi_cs_not_macro:
 	# 'fn' (2 chars) — function definition — stays at statement level.
 	addi	t0, zero, 2
 	bne	s11, t0, pi_cs_not_fn
@@ -12577,6 +13335,14 @@ pi_cs_not_return:
 	bne	t1, t2, pi_cs_var
 	j	cs_kw_struct
 pi_cs_var:
+	# Macro invocation check: if the identifier names a macro, divert to
+	# cs_macro_call which parses the call args and expands the body.
+	addi	gp, zero, 1		# macro_lookup site 1 = mlk_ret_call
+	j	macro_lookup
+mlk_ret_call:
+	beqz	a0, pi_cs_not_macro_call
+	j	cs_macro_call
+pi_cs_not_macro_call:
 	# If the token names a struct type, check for an array-of-struct
 	# declaration (`Name@ident[LIT];`). On match → cs_array_decl_go
 	# with stride = count*4. On mismatch → cs_fb (expression fallback,
@@ -14406,6 +15172,40 @@ bin_end:
 heap_end:
 	.word	0
 
+# ── Macro symtab and expansion state ────────────────────────────────────────
+# Each entry is 320 bytes:
+#    0..31: name (null-padded, up to 32 chars)
+#   32..35: body_start (source ptr)
+#   36..39: body_end   (source ptr; one past the last body char)
+#   40    : num_args   (byte, 0..8)
+#   41..43: pad
+#   44..299: arg names (8 × 32 bytes)
+#  300..319: pad
+macro_base:
+	.word	0
+macro_top:
+	.word	0
+macro_end:
+	.word	0
+
+# Expansion state. Only one expansion is active at a time (nested expansion
+# is forbidden by the macro_active flag). On entry to cs_macro_call we save
+# the source pointers and a continuation address; on asm_end we restore them.
+macro_active:
+	.word	0
+macro_save_s2:
+	.word	0
+macro_save_s3:
+	.word	0
+
+# Scratch buffer for the expanded macro body. Allocated at startup from the
+# heap (4 KiB). Each expansion writes the substituted body here and points
+# s2/s3 at it for the asm parser to consume.
+macro_scratch:
+	.word	0
+macro_scratch_end:
+	.word	0
+
 # Flag set before lookup_or_alloc to indicate whether the upcoming
 # assignment is mutable (:=) or immutable (=). Read in la_cs to
 # set byte 37 of the symtab entry and enforce rules.
@@ -14855,6 +15655,34 @@ err_tbl:
 	# slot 76 — raw: asm addi/li/etc imm exceeds 12 bits (or shift ≥ 32)
 	.byte	1, 22
 	.ascii	"asm I-type imm too big"
+	.zero	8
+	# slot 77 — raw: bad macro name
+	.byte	1, 14
+	.ascii	"bad macro name"
+	.zero	16
+	# slot 78 — raw: macro already defined
+	.byte	1, 21
+	.ascii	"macro already defined"
+	.zero	9
+	# slot 79 — raw: too many macro args
+	.byte	1, 19
+	.ascii	"too many macro args"
+	.zero	11
+	# slot 80 — raw: macro arg count mismatch
+	.byte	1, 24
+	.ascii	"macro arg count mismatch"
+	.zero	6
+	# slot 81 — raw: nested macro expansion
+	.byte	1, 22
+	.ascii	"nested macro expansion"
+	.zero	8
+	# slot 82 — raw: bad macro substitution
+	.byte	1, 22
+	.ascii	"bad macro substitution"
+	.zero	8
+	# slot 83 — raw: macro scratch buffer overflow
+	.byte	1, 22
+	.ascii	"macro scratch overflow"
 	.zero	8
 
 # ══════════════════════════════════════════════════════════════════════════════
