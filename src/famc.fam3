@@ -1723,6 +1723,10 @@ emit_word:
 	bgeu	s5, t6, bin_full
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
+	# Clear push_safe_marker by default. Safe-leaf emitters (emit_li,
+	# emit_lw_sp) re-set it from their own dispatch return sites.
+	lla	t6, push_safe_marker
+	sw	zero, 0(t6)
 	j	emit_word_disp
 
 bin_full:
@@ -2799,10 +2803,13 @@ eli_big:
 	j	emit_word
 ew_li_lui:
 
-	# addi a0, a0, lower12
+	# Compute lo12 = sign-extend(imm[11:0]). If lo12 == 0 the addi
+	# would be a no-op — skip it (peephole: bare `lui` suffices).
 	lw	t0, 0(sp)
 	slli	t0, t0, 20
 	srai	t0, t0, 20
+	beqz	t0, eli_pop
+	# addi a0, a0, lower12
 	andi	t0, t0, 0xFFF
 	slli	t0, t0, 20
 	# word = 0x00050513   (addi a0, a0, 0) | imm
@@ -2815,6 +2822,12 @@ ew_li_add:
 
 eli_pop:
 	addi	sp, sp, 4
+	# Mark the just-emitted load-immediate as safe-to-redirect: the
+	# previous instruction is the final word of emit_li, which writes
+	# to a0 with no other consumers (the caller uses it via push or
+	# directly as a binop operand).
+	lla	t0, push_safe_marker
+	sw	s5, 0(t0)
 	j	eli_ret
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2900,6 +2913,12 @@ elws_big:
 	j	emit_lw_sp_disp
 
 emit_lw_sp_disp:
+	# Mark the just-emitted local load as safe-to-redirect. Both the
+	# small path (`lw a0, off(fp)`) and the big path (final
+	# `lw a0, 0(t0)`) reach here after their last emit, so the prev
+	# instruction is always a load-into-a0 with no other consumer.
+	lla	t0, push_safe_marker
+	sw	s5, 0(t0)
 	bnez	gp, elws_d1
 	j	elws_ret
 elws_d1:
@@ -3224,6 +3243,31 @@ emit_push_a0:
 	addi	t2, zero, 9
 	bge	t1, t2, epa_mem_push
 	# ── s-reg push ──
+	# Peephole: if the previous emit was a "safe leaf" (literal or
+	# local load) tagged via push_safe_marker, rewrite its rd field
+	# from a0(=10) to s[2+depth] and skip the `mv`. Only safe-leaf
+	# emitters set the marker; emit_word's epilogue clears it. This
+	# guarantees we never rewrite an instruction at a control-flow
+	# merge (e.g. `&&`/`||`/ternary's tail value).
+	lla	t3, push_safe_marker
+	lw	t4, 0(t3)
+	bne	t4, s5, epa_emit_mv
+	# Marker matches → previous insn is safe to redirect.
+	lw	t2, -4(s5)
+	addi	t3, zero, 0x500
+	sub	t2, t2, t3
+	addi	t3, t1, 18
+	slli	t3, t3, 7
+	or	t2, t2, t3
+	sw	t2, -4(s5)
+	addi	t1, t1, 1
+	sw	t1, 0(t0)
+	lla	t0, expr_max_depth
+	lw	t2, 0(t0)
+	bge	t2, t1, epa_done
+	sw	t1, 0(t0)
+	j	epa_done
+epa_emit_mv:
 	addi	t2, s5, 4
 	lla	t3, bin_end
 	lw	t3, 0(t3)
@@ -13620,9 +13664,83 @@ pjt_cep_lor_end:
 # Uses condition (lhs) in a0, branches, compiles middle, emits jal, patches,
 # optionally compiles else (or emits addi 0), patches, done.
 cep_pre_tern:
+	# Peephole A: if the cond's last two insns are `xor a0, X, Y` then
+	# `sltiu a0, a0, 1` (the `==` sequence), delete both and emit
+	# `beq X, Y, +8` instead of `bne a0, zero, +8`. Saves 2 insns.
+	lw	t0, -4(s5)
+	lui	t1, 0x153
+	addi	t1, t1, 0x513		# 0x00153513 = sltiu a0, a0, 1
+	bne	t0, t1, cpt_try_slt
+	lw	t0, -8(s5)
+	andi	t1, t0, 0x7F
+	addi	t2, zero, 0x33
+	bne	t1, t2, cpt_try_slt
+	srli	t1, t0, 7
+	andi	t1, t1, 0x1F
+	addi	t2, zero, 10
+	bne	t1, t2, cpt_try_slt
+	srli	t1, t0, 12
+	andi	t1, t1, 0x7
+	addi	t2, zero, 4		# xor funct3 = 4
+	bne	t1, t2, cpt_try_slt
+	srli	t1, t0, 25
+	bnez	t1, cpt_try_slt
+	# Match: extract xor's rs1, rs2; rewind s5 by 8.
+	srli	t3, t0, 15
+	andi	t3, t3, 0x1F
+	srli	t4, t0, 20
+	andi	t4, t4, 0x1F
+	addi	s5, s5, -8
+	# Build beq rs1, rs2, +8: word = 0x00000463 | (rs1<<15) | (rs2<<20)
+	addi	t1, zero, 0x463
+	slli	t3, t3, 15
+	or	t1, t1, t3
+	slli	t4, t4, 20
+	or	a0, t1, t4
+	j	cpt_emit
+cpt_try_slt:
+	# Peephole B: if the cond's last emitted insn is `slt[u] a0, X, Y`
+	# (R-type, opcode 0x33, funct3 ∈ {2,3}, rd=a0, funct7=0), delete
+	# it and emit `blt[u] X, Y, +8` instead of the standard
+	# `bne a0, zero, +8`. Saves one instruction per `<`/`>` in a cond.
+	lw	t0, -4(s5)
+	andi	t1, t0, 0x7F
+	addi	t2, zero, 0x33
+	bne	t1, t2, cpt_no_peephole
+	srli	t1, t0, 7
+	andi	t1, t1, 0x1F
+	addi	t2, zero, 10
+	bne	t1, t2, cpt_no_peephole
+	srli	t1, t0, 25
+	bnez	t1, cpt_no_peephole
+	srli	t1, t0, 12
+	andi	t1, t1, 0x7
+	addi	t2, zero, 2
+	beq	t1, t2, cpt_have_slt
+	addi	t2, zero, 3
+	bne	t1, t2, cpt_no_peephole
+cpt_have_slt:
+	# Build blt/bltu word: (f3<<12) | 0x463 | (rs1<<15) | (rs2<<20)
+	# slt(2)→blt(4), sltu(3)→bltu(6); +2 to map.
+	srli	t3, t0, 15
+	andi	t3, t3, 0x1F		# rs1
+	srli	t4, t0, 20
+	andi	t4, t4, 0x1F		# rs2
+	addi	s5, s5, -4		# delete slt
+	addi	t1, t1, 2
+	slli	t1, t1, 12
+	addi	t2, zero, 0x463
+	or	t1, t1, t2
+	slli	t3, t3, 15
+	or	t1, t1, t3
+	slli	t4, t4, 20
+	or	a0, t1, t4
+	j	cpt_emit
+cpt_no_peephole:
 	# Emit bne a0, zero, +8 (skip jal when cond true).
 	lui	a0, 0x51
 	addi	a0, a0, 0x463
+cpt_emit:
 	addi	gp, zero, 66
 	j	emit_cmp_word
 ecw_cep_tern_bne:
@@ -13636,6 +13754,21 @@ ecw_cep_tern_jal_else:
 	addi	gp, zero, 19		# ce site 19 = ce_cep_tern_mid
 	j	compile_expr_p
 ce_cep_tern_mid:
+	# Peephole: if the middle branch's last emitted instruction is an
+	# unconditional jal (rd=0, opcode=0x6F) — e.g. it ended in `break`
+	# or `return` — then the jal_end we'd emit here is unreachable.
+	# Skip emission and store sentinel 0 in 20(sp) so the end-patcher
+	# also skips its patch step.
+	lw	t0, -4(s5)
+	andi	t1, t0, 0x7F
+	addi	t2, zero, 0x6F
+	bne	t1, t2, ctme_emit
+	srli	t1, t0, 7
+	andi	t1, t1, 0x1F
+	bnez	t1, ctme_emit
+	sw	zero, 20(sp)
+	j	ecw_cep_tern_jal_end
+ctme_emit:
 	sw	s5, 20(sp)		# future jal_end addr
 	addi	a0, zero, 0x6F
 	addi	gp, zero, 68
@@ -13670,10 +13803,12 @@ cep_tern_no_else:
 ecw_cep_tern_addi:
 cep_tern_patch_end:
 	lw	t5, 20(sp)
+	beqz	t5, ctpe_skip
 	addi	t6, s5, 0
 	addi	gp, zero, 11		# patch_jtype site 11 = pjt_cep_tern_end
 	j	patch_jtype
 pjt_cep_tern_end:
+ctpe_skip:
 	j	cep_post_emit
 
 # ── Assignment '=' ───────────────────────────────────────────────────────────
@@ -15821,6 +15956,13 @@ eudmb_d3:
 patch_jtype:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
+	# Patching a jal creates a new incoming control-flow edge at the
+	# patch target. If that target is the current s5 (a join point at
+	# the emit cursor) the previous instruction is no longer the sole
+	# producer of a0 — clear push_safe_marker so emit_push_a0 won't
+	# mistakenly redirect its rd field.
+	lla	t0, push_safe_marker
+	sw	zero, 0(t0)
 	sub	t2, t6, t5		# offset = target - addr
 	# J-type range check: 21-bit signed (±1 MiB). Sign-extend bit 20 back
 	# up and compare against the original; mismatch means the offset
@@ -16310,6 +16452,14 @@ expr_max_depth:
 # read by the binop emit helpers (emit_add etc.) so they can use sN as
 # rs1 directly. Saves one instruction per binop.
 popped_src_reg:
+	.word	0
+# push_safe_marker — set to current s5 by "safe leaf" emitters (emit_li,
+# emit_lw_sp) right after they finish emitting; cleared by emit_word's
+# epilogue on every other call. emit_push_a0 reads this and, if it equals
+# the current s5, knows the previous instruction is a single-producer
+# literal/local load whose rd field can be safely rewritten from a0 to
+# s[2+depth] in place — saving one `mv sN, a0`.
+push_safe_marker:
 	.word	0
 
 # Flag set before lookup_or_alloc to indicate whether the upcoming
