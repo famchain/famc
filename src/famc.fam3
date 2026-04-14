@@ -238,7 +238,11 @@ _start:
 	addi	s11, zero, 0		# token length
 
 # ── Phase 1: read all source text from UART into input buffer ──────────────
+	# Cap source size at 16 MiB: anything larger would leave no room for
+	# the output binary below bin_end, and the buffer is unbounded otherwise.
 	addi	s3, s1, 0
+	lui	t3, 0x1000		# 16 MiB
+	add	t3, s1, t3		# source upper bound
 rd_loop:
 	lbu	t1, 5(s6)
 	andi	t1, t1, 1
@@ -246,9 +250,13 @@ rd_loop:
 	lbu	t0, 0(s6)
 	addi	t2, zero, 4
 	beq	t0, t2, rd_done
+	bgeu	s3, t3, rd_too_big
 	sb	t0, 0(s3)
 	addi	s3, s3, 1
 	j	rd_loop
+rd_too_big:
+	addi	a0, zero, 74		# err 74: source too large
+	j	report_err
 rd_done:
 	# Output buffer starts immediately after input
 	addi	s4, s3, 0
@@ -638,12 +646,13 @@ md_emit_done:
 # ── Phase 4.6: resolve asm label fixups ────────────────────────────────────
 # Walk the fixup list. For each entry, look up the target label (symbolic or
 # numeric, forward or backward), compute the offset, and patch the placeholder
-# word at fixup_addr using B-type or J-type encoding.
+# word at fixup_addr using B-type, J-type, or LLA encoding.
 #
 # Fixup kinds:
 #   0 = B-type symbolic   1 = J-type symbolic
 #   2 = B-type num fwd    3 = J-type num fwd
 #   4 = B-type num bwd    5 = J-type num bwd
+#   6 = LLA  symbolic (auipc + addi pair, label - auipc_pc)
 	lla	t0, asm_fix_base
 	lw	t1, 0(t0)		# fix ptr
 	lla	t0, asm_fix_top
@@ -651,6 +660,8 @@ md_emit_done:
 fix_loop:
 	beq	t1, t2, fix_done
 	lw	a4, 36(t1)		# kind
+	addi	a5, zero, 6
+	beq	a4, a5, fix_lla_sym
 	addi	a5, zero, 2
 	bge	a4, a5, fix_numeric
 	# Symbolic: look up name in label table
@@ -733,7 +744,9 @@ fix_have_addr:
 	# a2 = label address; fixup_addr at 32(t1); kind in a4
 	lw	a3, 32(t1)		# fixup_addr
 	sub	a2, a2, a3		# offset = label - fixup_addr
-	# Dispatch on B-type vs J-type based on kind bit 0
+	# Dispatch: kind 6 = LLA (auipc+addi pair); else B/J based on bit 0.
+	addi	a5, zero, 6
+	beq	a4, a5, fix_emit_lla
 	andi	a5, a4, 1
 	bnez	a5, fix_emit_jtype
 	# B-type: 13-bit signed offset. Check range by sign-extending bit 12
@@ -792,6 +805,53 @@ fix_emit_jtype:
 	slli	a6, a6, 31
 	or	a5, a5, a6
 	sw	a5, 0(a3)
+	j	fix_next
+fix_lla_sym:
+	# Symbolic lookup for LLA (kind 6). Identical scan to the kind-0/1
+	# symbolic path; on success we land in fix_have_addr which then
+	# routes to fix_emit_lla.
+	lla	t0, asm_lbl_base
+	lw	t3, 0(t0)
+	lla	t0, asm_lbl_top
+	lw	t4, 0(t0)
+fix_lla_lbl_scan:
+	beq	t3, t4, fix_undef
+	addi	t5, zero, 0
+fix_lla_lbl_cmp:
+	addi	t6, zero, 32
+	beq	t5, t6, fix_lla_lbl_found
+	add	a0, t1, t5
+	lbu	a1, 0(a0)
+	add	a0, t3, t5
+	lbu	a2, 0(a0)
+	bne	a1, a2, fix_lla_lbl_next
+	addi	t5, t5, 1
+	j	fix_lla_lbl_cmp
+fix_lla_lbl_next:
+	addi	t3, t3, 40
+	j	fix_lla_lbl_scan
+fix_lla_lbl_found:
+	lw	a2, 32(t3)		# label addr
+	j	fix_have_addr
+fix_emit_lla:
+	# offset in a2, fixup_addr (= auipc PC) in a3.
+	# lower12 = sign_extend_12(offset)
+	# upper20 = (offset - lower12) >> 12
+	# Patch auipc word at a3 (OR upper20 into bits 31:12).
+	# Patch addi  word at a3+4 (OR lower12 into bits 31:20, masked).
+	slli	a5, a2, 20
+	srai	a5, a5, 20		# a5 = lower12
+	sub	a6, a2, a5
+	srai	a6, a6, 12		# a6 = upper20
+	lw	t0, 0(a3)
+	slli	t5, a6, 12
+	or	t0, t0, t5
+	sw	t0, 0(a3)
+	lw	t0, 4(a3)
+	andi	t5, a5, 0xFFF
+	slli	t5, t5, 20
+	or	t0, t0, t5
+	sw	t0, 4(a3)
 fix_next:
 	addi	t1, t1, 40
 	j	fix_loop
@@ -807,16 +867,36 @@ fix_done:
 
 # ── Phase 5: patch the prologue (data_end + frame_size) ────────────────────
 
-	# Patch 1 — addi gp, gp, imm at prologue offset 8, so gp = data_end.
-	#   auipc_pc = s4 + 4, addi_pc = s4 + 8, data_end = s5
-	#   imm12 = data_end - auipc_pc = s5 - (s4 + 4)
+	# Patch 1 — auipc gp, upper20  at prologue offset 4
+	# Patch 2 — addi  gp, gp, lo12 at prologue offset 8
+	# Together they set gp = data_end (= s5).
+	#
+	# offset = s5 - auipc_pc = s5 - (s4 + 4)
+	# lower12 = sign_extend_12(offset)
+	# upper20 = (offset - lower12) >> 12
+	#
+	# The old single-addi patch silently truncated offsets above 2047 —
+	# harmless only because famc itself never reads gp, but any compiled
+	# program that uses gp as a data_end pointer would have its gp set to
+	# the wrong address for any binary larger than ~2 KiB.
 	sub	t0, s5, s4
-	addi	t0, t0, -4		# t0 = imm12 (signed)
-	slli	t0, t0, 20		# place in bits 31:20 (naturally truncates)
-	lui	t1, 0x18
-	addi	t1, t1, 0x193		# base 0x00018193 (addi gp, gp, 0)
-	or	t1, t1, t0
-	sw	t1, 8(s4)
+	addi	t0, t0, -4		# t0 = offset (data_end - auipc_pc)
+	slli	t1, t0, 20
+	srai	t1, t1, 20		# t1 = lower12 (sign-extended)
+	sub	t2, t0, t1
+	srai	t2, t2, 12		# t2 = upper20
+
+	# Patch auipc: OR (upper20 << 12) into the existing 0x00000197 word.
+	lw	t3, 4(s4)
+	slli	t4, t2, 12
+	or	t3, t3, t4
+	sw	t3, 4(s4)
+
+	# Patch addi: OR (lower12 << 20) into the existing 0x00018193 word.
+	lw	t3, 8(s4)
+	slli	t4, t1, 20
+	or	t3, t3, t4
+	sw	t3, 8(s4)
 
 	# Patch 2 — lui  t0, upper20  at prologue offset 28
 	# Patch 3 — addi t0, t0, lo12 at prologue offset 32
@@ -1469,7 +1549,23 @@ sw_d103:
 	bnez	gp, sw_d104
 	j	asm_dir_sw_comma
 sw_d104:
+	addi	gp, gp, -1
+	bnez	gp, sw_d105
 	j	asm_dir_sw_ascii
+sw_d105:
+	addi	gp, gp, -1
+	bnez	gp, sw_d106
+	j	asm_sw_2r_c
+sw_d106:
+	addi	gp, gp, -1
+	bnez	gp, sw_d107
+	j	asm_sw_bts_c1
+sw_d107:
+	addi	gp, gp, -1
+	bnez	gp, sw_d108
+	j	asm_sw_lla_c
+sw_d108:
+	j	asm_sw_lla_lbl
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_word — store a0 as 4 bytes at s5, advance s5.
@@ -2095,7 +2191,11 @@ pid_24:
 	bnez	gp, pid_25
 	j	asm_fn_pi_name
 pid_25:
+	addi	gp, gp, -1
+	bnez	gp, pid_26
 	j	asm_pi_dir
+pid_26:
+	j	asm_pi_lla_lbl
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_num — parse decimal or hex at s2, returns value in a0.
@@ -2103,6 +2203,20 @@ pid_25:
 # ══════════════════════════════════════════════════════════════════════════════
 parse_num:
 	addi	a0, zero, 0
+	# Sign flag in t6 (0 = positive, 1 = negative). A leading '-' here
+	# lets asm immediates write `addi rd, rs, -1` etc. The expression
+	# parser never reaches parse_num with a leading '-' (compile_unary
+	# strips prefix `-` before recursing), so this only adds capability
+	# for asm contexts.
+	addi	t6, zero, 0
+	bge	s2, s3, pn_dec
+	lbu	t0, 0(s2)
+	addi	t1, zero, '-'
+	bne	t0, t1, pn_after_sign
+	addi	s2, s2, 1		# consume '-'
+	addi	t6, zero, 1
+	bge	s2, s3, pn_done		# bare '-' yields 0 (caller validates)
+pn_after_sign:
 	lbu	t0, 0(s2)
 	addi	t1, zero, '0'
 	bne	t0, t1, pn_dec
@@ -2144,6 +2258,10 @@ pn_hex_lc:
 	addi	t0, t0, -97
 	addi	t0, t0, 10
 pn_hex_acc:
+	# Overflow check: if any of the top 4 bits of a0 are set, shifting
+	# left by 4 would drop them. Bail with err 73.
+	srli	t2, a0, 28
+	bnez	t2, pn_overflow
 	slli	a0, a0, 4
 	or	a0, a0, t0
 	addi	s2, s2, 1
@@ -2158,14 +2276,30 @@ pn_dec_loop:
 	addi	t1, zero, 58
 	bge	t0, t1, pn_done
 	addi	t0, t0, -48
-	slli	t1, a0, 3
-	slli	t2, a0, 1
-	add	a0, t1, t2
-	add	a0, a0, t0
+	# Overflow check: detect if a0 * 10 + digit would exceed 2^32 - 1.
+	# `slli t1, a0, 3` wraps iff a0 has a bit in [29..31]; catch that by
+	# comparing the shifted value back. Likewise for the `t1 + t2` step
+	# and the final `+ digit`, using unsigned carry detection.
+	srli	t3, a0, 29
+	bnez	t3, pn_overflow
+	slli	t1, a0, 3		# a0 * 8
+	slli	t2, a0, 1		# a0 * 2
+	add	t3, t1, t2		# a0 * 10
+	bltu	t3, t1, pn_overflow
+	add	t3, t3, t0		# + digit
+	bltu	t3, t0, pn_overflow
+	addi	a0, t3, 0
 	addi	s2, s2, 1
 	j	pn_dec_loop
 
+pn_overflow:
+	addi	a0, zero, 73		# err 73: integer literal overflow
+	j	report_err
+
 pn_done:
+	beqz	t6, pn_disp
+	sub	a0, zero, a0		# apply leading '-' sign
+pn_disp:
 	bnez	gp, pn_d1
 	j	pn_ct
 pn_d1:
@@ -2327,8 +2461,10 @@ la_cp:
 la_cp_done:
 	# Frame offsets support up to 2^20 bytes via multi-instruction load/
 	# store sequences in emit_lw_sp / emit_sw_sp. Cap at 0x100000.
+	# Unsigned compare: an earlier arithmetic wrap could make s9 look
+	# negative to a signed check, so use bgeu.
 	lui	t2, 0x100
-	bge	s9, t2, la_bad_frame_too_big
+	bgeu	s9, t2, la_bad_frame_too_big
 	# New entry: store byte offset of this local in the frame (= current
 	# frame_size). Byte 37 = mutability flag (0=immutable, 1=mutable) —
 	# set by the caller after this function returns, based on = vs :=.
@@ -4053,6 +4189,12 @@ esc_d1:
 #              3: cu_bnot       (compile_unary, after unary '~' recursion)
 #              4: cu_cep_nud    (compile_expr_p — Pratt nud call)
 compile_unary:
+	# Stack-depth guard: prefix operators (-, ~, !) recurse directly into
+	# compile_unary without going through compile_expr_p, so the check has
+	# to live here too.
+	lla	t0, heap_end
+	lw	t0, 0(t0)
+	bgeu	t0, sp, heap_full
 	addi	sp, sp, -12
 	sw	gp, 0(sp)
 	sw	zero, 4(sp)
@@ -6748,7 +6890,7 @@ ce_cs_fn_body:
 	# We patch the lui's imm20 to hi20(s9) and the addi's imm12 to lo12(s9).
 	# Max frame size = 2^20 (enforced in la_new).
 	lui	t0, 0x100
-	bge	s9, t0, cs_bad_fn_frame_too_big
+	bgeu	s9, t0, cs_bad_fn_frame_too_big
 	# Compute hi20 = (s9 + 0x800) >> 12 (rounded), lo12 = s9 - (hi20 << 12)
 	addi	t0, zero, 1
 	slli	t0, t0, 11		# 0x800
@@ -6918,6 +7060,14 @@ asm_sw_lbrace:
 	lla	t0, current_asm_fn
 	sw	zero, 0(t0)
 asm_loop:
+	# Bin-end guard: every asm instruction handler emits via direct
+	# `sw a0, 0(s5)` (bypassing emit_word). Reserve enough headroom for
+	# the largest single instruction emit — currently 8 bytes (li-expand,
+	# lla, etc.) — and bail loudly if the next instr wouldn't fit.
+	addi	t0, s5, 8
+	lla	t1, bin_end
+	lw	t1, 0(t1)
+	bgeu	t0, t1, bin_full
 	addi	gp, zero, 75		# skip_ws site 75 = asm_sw_item
 	j	skip_ws
 asm_sw_item:
@@ -7001,7 +7151,9 @@ asm_chk_sltiu:
 	bne	t1, t2, asm_bad_mnem
 	j	asm_instr_sltiu
 
-# ── Length 4: addi, xori, andi, slti, slli, srli, srai, sltu, bltu, bgeu ─────
+# ── Length 4: addi, xori, andi, slti, slli, srli, srai, sltu, bltu, bgeu,
+#             beqz, bnez, bltz, bgez, bgtu, bleu (pseudos),
+#             seqz, snez, sltz, sgtz (pseudos) ─────────────────────────────
 asm_chk_len4:
 	lbu	t1, 0(s10)
 	addi	t2, zero, 'a'
@@ -7014,29 +7166,73 @@ asm_chk_len4:
 	beq	t1, t2, asm_chk_l4_b
 	j	asm_bad_mnem
 asm_chk_l4_b:
-	# bltu, bgeu
+	# bltu, bgeu, beqz, bnez, bltz, bgez, bgtu, bleu
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'l'
-	beq	t1, t2, asm_chk_bltu
+	beq	t1, t2, asm_chk_l4_bl
 	addi	t2, zero, 'g'
-	beq	t1, t2, asm_chk_bgeu
+	beq	t1, t2, asm_chk_l4_bg
+	addi	t2, zero, 'e'
+	beq	t1, t2, asm_chk_l4_be
+	addi	t2, zero, 'n'
+	beq	t1, t2, asm_chk_l4_bn
 	j	asm_bad_mnem
-asm_chk_bltu:
+asm_chk_l4_bl:
+	# bltu, bltz, bleu
 	lbu	t1, 2(s10)
 	addi	t2, zero, 't'
-	bne	t1, t2, asm_bad_mnem
+	beq	t1, t2, asm_chk_l4_blt
+	addi	t2, zero, 'e'
+	beq	t1, t2, asm_chk_l4_ble
+	j	asm_bad_mnem
+asm_chk_l4_blt:
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'u'
+	beq	t1, t2, asm_instr_bltu
+	addi	t2, zero, 'z'
+	beq	t1, t2, asm_instr_bltz
+	j	asm_bad_mnem
+asm_chk_l4_ble:
 	lbu	t1, 3(s10)
 	addi	t2, zero, 'u'
 	bne	t1, t2, asm_bad_mnem
-	j	asm_instr_bltu
-asm_chk_bgeu:
+	j	asm_instr_bleu
+asm_chk_l4_bg:
+	# bgeu, bgez, bgtu
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'e'
+	beq	t1, t2, asm_chk_l4_bge
+	addi	t2, zero, 't'
+	beq	t1, t2, asm_chk_l4_bgt
+	j	asm_bad_mnem
+asm_chk_l4_bge:
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'u'
+	beq	t1, t2, asm_instr_bgeu
+	addi	t2, zero, 'z'
+	beq	t1, t2, asm_instr_bgez
+	j	asm_bad_mnem
+asm_chk_l4_bgt:
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'u'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_bgtu
+asm_chk_l4_be:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'q'
+	bne	t1, t2, asm_bad_mnem
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'z'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_beqz
+asm_chk_l4_bn:
 	lbu	t1, 2(s10)
 	addi	t2, zero, 'e'
 	bne	t1, t2, asm_bad_mnem
 	lbu	t1, 3(s10)
-	addi	t2, zero, 'u'
+	addi	t2, zero, 'z'
 	bne	t1, t2, asm_bad_mnem
-	j	asm_instr_bgeu
+	j	asm_instr_bnez
 asm_chk_l4_a:
 	# addi or andi
 	lbu	t1, 1(s10)
@@ -7073,15 +7269,45 @@ asm_chk_xori:
 	bne	t1, t2, asm_bad_mnem
 	j	asm_instr_xori
 asm_chk_l4_s:
-	# slti, slli, srli, srai, sltu
+	# slti, slli, srli, srai, sltu, sltz, seqz, snez, sgtz
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'l'
 	beq	t1, t2, asm_chk_l4_sl
 	addi	t2, zero, 'r'
 	beq	t1, t2, asm_chk_l4_sr
+	addi	t2, zero, 'e'
+	beq	t1, t2, asm_chk_l4_se
+	addi	t2, zero, 'n'
+	beq	t1, t2, asm_chk_l4_sn
+	addi	t2, zero, 'g'
+	beq	t1, t2, asm_chk_l4_sg
 	j	asm_bad_mnem
+asm_chk_l4_se:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'q'
+	bne	t1, t2, asm_bad_mnem
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'z'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_seqz
+asm_chk_l4_sn:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'e'
+	bne	t1, t2, asm_bad_mnem
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'z'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_snez
+asm_chk_l4_sg:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 't'
+	bne	t1, t2, asm_bad_mnem
+	lbu	t1, 3(s10)
+	addi	t2, zero, 'z'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_sgtz
 asm_chk_l4_sl:
-	# slti, slli, sltu
+	# slti, slli, sltu, sltz
 	lbu	t1, 2(s10)
 	addi	t2, zero, 't'
 	beq	t1, t2, asm_chk_l4_slt
@@ -7094,6 +7320,8 @@ asm_chk_l4_slt:
 	beq	t1, t2, asm_instr_slti
 	addi	t2, zero, 'u'
 	beq	t1, t2, asm_instr_sltu
+	addi	t2, zero, 'z'
+	beq	t1, t2, asm_instr_sltz
 	j	asm_bad_mnem
 asm_chk_slli:
 	lbu	t1, 3(s10)
@@ -7120,11 +7348,12 @@ asm_chk_srai:
 	j	asm_instr_srai
 
 # ── Length 3: nop, add, sub, lui, xor, and, sll, srl, sra, slt, ori,
-#             beq, bne, blt, bge, jal, lhu, lbu ─────────────────────────────
+#             beq, bne, blt, bge, jal, lhu, lbu, wfi,
+#             not, neg, bgt, ble (pseudos) ─────────────────────────────────
 asm_chk_len3:
 	lbu	t1, 0(s10)
 	addi	t2, zero, 'n'
-	beq	t1, t2, asm_chk_nop
+	beq	t1, t2, asm_chk_l3_n
 	addi	t2, zero, 'a'
 	beq	t1, t2, asm_chk_l3_a
 	addi	t2, zero, 's'
@@ -7142,6 +7371,26 @@ asm_chk_len3:
 	addi	t2, zero, 'w'
 	beq	t1, t2, asm_chk_wfi
 	j	asm_bad_mnem
+asm_chk_l3_n:
+	# nop, not, neg
+	lbu	t1, 1(s10)
+	addi	t2, zero, 'o'
+	beq	t1, t2, asm_chk_l3_no
+	addi	t2, zero, 'e'
+	beq	t1, t2, asm_chk_l3_ne
+	j	asm_bad_mnem
+asm_chk_l3_no:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'p'
+	beq	t1, t2, asm_instr_nop
+	addi	t2, zero, 't'
+	beq	t1, t2, asm_instr_not
+	j	asm_bad_mnem
+asm_chk_l3_ne:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'g'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_neg
 asm_chk_wfi:
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'f'
@@ -7151,16 +7400,16 @@ asm_chk_wfi:
 	bne	t1, t2, asm_bad_mnem
 	j	asm_instr_wfi
 asm_chk_l3_b:
-	# beq, bne, blt, bge
+	# beq, bne, blt, bge, bgt, ble
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'e'
 	beq	t1, t2, asm_chk_l3_be
 	addi	t2, zero, 'n'
 	beq	t1, t2, asm_chk_bne
 	addi	t2, zero, 'l'
-	beq	t1, t2, asm_chk_blt
+	beq	t1, t2, asm_chk_l3_bl
 	addi	t2, zero, 'g'
-	beq	t1, t2, asm_chk_bge
+	beq	t1, t2, asm_chk_l3_bg
 	j	asm_bad_mnem
 asm_chk_l3_be:
 	# beq
@@ -7173,16 +7422,22 @@ asm_chk_bne:
 	addi	t2, zero, 'e'
 	bne	t1, t2, asm_bad_mnem
 	j	asm_instr_bne
-asm_chk_blt:
+asm_chk_l3_bl:
+	# blt, ble
 	lbu	t1, 2(s10)
 	addi	t2, zero, 't'
-	bne	t1, t2, asm_bad_mnem
-	j	asm_instr_blt
-asm_chk_bge:
+	beq	t1, t2, asm_instr_blt
+	addi	t2, zero, 'e'
+	beq	t1, t2, asm_instr_ble
+	j	asm_bad_mnem
+asm_chk_l3_bg:
+	# bge, bgt
 	lbu	t1, 2(s10)
 	addi	t2, zero, 'e'
-	bne	t1, t2, asm_bad_mnem
-	j	asm_instr_bge
+	beq	t1, t2, asm_instr_bge
+	addi	t2, zero, 't'
+	beq	t1, t2, asm_instr_bgt
+	j	asm_bad_mnem
 asm_chk_jal:
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'a'
@@ -7249,7 +7504,7 @@ asm_chk_l3_sr:
 	beq	t1, t2, asm_instr_sra
 	j	asm_bad_mnem
 asm_chk_lui:
-	# lui, lhu, lbu
+	# lui, lhu, lbu, lla
 	lbu	t1, 1(s10)
 	addi	t2, zero, 'u'
 	beq	t1, t2, asm_chk_lui_cont
@@ -7257,12 +7512,19 @@ asm_chk_lui:
 	beq	t1, t2, asm_chk_lhu
 	addi	t2, zero, 'b'
 	beq	t1, t2, asm_chk_lbu
+	addi	t2, zero, 'l'
+	beq	t1, t2, asm_chk_lla
 	j	asm_bad_mnem
 asm_chk_lui_cont:
 	lbu	t1, 2(s10)
 	addi	t2, zero, 'i'
 	bne	t1, t2, asm_bad_mnem
 	j	asm_instr_lui
+asm_chk_lla:
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'a'
+	bne	t1, t2, asm_bad_mnem
+	j	asm_instr_lla
 asm_chk_lhu:
 	lbu	t1, 2(s10)
 	addi	t2, zero, 'u'
@@ -7893,13 +8155,58 @@ asm_sw_li_imm:
 pn_asm_li:
 	sw	a0, 4(sp)
 	lw	t5, 0(sp)		# rd
-	lw	t6, 4(sp)		# imm
+	lw	t6, 4(sp)		# imm (may be negative)
 	addi	sp, sp, 8
+	# Decide between the small form (single addi) and the full lui+addi
+	# pair. Small form works for any value that sign-extends from bit 11
+	# back to itself, i.e. -2048 ≤ imm ≤ 2047.
+	slli	t0, t6, 20
+	srai	t0, t0, 20
+	bne	t0, t6, pn_asm_li_full
+	# Small form: addi rd, zero, imm
 	lui	a0, 0
 	addi	a0, a0, 0x13
 	slli	t0, t5, 7
 	or	a0, a0, t0
 	andi	t0, t6, 0xFFF
+	slli	t0, t0, 20
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+pn_asm_li_full:
+	# Full form: emit `lui rd, upper20; addi rd, rd, lower12` so the pair
+	# loads a full 32-bit signed constant.
+	#   lower12 = sign_extend_12(imm)
+	#   upper20 = (imm - lower12) >> 12
+	# Bounds check both inline writes against bin_end (8 bytes total).
+	addi	t0, s5, 8
+	lla	t1, bin_end
+	lw	t1, 0(t1)
+	bgeu	t0, t1, bin_full
+	# t1 = lower12 (sign-extended)
+	slli	t1, t6, 20
+	srai	t1, t1, 20
+	# t2 = upper20
+	sub	t2, t6, t1
+	srai	t2, t2, 12
+	# Emit lui rd, upper20 = 0x37 | (rd<<7) | (upper20<<12)
+	lui	a0, 0
+	addi	a0, a0, 0x37
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t2, 12
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	# Emit addi rd, rd, lower12 = 0x13 | (rd<<7) | (rd<<15) | (lo12<<20)
+	lui	a0, 0
+	addi	a0, a0, 0x13
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t5, 15
+	or	a0, a0, t0
+	andi	t0, t1, 0xFFF
 	slli	t0, t0, 20
 	or	a0, a0, t0
 	sw	a0, 0(s5)
@@ -7964,6 +8271,10 @@ pn_asm_utype:
 	lw	t6, 4(sp)		# imm
 	lw	t3, 8(sp)		# base
 	addi	sp, sp, 12
+	# U-type imm must fit in 20 bits unsigned. Without this check a value
+	# ≥ 2^20 silently loses its high bits when slli'd left by 12.
+	lui	t0, 0x100		# 2^20
+	bgeu	t6, t0, asm_bad_utype_imm
 	slli	t0, t5, 7
 	or	t3, t3, t0
 	slli	t0, t6, 12
@@ -8075,9 +8386,18 @@ pn_asm_itype:
 	beq	t0, t1, pn_asm_itype_shift
 	addi	t1, zero, 5
 	beq	t0, t1, pn_asm_itype_shift
+	# Regular I-type: imm must fit in 12-bit signed [-2048, 2047]. Verify
+	# by sign-extending from bit 11 and comparing back to the original.
+	slli	t1, t4, 20
+	srai	t1, t1, 20
+	bne	t1, t4, asm_bad_itype_imm
 	andi	t0, t4, 0xFFF
 	j	pn_asm_itype_emit
 pn_asm_itype_shift:
+	# Shift amount must fit in 5 bits unsigned [0, 31]. Negative literals
+	# come through as huge unsigned values and are rejected by bgeu.
+	addi	t1, zero, 32
+	bgeu	t4, t1, asm_bad_itype_imm
 	andi	t0, t4, 0x1F
 pn_asm_itype_emit:
 	slli	t0, t0, 20
@@ -8672,6 +8992,311 @@ asm_add_num_fixup_and_emit:
 	j	asm_loop
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Pseudo-instruction handlers: neg, not, seqz, snez, sltz, sgtz,
+#                              beqz, bnez, bltz, bgez, bgt, ble, bgtu, bleu.
+#
+# Each entry sets up a 16-byte frame with a base instruction word at sp[12]
+# and (for the 2-reg pseudos) a pseudo id at sp[8], then jumps to one of
+# three shared parsers. The parser populates sp[0]/sp[4] with the operands
+# and dispatches to either an existing R/B-type encoder or a per-pseudo
+# encoder block at the bottom of this section.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 2-reg R/I-type pseudos (rd, rs) ─────────────────────────────────────────
+asm_instr_neg:
+	addi	sp, sp, -16
+	sw	zero, 8(sp)
+	j	asm_pseudo_2r_start
+asm_instr_not:
+	addi	sp, sp, -16
+	addi	t0, zero, 1
+	sw	t0, 8(sp)
+	j	asm_pseudo_2r_start
+asm_instr_seqz:
+	addi	sp, sp, -16
+	addi	t0, zero, 2
+	sw	t0, 8(sp)
+	j	asm_pseudo_2r_start
+asm_instr_snez:
+	addi	sp, sp, -16
+	addi	t0, zero, 3
+	sw	t0, 8(sp)
+	j	asm_pseudo_2r_start
+asm_instr_sltz:
+	addi	sp, sp, -16
+	addi	t0, zero, 4
+	sw	t0, 8(sp)
+	j	asm_pseudo_2r_start
+asm_instr_sgtz:
+	addi	sp, sp, -16
+	addi	t0, zero, 5
+	sw	t0, 8(sp)
+	j	asm_pseudo_2r_start
+
+asm_pseudo_2r_start:
+	addi	gp, zero, 16		# apr site 16 = apr_2r_rd
+	j	asm_parse_reg
+apr_2r_rd:
+	sw	a0, 0(sp)
+	addi	gp, zero, 105		# skip_ws site 105 = asm_sw_2r_c
+	j	skip_ws
+asm_sw_2r_c:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ','
+	bne	t0, t1, asm_bad_comma
+	addi	s2, s2, 1
+	addi	gp, zero, 17		# apr site 17 = apr_2r_rs
+	j	asm_parse_reg
+apr_2r_rs:
+	sw	a0, 4(sp)
+	lw	t5, 0(sp)		# rd
+	lw	t6, 4(sp)		# rs
+	lw	t4, 8(sp)		# pseudo id
+	addi	sp, sp, 16
+	beqz	t4, p2r_neg
+	addi	t0, zero, 1
+	beq	t4, t0, p2r_not
+	addi	t0, zero, 2
+	beq	t4, t0, p2r_seqz
+	addi	t0, zero, 3
+	beq	t4, t0, p2r_snez
+	addi	t0, zero, 4
+	beq	t4, t0, p2r_sltz
+	j	p2r_sgtz		# id 5
+
+p2r_neg:
+	# sub rd, zero, rs:  f7=0x20, rs1=0, rs2=rs, f3=0, op=0x33
+	lui	a0, 0x40000
+	addi	a0, a0, 0x33
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t6, 20		# rs2
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+p2r_not:
+	# xori rd, rs, -1:  f3=4, op=0x13, imm=-1 (0xFFF)
+	lui	a0, 4
+	addi	a0, a0, 0x13
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t6, 15		# rs1
+	or	a0, a0, t0
+	lui	t0, 0xFFF00		# imm = 0xFFF in bits 31:20
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+p2r_seqz:
+	# sltiu rd, rs, 1:  f3=3, op=0x13, imm=1
+	lui	a0, 3
+	addi	a0, a0, 0x13
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t6, 15		# rs1
+	or	a0, a0, t0
+	addi	t0, zero, 1
+	slli	t0, t0, 20		# imm=1
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+p2r_snez:
+	# sltu rd, zero, rs:  f3=3, op=0x33, rs1=0, rs2=rs
+	lui	a0, 3
+	addi	a0, a0, 0x33
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t6, 20		# rs2
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+p2r_sltz:
+	# slt rd, rs, zero:  f3=2, op=0x33, rs1=rs, rs2=0
+	lui	a0, 2
+	addi	a0, a0, 0x33
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t6, 15		# rs1
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+p2r_sgtz:
+	# slt rd, zero, rs:  f3=2, op=0x33, rs1=0, rs2=rs
+	lui	a0, 2
+	addi	a0, a0, 0x33
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t6, 20		# rs2
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+
+# ── B-type vs zero (rs, label) ──────────────────────────────────────────────
+asm_instr_beqz:
+	addi	sp, sp, -16
+	lui	a0, 0
+	addi	a0, a0, 0x63		# beq base
+	sw	a0, 12(sp)
+	j	asm_btype_z_start
+asm_instr_bnez:
+	addi	sp, sp, -16
+	lui	a0, 1
+	addi	a0, a0, 0x63		# bne base
+	sw	a0, 12(sp)
+	j	asm_btype_z_start
+asm_instr_bltz:
+	addi	sp, sp, -16
+	lui	a0, 4
+	addi	a0, a0, 0x63		# blt base
+	sw	a0, 12(sp)
+	j	asm_btype_z_start
+asm_instr_bgez:
+	addi	sp, sp, -16
+	lui	a0, 5
+	addi	a0, a0, 0x63		# bge base
+	sw	a0, 12(sp)
+	j	asm_btype_z_start
+
+asm_btype_z_start:
+	sw	zero, 4(sp)		# rs2 = zero
+	addi	gp, zero, 18		# apr site 18 = apr_btz_rs
+	j	asm_parse_reg
+apr_btz_rs:
+	sw	a0, 0(sp)
+	addi	gp, zero, 96		# skip_ws site 96 = asm_sw_btype_c2
+	j	skip_ws
+
+# ── B-type with operand swap (rs, rt, label → original opcode rt, rs, label)
+asm_instr_bgt:
+	addi	sp, sp, -16
+	lui	a0, 4
+	addi	a0, a0, 0x63		# blt base
+	sw	a0, 12(sp)
+	j	asm_btype_swap_start
+asm_instr_ble:
+	addi	sp, sp, -16
+	lui	a0, 5
+	addi	a0, a0, 0x63		# bge base
+	sw	a0, 12(sp)
+	j	asm_btype_swap_start
+asm_instr_bgtu:
+	addi	sp, sp, -16
+	lui	a0, 6
+	addi	a0, a0, 0x63		# bltu base
+	sw	a0, 12(sp)
+	j	asm_btype_swap_start
+asm_instr_bleu:
+	addi	sp, sp, -16
+	lui	a0, 7
+	addi	a0, a0, 0x63		# bgeu base
+	sw	a0, 12(sp)
+	j	asm_btype_swap_start
+
+# ── lla rd, label — load label address (auipc + addi pair) ─────────────────
+# Emits two placeholder words (auipc rd, 0; addi rd, rd, 0) and registers a
+# kind-6 fixup so Phase 4.6 can patch both with the pc-relative offset.
+asm_instr_lla:
+	addi	sp, sp, -4
+	addi	gp, zero, 21		# apr site 21 = apr_lla_rd
+	j	asm_parse_reg
+apr_lla_rd:
+	sw	a0, 0(sp)
+	addi	gp, zero, 107		# skip_ws site 107 = asm_sw_lla_c
+	j	skip_ws
+asm_sw_lla_c:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ','
+	bne	t0, t1, asm_bad_comma
+	addi	s2, s2, 1
+	addi	gp, zero, 108		# skip_ws site 108 = asm_sw_lla_lbl
+	j	skip_ws
+asm_sw_lla_lbl:
+	bge	s2, s3, asm_bad_label
+	addi	gp, zero, 26		# parse_ident site 26 = asm_pi_lla_lbl
+	j	parse_ident
+asm_pi_lla_lbl:
+	beqz	s11, asm_bad_label
+	# Build and emit the auipc placeholder: 0x00000017 | (rd<<7).
+	lw	t5, 0(sp)		# rd
+	addi	sp, sp, 4
+	lui	a0, 0
+	addi	a0, a0, 0x17
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	# We need a second slot for the addi placeholder so we can't go through
+	# asm_add_fixup_and_emit (which only emits one word). Inline it.
+	# First: register the fixup with kind=6 and fixup_addr=s5.
+	lla	t0, asm_fix_top
+	lw	t1, 0(t0)
+	lla	t0, asm_fix_end
+	lw	t2, 0(t0)
+	bge	t1, t2, asm_fix_full
+	# Copy label name (s10/s11) into the fixup entry's first 32 bytes.
+	addi	t5, zero, 0
+asm_lla_cp:
+	addi	t6, zero, 32
+	beq	t5, t6, asm_lla_cp_done
+	add	t3, t1, t5
+	blt	t5, s11, asm_lla_cp_in
+	sb	zero, 0(t3)
+	j	asm_lla_cp_next
+asm_lla_cp_in:
+	add	t4, s10, t5
+	lbu	t6, 0(t4)
+	sb	t6, 0(t3)
+asm_lla_cp_next:
+	addi	t5, t5, 1
+	j	asm_lla_cp
+asm_lla_cp_done:
+	sw	s5, 32(t1)		# fixup_addr = current s5 (auipc PC)
+	addi	t5, zero, 6
+	sw	t5, 36(t1)		# kind = 6 (LLA)
+	addi	t1, t1, 40
+	lla	t0, asm_fix_top
+	sw	t1, 0(t0)
+	# Emit the auipc placeholder.
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	# Emit the addi placeholder: 0x00000013 | (rd<<7) | (rd<<15).
+	# Reload rd (we popped sp earlier so need to recompute from a0).
+	# Simpler: extract rd from a0 (auipc word) bits 11:7.
+	srli	t5, a0, 7
+	andi	t5, t5, 0x1F		# t5 = rd
+	lui	a0, 0
+	addi	a0, a0, 0x13
+	slli	t0, t5, 7
+	or	a0, a0, t0
+	slli	t0, t5, 15
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	j	asm_loop
+
+asm_btype_swap_start:
+	addi	gp, zero, 19		# apr site 19 = apr_bts_first
+	j	asm_parse_reg
+apr_bts_first:
+	sw	a0, 4(sp)		# first arg → rs2 slot (swap)
+	addi	gp, zero, 106		# skip_ws site 106 = asm_sw_bts_c1
+	j	skip_ws
+asm_sw_bts_c1:
+	lbu	t0, 0(s2)
+	addi	t1, zero, ','
+	bne	t0, t1, asm_bad_comma
+	addi	s2, s2, 1
+	addi	gp, zero, 20		# apr site 20 = apr_bts_second
+	j	asm_parse_reg
+apr_bts_second:
+	sw	a0, 0(sp)		# second arg → rs1 slot (swap)
+	addi	gp, zero, 96		# skip_ws site 96 = asm_sw_btype_c2
+	j	skip_ws
+
+# ══════════════════════════════════════════════════════════════════════════════
 # asm_binding — parse (reg=var) or (var=reg).
 # Frame (16 bytes): tok1_s10 tok1_s11 tok1_reg tok2_reg
 # ══════════════════════════════════════════════════════════════════════════════
@@ -8925,7 +9550,31 @@ asm_apr_d14:
 	bnez	gp, asm_apr_d15
 	j	apr_btype_rs2
 asm_apr_d15:
+	addi	gp, gp, -1
+	bnez	gp, asm_apr_d16
 	j	apr_jal_rd
+asm_apr_d16:
+	addi	gp, gp, -1
+	bnez	gp, asm_apr_d17
+	j	apr_2r_rd
+asm_apr_d17:
+	addi	gp, gp, -1
+	bnez	gp, asm_apr_d18
+	j	apr_2r_rs
+asm_apr_d18:
+	addi	gp, gp, -1
+	bnez	gp, asm_apr_d19
+	j	apr_btz_rs
+asm_apr_d19:
+	addi	gp, gp, -1
+	bnez	gp, asm_apr_d20
+	j	apr_bts_first
+asm_apr_d20:
+	addi	gp, gp, -1
+	bnez	gp, asm_apr_d21
+	j	apr_bts_second
+asm_apr_d21:
+	j	apr_lla_rd
 
 asm_bad_lbrace:
 	addi	a0, zero, 9
@@ -8941,6 +9590,12 @@ asm_bad_comma:
 	j	report_err
 asm_bad_binding:
 	addi	a0, zero, 61
+	j	report_err
+asm_bad_utype_imm:
+	addi	a0, zero, 75		# err 75: asm U-type imm out of range
+	j	report_err
+asm_bad_itype_imm:
+	addi	a0, zero, 76		# err 76: asm I-type imm out of range
 	j	report_err
 
 # ── ct_fn_call — compile a function call expression ─────────────────────────
@@ -12916,17 +13571,32 @@ sw_cs_decl_rbrack:
 sw_cs_decl_semi:
 	addi	s2, s2, 1		# consume ';'
 
-	# total = N * stride rounded up to 4 bytes
-	lw	t0, 4(sp)
-	lw	t1, 0(sp)
-	addi	t2, zero, 0
-	addi	t3, zero, 0
-cad_sz_mul:
-	beq	t3, t0, cad_sz_mul_done
-	add	t2, t2, t1
-	addi	t3, t3, 1
-	j	cad_sz_mul
-cad_sz_mul_done:
+	# total = N * stride, rounded up to 4 bytes.
+	#
+	# The old O(N) add-loop multiply wrapped silently on huge N and took
+	# forever besides. Stride can be 1/2/4 for primitive arrays or up to
+	# 64 for struct arrays (max 16 fields × 4 bytes), so we can't just use
+	# a power-of-two shift. Instead: reject N ≥ 2^20 upfront (nothing
+	# usable comes from a frame bigger than the 2^20 cap), then do a
+	# shift-add multiply that processes each bit of stride and bails as
+	# soon as the running product crosses the 2^20 cap.
+	lw	t0, 4(sp)		# N
+	lw	t1, 0(sp)		# stride
+	lui	t4, 0x100		# 2^20
+	bgeu	t0, t4, cad_bad_frame_too_big
+	addi	t2, zero, 0		# product
+	addi	t3, t0, 0		# N << bit_index
+cad_mul_loop:
+	beqz	t1, cad_mul_done
+	andi	t5, t1, 1
+	beqz	t5, cad_mul_next
+	add	t2, t2, t3
+	bgeu	t2, t4, cad_bad_frame_too_big
+cad_mul_next:
+	slli	t3, t3, 1
+	srli	t1, t1, 1
+	j	cad_mul_loop
+cad_mul_done:
 	addi	t2, t2, 3
 	andi	t2, t2, -4
 	sw	t2, 8(sp)
@@ -13317,6 +13987,12 @@ patch_jtype:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
 	sub	t2, t6, t5		# offset = target - addr
+	# J-type range check: 21-bit signed (±1 MiB). Sign-extend bit 20 back
+	# up and compare against the original; mismatch means the offset
+	# doesn't fit and we'd silently truncate bits.
+	slli	t0, t2, 11
+	srai	t0, t0, 11
+	bne	t0, t2, fix_off_oor
 	lw	t0, 0(t5)
 
 	# imm[20] at bit 31
@@ -14164,6 +14840,22 @@ err_tbl:
 	.byte	1, 23
 	.ascii	"compiler heap exhausted"
 	.zero	7
+	# slot 73 — raw: integer literal overflows 32 bits
+	.byte	1, 24
+	.ascii	"integer literal overflow"
+	.zero	6
+	# slot 74 — raw: input source exceeds 16 MiB cap
+	.byte	1, 16
+	.ascii	"source too large"
+	.zero	14
+	# slot 75 — raw: asm lui/auipc imm exceeds 20 bits
+	.byte	1, 22
+	.ascii	"asm U-type imm too big"
+	.zero	8
+	# slot 76 — raw: asm addi/li/etc imm exceeds 12 bits (or shift ≥ 32)
+	.byte	1, 22
+	.ascii	"asm I-type imm too big"
+	.zero	8
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Register name tables for asm blocks.

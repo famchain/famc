@@ -1515,6 +1515,107 @@ test_error "undefined asm label reports error" \
 	"asm { j nowhere_label }" \
 	"Error:2:1 undefined label"
 
+# ── Integer literal overflow (max 2^32 - 1) ─────────────────────────────────
+test_output  "decimal literal at 2^32-1" \
+	"x := 4294967295; @0x10000000 = x == 0xFFFFFFFF ? 'A' : 'N';" "A"
+test_error "decimal literal at 2^32" \
+	"x := 4294967296;" \
+	"Error:1:15 integer literal overflow"
+test_output  "hex literal at 2^32-1" \
+	"x := 0xFFFFFFFF; @0x10000000 = x == 4294967295 ? 'A' : 'N';" "A"
+test_error "hex literal at 2^32" \
+	"x := 0x100000000;" \
+	"Error:1:16 integer literal overflow"
+
+# ── Array count overflow (N * stride must fit in 2^20 frame) ────────────────
+# Struct arrays have stride = fields*4 (up to 64). Byte arrays cap at ~2^20.
+test_error "byte array too large" \
+	"fn f() { @arr[1048576]; 0 } @0x10000000 = 65;" \
+	"Error:1:24 'fn' frame too large"
+test_error "word array wrap attempt (huge N)" \
+	"fn f() { *arr[4000000000]; 0 } @0x10000000 = 65;" \
+	"Error:1:27 'fn' frame too large"
+
+# ── Asm immediate ranges ────────────────────────────────────────────────────
+# U-type (lui/auipc) takes a 20-bit unsigned imm. I-type (addi/li/xori/...)
+# takes a 12-bit signed imm encoded as raw bits 0..0xFFF. Shift-I forms
+# (slli/srli/srai) take a 5-bit shift amount 0..31.
+test_compiles "asm lui max imm (0xFFFFF)" \
+	"asm { lui t0, 0xFFFFF li t1, 65 sb t1, 0(t0) }"
+test_error "asm lui imm over 20 bits" \
+	"asm { lui t0, 0x100000 }" \
+	"Error:1:23 asm U-type imm too big"
+test_output "asm li small positive" \
+	"asm { li t0, 65 lui t1, 0x10000 sb t0, 0(t1) }" "A"
+test_output "asm li negative literal (-1)" \
+	"asm { li t0, -1 lui t1, 0x10000 li t2, 65 add t0, t0, t2 addi t0, t0, 1 sb t0, 0(t1) }" "A"
+test_output "asm li at small positive limit (2047)" \
+	"asm { li t0, 2047 lui t1, 0x10000 li t2, -1982 add t0, t0, t2 sb t0, 0(t1) }" "A"
+test_output "asm li at small negative limit (-2048)" \
+	"asm { li t0, -2048 lui t1, 0x10000 li t2, 2113 add t0, t0, t2 sb t0, 0(t1) }" "A"
+test_output "asm li expands lui+addi for 0x12345" \
+	"asm { li t0, 0x12345 lui t1, 0x12 li t2, 837 add t1, t1, t2 sub t0, t0, t1 li t1, 65 add t0, t0, t1 lui t2, 0x10000 sb t0, 0(t2) }" "A"
+test_output "asm li handles full 32-bit value" \
+	"asm { li t0, 0x80000041 lui t1, 0x80000 sub t0, t0, t1 lui t2, 0x10000 sb t0, 0(t2) }" "A"
+
+# ── Asm pseudo-instructions (parity with fam3) ──────────────────────────────
+test_output "asm neg" \
+	"asm { li t0, -65 neg t0, t0 lui t1, 0x10000 sb t0, 0(t1) }" "A"
+test_output "asm not" \
+	"asm { li t0, -67 not t0, t0 lui t1, 0x10000 sb t0, 0(t1) }" "B"
+test_output "asm seqz on 0" \
+	"asm { li t0, 0 seqz t0, t0 li t1, 64 add t0, t0, t1 lui t2, 0x10000 sb t0, 0(t2) }" "A"
+test_output "asm snez on nonzero" \
+	"asm { li t0, 5 snez t0, t0 li t1, 64 add t0, t0, t1 lui t2, 0x10000 sb t0, 0(t2) }" "A"
+test_output "asm sltz on negative" \
+	"asm { li t0, -1 sltz t0, t0 li t1, 64 add t0, t0, t1 lui t2, 0x10000 sb t0, 0(t2) }" "A"
+test_output "asm sgtz on positive" \
+	"asm { li t0, 5 sgtz t0, t0 li t1, 64 add t0, t0, t1 lui t2, 0x10000 sb t0, 0(t2) }" "A"
+test_output "asm beqz takes branch on 0" \
+	"asm { li t0, 0 beqz t0, ok li t1, 70 j out ok: li t1, 65 out: lui t2, 0x10000 sb t1, 0(t2) }" "A"
+test_output "asm bnez takes branch on nonzero" \
+	"asm { li t0, 5 bnez t0, ok li t1, 70 j out ok: li t1, 65 out: lui t2, 0x10000 sb t1, 0(t2) }" "A"
+test_output "asm bltz takes branch on negative" \
+	"asm { li t0, -5 bltz t0, ok li t1, 70 j out ok: li t1, 65 out: lui t2, 0x10000 sb t1, 0(t2) }" "A"
+test_output "asm bgez takes branch on nonneg" \
+	"asm { li t0, 5 bgez t0, ok li t1, 70 j out ok: li t1, 65 out: lui t2, 0x10000 sb t1, 0(t2) }" "A"
+test_output "asm bgt operand-swap branch" \
+	"asm { li t0, 5 li t1, 3 bgt t0, t1, ok li t2, 70 j out ok: li t2, 65 out: lui t3, 0x10000 sb t2, 0(t3) }" "A"
+test_output "asm ble operand-swap branch" \
+	"asm { li t0, 3 li t1, 5 ble t0, t1, ok li t2, 70 j out ok: li t2, 65 out: lui t3, 0x10000 sb t2, 0(t3) }" "A"
+test_output "asm bgtu operand-swap branch" \
+	"asm { li t0, 5 li t1, 3 bgtu t0, t1, ok li t2, 70 j out ok: li t2, 65 out: lui t3, 0x10000 sb t2, 0(t3) }" "A"
+test_output "asm bleu operand-swap branch" \
+	"asm { li t0, 3 li t1, 5 bleu t0, t1, ok li t2, 70 j out ok: li t2, 65 out: lui t3, 0x10000 sb t2, 0(t3) }" "A"
+
+# ── lla — load label address (auipc + addi pair, kind-6 fixup) ──────────────
+test_output "asm lla forward reference" \
+	"asm { lla t0, msg lw t1, 0(t0) lui t2, 0x10000 sb t1, 0(t2) j end msg: .word 65 end: }" "A"
+test_output "asm lla backward reference" \
+	"asm { j start msg: .word 66 start: lla t0, msg lw t1, 0(t0) lui t2, 0x10000 sb t1, 0(t2) }" "B"
+test_output "asm lla over 4 KiB distance (upper20 patch)" \
+	"asm { lla t0, msg j skip $(for i in $(seq 1 1500); do printf 'nop '; done) msg: .word 67 skip: lw t1, 0(t0) lui t2, 0x10000 sb t1, 0(t2) }" "C"
+test_compiles "asm addi max positive imm (2047)" \
+	"asm { addi t0, zero, 2047 }"
+test_error "asm addi imm over 12 bits" \
+	"asm { addi t0, zero, 5000 }" \
+	"Error:1:26 asm I-type imm too big"
+test_compiles "asm slli max shift amount (31)" \
+	"asm { slli t0, t0, 31 }"
+test_error "asm slli shift amount too big" \
+	"asm { slli t0, t0, 32 }" \
+	"Error:1:22 asm I-type imm too big"
+
+# ── Phase 5 prologue data_end patch (pc-relative auipc+addi pair) ───────────
+# For binaries larger than ~2 KiB the compile-time patch has to set BOTH the
+# auipc's upper20 and the addi's lower12 — a single-addi patch would silently
+# truncate and leave gp pointing into the middle of the code. This test pads
+# the binary to ~6 KiB and then checks at runtime that gp ≥ 0x80001000,
+# which is only true if the full 32-bit offset was patched correctly.
+test_output "gp = data_end for binary past 4 KiB" \
+	"asm { j end $(for i in $(seq 1 1500); do printf 'nop '; done) end: lui t2, 0x80001 bgeu gp, t2, ok lui t0, 0x10000 li t1, 70 sb t1, 0(t0) j done ok: lui t0, 0x10000 li t1, 65 sb t1, 0(t0) done: }" \
+	"A"
+
 # ============================================================================
 echo "=== Error messages ==="
 # Missing ';' at end of input and mid-program. Line/col are derived by walking
