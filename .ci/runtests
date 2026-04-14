@@ -1638,6 +1638,30 @@ test_error "macro bad substitution" \
 test_error "macro too many args" \
 	"macro X(a,b,c,d,e,f,g,h,i) { }" \
 	"Error:1:25 too many macro args"
+
+# ── rept (compile-time loop unrolling) ──────────────────────────────────────
+test_output "rept exclusive range" \
+	"rept i in 0..3 { @0x10000000 = '0' + \\i; }" "012"
+test_output "rept inclusive range" \
+	"rept i in 0..=5 { @0x10000000 = '0' + \\i; }" "012345"
+test_output "rept different counter name" \
+	"rept x in 0..4 { @0x10000000 = '0' + \\x; }" "0123"
+test_output "rept multi-statement body" \
+	"rept i in 0..3 { @0x10000000 = '0' + \\i; @0x10000000 = ':'; }" "0:1:2:"
+test_output "rept counter inside arithmetic" \
+	"rept n in 0..4 { @0x10000000 = 'a' + \\n * 2; }" "aceg"
+test_output "rept multi-digit counter substitution" \
+	"rept i in 0..15 { @0x10000000 = '0' + \\i; }" "0123456789:;<=>"
+test_output "rept empty range" \
+	"rept i in 5..5 { @0x10000000 = '0' + \\i; } @0x10000000 = 'A';" "A"
+test_output "rept non-zero start" \
+	"rept i in 3..6 { @0x10000000 = '0' + \\i; }" "345"
+test_error "rept count over cap" \
+	"rept i in 0..5000 { @0x10000000 = '0'; }" \
+	"Error:1:41 rept count out of range"
+test_error "rept bad substitution" \
+	"rept i in 0..3 { @0x10000000 = \\j; }" \
+	"Error:1:37 bad rept substitution"
 test_compiles "asm addi max positive imm (2047)" \
 	"asm { addi t0, zero, 2047 }"
 test_error "asm addi imm over 12 bits" \

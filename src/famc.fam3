@@ -1637,7 +1637,31 @@ sw_d116:
 	bnez	gp, sw_d117
 	j	sw_cs_mc_arg_after_comma
 sw_d117:
+	addi	gp, gp, -1
+	bnez	gp, sw_d118
 	j	sw_cs_mc_semi
+sw_d118:
+	addi	gp, gp, -1
+	bnez	gp, sw_d119
+	j	sw_cs_rept_name
+sw_d119:
+	addi	gp, gp, -1
+	bnez	gp, sw_d120
+	j	sw_cs_rept_in
+sw_d120:
+	addi	gp, gp, -1
+	bnez	gp, sw_d121
+	j	sw_cs_rept_low
+sw_d121:
+	addi	gp, gp, -1
+	bnez	gp, sw_d122
+	j	sw_cs_rept_dot
+sw_d122:
+	addi	gp, gp, -1
+	bnez	gp, sw_d123
+	j	sw_cs_rept_high_after_skip
+sw_d123:
+	j	sw_cs_rept_lbrace
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_word — store a0 as 4 bytes at s5, advance s5.
@@ -2275,7 +2299,11 @@ pid_27:
 	bnez	gp, pid_28
 	j	pi_cs_macro
 pid_28:
+	addi	gp, gp, -1
+	bnez	gp, pid_29
 	j	pi_cs_macro_arg
+pid_29:
+	j	pi_cs_rept
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_num — parse decimal or hex at s2, returns value in a0.
@@ -2407,7 +2435,11 @@ pn_d6:
 	bnez	gp, pn_d7
 	j	pn_asm_dir
 pn_d7:
-	j	halt_err
+	addi	gp, gp, -1
+	bnez	gp, pn_d8
+	j	pn_cs_rept_low
+pn_d8:
+	j	pn_cs_rept_high
 
 # ══════════════════════════════════════════════════════════════════════════════
 # lookup_or_alloc — find/allocate a variable slot.
@@ -7190,6 +7222,392 @@ cs_bad_mc_subst:
 	j	report_err
 cs_bad_mc_scratch:
 	addi	a0, zero, 83		# err 83: macro scratch buffer overflow
+	j	report_err
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cs_kw_rept — compile-time loop unroll: `rept IDENT in N..M { body }`
+#                                       or `rept IDENT in N..=M { body }`
+#
+# Captures the body source range, then walks it once per iteration into
+# macro_scratch with `\IDENT` substituted by the current iteration counter
+# rendered as decimal text. After expansion, points s2/s3 at the scratch
+# and reuses the macro_active / EOI hook to splice the unrolled output
+# back into the statement stream.
+#
+# Frame (60 bytes) on top of compile_stmt's 4-byte entry frame:
+#    0(sp): counter name length
+#    4(sp): low bound  (signed)
+#    8(sp): high bound (signed)
+#   12(sp): inclusive flag
+#   16(sp): body_start (source ptr)
+#   20(sp): body_end   (source ptr, points at '}')
+#   24(sp): unused
+#   28(sp)..59(sp): counter name buffer (32 bytes)
+# ══════════════════════════════════════════════════════════════════════════════
+cs_kw_rept:
+	addi	sp, sp, -60
+
+	# Parse the counter ident.
+	addi	gp, zero, 118		# skip_ws site 118 = sw_cs_rept_name
+	j	skip_ws
+sw_cs_rept_name:
+	bge	s2, s3, cs_bad_rept_name
+	lbu	t0, 0(s2)
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_rept_name_letter_ok
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_rept_name_chk_uc
+	addi	t1, zero, 123
+	blt	t0, t1, cs_rept_name_letter_ok
+cs_rept_name_chk_uc:
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_bad_rept_name
+	addi	t1, zero, 91
+	bge	t0, t1, cs_bad_rept_name
+cs_rept_name_letter_ok:
+	addi	gp, zero, 29		# parse_ident site 29 = pi_cs_rept
+	j	parse_ident
+pi_cs_rept:
+	beqz	s11, cs_bad_rept_name
+	# Save the counter name into the frame. We need it after parse_num
+	# overwrites s10/s11 and after the body scan.
+	sw	s11, 0(sp)
+	addi	t0, zero, 0
+cs_rept_cp:
+	beq	t0, s11, cs_rept_cp_done
+	add	t1, s10, t0
+	lbu	t2, 0(t1)
+	addi	t3, sp, 28
+	add	t3, t3, t0
+	sb	t2, 0(t3)
+	addi	t0, t0, 1
+	j	cs_rept_cp
+cs_rept_cp_done:
+
+	# Expect `in`.
+	addi	gp, zero, 119		# skip_ws site 119 = sw_cs_rept_in
+	j	skip_ws
+sw_cs_rept_in:
+	addi	t0, s2, 2
+	bge	t0, s3, cs_bad_rept_in
+	lbu	t1, 0(s2)
+	addi	t2, zero, 'i'
+	bne	t1, t2, cs_bad_rept_in
+	lbu	t1, 1(s2)
+	addi	t2, zero, 'n'
+	bne	t1, t2, cs_bad_rept_in
+	# The char following `in` must be ws or boundary so we don't grab
+	# the start of an ident like `index`.
+	lbu	t1, 2(s2)
+	addi	t2, zero, 33
+	bge	t1, t2, cs_bad_rept_in
+	addi	s2, s2, 2
+
+	# Parse low bound.
+	addi	gp, zero, 120		# skip_ws site 120 = sw_cs_rept_low
+	j	skip_ws
+sw_cs_rept_low:
+	addi	gp, zero, 7		# parse_num site 7 = pn_cs_rept_low
+	j	parse_num
+pn_cs_rept_low:
+	sw	a0, 4(sp)
+
+	# Expect `..` or `..=`.
+	addi	gp, zero, 121		# skip_ws site 121 = sw_cs_rept_dot
+	j	skip_ws
+sw_cs_rept_dot:
+	addi	t0, s2, 2
+	bge	t0, s3, cs_bad_rept_range
+	lbu	t1, 0(s2)
+	addi	t2, zero, '.'
+	bne	t1, t2, cs_bad_rept_range
+	lbu	t1, 1(s2)
+	addi	t2, zero, '.'
+	bne	t1, t2, cs_bad_rept_range
+	addi	s2, s2, 2
+	# Optional '='
+	sw	zero, 12(sp)
+	bge	s2, s3, cs_bad_rept_range
+	lbu	t1, 0(s2)
+	addi	t2, zero, '='
+	bne	t1, t2, sw_cs_rept_high
+	addi	t1, zero, 1
+	sw	t1, 12(sp)
+	addi	s2, s2, 1
+
+	# Parse high bound.
+sw_cs_rept_high:
+	addi	gp, zero, 122		# skip_ws site 122 = sw_cs_rept_high
+	j	skip_ws
+sw_cs_rept_high_after_skip:
+	addi	gp, zero, 8		# parse_num site 8 = pn_cs_rept_high
+	j	parse_num
+pn_cs_rept_high:
+	sw	a0, 8(sp)
+
+	# Expect `{`.
+	addi	gp, zero, 123		# skip_ws site 123 = sw_cs_rept_lbrace
+	j	skip_ws
+sw_cs_rept_lbrace:
+	bge	s2, s3, cs_bad_rept_body
+	lbu	t0, 0(s2)
+	addi	t1, zero, '{'
+	bne	t0, t1, cs_bad_rept_body
+	addi	s2, s2, 1
+	sw	s2, 16(sp)		# body_start
+
+	# Brace-balance to find the matching '}'. Same simple scan as
+	# macro definitions — does NOT understand string/char literals.
+	addi	t4, zero, 1
+cs_rept_body_scan:
+	bge	s2, s3, cs_bad_rept_body
+	lbu	t0, 0(s2)
+	addi	t1, zero, '{'
+	beq	t0, t1, cs_rept_body_open
+	addi	t1, zero, '}'
+	beq	t0, t1, cs_rept_body_close
+	addi	s2, s2, 1
+	j	cs_rept_body_scan
+cs_rept_body_open:
+	addi	t4, t4, 1
+	addi	s2, s2, 1
+	j	cs_rept_body_scan
+cs_rept_body_close:
+	addi	t4, t4, -1
+	beqz	t4, cs_rept_body_done
+	addi	s2, s2, 1
+	j	cs_rept_body_scan
+cs_rept_body_done:
+	sw	s2, 20(sp)		# body_end (points at '}')
+	addi	s2, s2, 1		# consume '}'
+
+	# Compute iteration count = high - low (+1 if inclusive).
+	lw	a4, 4(sp)		# low
+	lw	a5, 8(sp)		# high
+	sub	a6, a5, a4
+	lw	t0, 12(sp)
+	beqz	t0, cs_rept_count_done
+	addi	a6, a6, 1
+cs_rept_count_done:
+	# Bound: 0 <= count <= 4096. Negative or oversize → error.
+	bltz	a6, cs_bad_rept_count
+	lui	t0, 0x1
+	bgeu	a6, t0, cs_bad_rept_count
+
+	# Refuse nested expansion.
+	lla	t0, macro_active
+	lw	t1, 0(t0)
+	bnez	t1, cs_bad_rept_nested
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
+	# Save the resume point (current s2/s3 — just past the rept body).
+	lla	t0, macro_save_s2
+	sw	s2, 0(t0)
+	lla	t0, macro_save_s3
+	sw	s3, 0(t0)
+
+	# ── Expand into scratch ─────────────────────────────────────────
+	# a4 = current iteration value (starts at low)
+	# a5 = high (with inclusive: < a5+1, exclusive: < a5)
+	#   We re-derive the "loop condition limit" inline.
+	lw	a4, 4(sp)		# low (current iter)
+	lw	t0, 12(sp)
+	bnez	t0, cs_rept_init_inc
+	lw	a5, 8(sp)		# high (exclusive: stop when iter >= a5)
+	j	cs_rept_init_done
+cs_rept_init_inc:
+	lw	a5, 8(sp)
+	addi	a5, a5, 1		# inclusive: stop when iter >= a5+1
+cs_rept_init_done:
+	lla	t0, macro_scratch
+	lw	a6, 0(t0)		# scratch write ptr
+	lla	t0, macro_scratch_end
+	lw	a7, 0(t0)		# scratch end
+
+cs_rept_outer:
+	bge	a4, a5, cs_rept_outer_done
+	# Inner loop: walk body chars, substitute \counter with decimal(a4).
+	lw	t3, 16(sp)		# body_start
+	lw	t4, 20(sp)		# body_end
+cs_rept_inner:
+	beq	t3, t4, cs_rept_inner_done
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_rept_scratch
+	lbu	t0, 0(t3)
+	addi	t1, zero, 39		# '\''
+	beq	t0, t1, cs_rept_qrun
+	addi	t1, zero, 34		# '"'
+	beq	t0, t1, cs_rept_qrun
+	addi	t1, zero, 92		# '\\'
+	beq	t0, t1, cs_rept_subst
+	# Plain copy.
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t3, t3, 1
+	j	cs_rept_inner
+
+cs_rept_qrun:
+	addi	t1, t0, 0		# save quote char
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t3, t3, 1
+cs_rept_qrun_loop:
+	beq	t3, t4, cs_rept_inner_done
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_rept_scratch
+	lbu	t0, 0(t3)
+	addi	t2, zero, 92
+	beq	t0, t2, cs_rept_qesc
+	beq	t0, t1, cs_rept_qclose
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t3, t3, 1
+	j	cs_rept_qrun_loop
+cs_rept_qesc:
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t3, t3, 1
+	beq	t3, t4, cs_rept_inner_done
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_rept_scratch
+	lbu	t0, 0(t3)
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t3, t3, 1
+	j	cs_rept_qrun_loop
+cs_rept_qclose:
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t3, t3, 1
+	j	cs_rept_inner
+
+cs_rept_subst:
+	# Skip backslash, read ident name, compare to counter name.
+	addi	t3, t3, 1
+	bge	t3, t4, cs_bad_rept_subst
+	addi	t5, t3, 0		# ident start
+cs_rept_subst_scan:
+	beq	t3, t4, cs_rept_subst_scan_done
+	lbu	t0, 0(t3)
+	addi	t1, zero, '_'
+	beq	t0, t1, cs_rept_subst_keep
+	addi	t1, zero, '0'
+	blt	t0, t1, cs_rept_subst_scan_done
+	addi	t1, zero, 58
+	blt	t0, t1, cs_rept_subst_keep
+	addi	t1, zero, 'A'
+	blt	t0, t1, cs_rept_subst_scan_done
+	addi	t1, zero, 91
+	blt	t0, t1, cs_rept_subst_keep
+	addi	t1, zero, 'a'
+	blt	t0, t1, cs_rept_subst_scan_done
+	addi	t1, zero, 123
+	blt	t0, t1, cs_rept_subst_keep
+	j	cs_rept_subst_scan_done
+cs_rept_subst_keep:
+	addi	t3, t3, 1
+	j	cs_rept_subst_scan
+cs_rept_subst_scan_done:
+	sub	t6, t3, t5		# substituted name length
+	beqz	t6, cs_bad_rept_subst
+	# Compare against counter name (length at sp+0, bytes at sp+28).
+	lw	t0, 0(sp)
+	bne	t6, t0, cs_bad_rept_subst
+	addi	t0, zero, 0
+cs_rept_subst_cmp:
+	beq	t0, t6, cs_rept_subst_emit
+	add	t1, t5, t0
+	lbu	t2, 0(t1)
+	addi	t1, sp, 28
+	add	t1, t1, t0
+	lbu	a0, 0(t1)
+	bne	t2, a0, cs_bad_rept_subst
+	addi	t0, t0, 1
+	j	cs_rept_subst_cmp
+cs_rept_subst_emit:
+	# Emit decimal digits of a4 into scratch. Use a small in-frame buffer
+	# to build digits in reverse, then copy out. Max 11 chars (signed
+	# 32-bit), but our cap of 4096 fits in 5.
+	addi	sp, sp, -16
+	addi	t0, sp, 16		# write head (going down)
+	addi	a0, a4, 0		# value to convert
+	# Special-case zero.
+	bnez	a0, cs_rept_dec_loop
+	addi	t0, t0, -1
+	addi	t1, zero, 48
+	sb	t1, 0(t0)
+	j	cs_rept_dec_emit
+cs_rept_dec_loop:
+	beqz	a0, cs_rept_dec_emit
+	# a0 / 10 via repeated subtract.
+	addi	t1, zero, 0		# quotient
+cs_rept_dec_div:
+	addi	t2, zero, 10
+	blt	a0, t2, cs_rept_dec_div_done
+	sub	a0, a0, t2
+	addi	t1, t1, 1
+	j	cs_rept_dec_div
+cs_rept_dec_div_done:
+	# a0 = remainder, t1 = quotient
+	addi	t0, t0, -1
+	addi	t2, a0, 48
+	sb	t2, 0(t0)
+	addi	a0, t1, 0
+	j	cs_rept_dec_loop
+cs_rept_dec_emit:
+	# Copy from t0 .. (sp+16) to a6.
+	addi	t1, sp, 16
+cs_rept_dec_cp:
+	beq	t0, t1, cs_rept_dec_cp_done
+	addi	t2, a6, 1
+	bgeu	t2, a7, cs_bad_rept_scratch_pop
+	lbu	t2, 0(t0)
+	sb	t2, 0(a6)
+	addi	a6, a6, 1
+	addi	t0, t0, 1
+	j	cs_rept_dec_cp
+cs_rept_dec_cp_done:
+	addi	sp, sp, 16
+	j	cs_rept_inner
+cs_bad_rept_scratch_pop:
+	addi	sp, sp, 16
+	j	cs_bad_rept_scratch
+
+cs_rept_inner_done:
+	addi	a4, a4, 1
+	j	cs_rept_outer
+cs_rept_outer_done:
+	# Repoint s2/s3 at the scratch buffer; compile_loop's EOI hook will
+	# restore the saved source position when it drains.
+	lla	t0, macro_scratch
+	lw	s2, 0(t0)
+	addi	s3, a6, 0
+	addi	sp, sp, 60
+	j	cs_done
+
+cs_bad_rept_name:
+	addi	a0, zero, 6		# err 6: expected identifier
+	j	report_err
+cs_bad_rept_in:
+	addi	a0, zero, 10		# err 10: expected 'in'
+	j	report_err
+cs_bad_rept_range:
+	addi	a0, zero, 11		# err 11: expected '..' or '..='
+	j	report_err
+cs_bad_rept_body:
+	addi	a0, zero, 9		# err 9: expected '{'
+	j	report_err
+cs_bad_rept_count:
+	addi	a0, zero, 84		# err 84: rept count out of range
+	j	report_err
+cs_bad_rept_nested:
+	addi	a0, zero, 81		# err 81: nested macro/rept expansion
+	j	report_err
+cs_bad_rept_subst:
+	addi	a0, zero, 85		# err 85: bad rept substitution
+	j	report_err
+cs_bad_rept_scratch:
+	addi	a0, zero, 83		# err 83: scratch buffer overflow
 	j	report_err
 
 cs_kw_fn:
@@ -13263,6 +13681,23 @@ pi_cs_not_for:
 	bne	t1, t2, pi_cs_not_macro
 	j	cs_kw_macro
 pi_cs_not_macro:
+	# 'rept' (4 chars) — top-level compile-time loop unrolling.
+	addi	t0, zero, 4
+	bne	s11, t0, pi_cs_not_rept
+	lbu	t1, 0(s10)
+	addi	t2, zero, 'r'
+	bne	t1, t2, pi_cs_not_rept
+	lbu	t1, 1(s10)
+	addi	t2, zero, 'e'
+	bne	t1, t2, pi_cs_not_rept
+	lbu	t1, 2(s10)
+	addi	t2, zero, 'p'
+	bne	t1, t2, pi_cs_not_rept
+	lbu	t1, 3(s10)
+	addi	t2, zero, 't'
+	bne	t1, t2, pi_cs_not_rept
+	j	cs_kw_rept
+pi_cs_not_rept:
 	# 'fn' (2 chars) — function definition — stays at statement level.
 	addi	t0, zero, 2
 	bne	s11, t0, pi_cs_not_fn
@@ -15684,6 +16119,14 @@ err_tbl:
 	.byte	1, 22
 	.ascii	"macro scratch overflow"
 	.zero	8
+	# slot 84 — raw: rept count out of range (0..4096)
+	.byte	1, 23
+	.ascii	"rept count out of range"
+	.zero	7
+	# slot 85 — raw: bad rept substitution
+	.byte	1, 21
+	.ascii	"bad rept substitution"
+	.zero	9
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Register name tables for asm blocks.
