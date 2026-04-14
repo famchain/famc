@@ -1480,6 +1480,20 @@ test_error "loop with 33 breaks (over)" \
 	"y := 1; loop { $(for i in $(seq 1 33); do printf '0 ? break 0;'; done) };" \
 	"Error:1:411 loop has too many 'break's"
 
+# ── Value-stack depth (9 s-regs, memory spill beyond) ──────────────────────
+# Right-associative nesting forces each sub-expression to push before the
+# previous pop, so N nested "0+(" operators produce depth N+1 in the
+# compile-time value stack. Up to 9 lives in s2..s10; deeper spills to sp.
+test_output  "expr depth 9 (s-reg boundary)" \
+	"@0x10000000 = 0+(0+(0+(0+(0+(0+(0+(0+65)))))));" "A"
+test_output  "expr depth 10 (1 memory spill)" \
+	"@0x10000000 = 0+(0+(0+(0+(0+(0+(0+(0+(0+65))))))));" "A"
+test_output  "expr depth 12 (3 memory spills)" \
+	"@0x10000000 = 0+(0+(0+(0+(0+(0+(0+(0+(0+(0+(0+65))))))))));" "A"
+test_error "fn call with args past s-reg pool" \
+	"fn f(a,b,c,d,e,f,g,h) { a } @0x10000000 = 0+(0+f(1,2,3,4,5,6,7,65));" \
+	"Error:1:49 expression too deep"
+
 # ── Asm symbolic labels (max 64 per program) ────────────────────────────────
 test_output  "asm 64 symbolic labels (max)" \
 	"asm { $(for i in $(seq 1 64); do printf 'L%d: nop ' $i; done) lui t0, 0x10000 li t1, 65 sb t1, 0(t0) }" "A"

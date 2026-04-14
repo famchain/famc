@@ -2153,7 +2153,31 @@ ewd_104:
 	bnez	gp, ewd_105
 	j	ew_cs_fn_prol5c
 ewd_105:
+	addi	gp, gp, -1
+	bnez	gp, ewd_106
 	j	ew_cs_fn_ep2b
+ewd_106:
+	addi	gp, gp, -1
+	bnez	gp, ewd_107
+	j	ew_cs_fn_save_nop
+ewd_107:
+	addi	gp, gp, -1
+	bnez	gp, ewd_108
+	j	ew_cs_fn_restore_nop
+ewd_108:
+	addi	gp, gp, -1
+	bnez	gp, ewd_109
+	j	ew_cs_fn_save_emit
+ewd_109:
+	addi	gp, gp, -1
+	bnez	gp, ewd_110
+	j	ew_cs_fn_save_back
+ewd_110:
+	addi	gp, gp, -1
+	bnez	gp, ewd_111
+	j	ew_cs_fn_restore_emit
+ewd_111:
+	j	ew_cs_fn_restore_back
 
 # ══════════════════════════════════════════════════════════════════════════════
 # parse_ident — reads an identifier at s2 into token buffer.
@@ -3188,28 +3212,53 @@ ew_lbud:
 #             21: push_cep_asg  (compile_expr_p — '@expr = val' / '*expr = val')
 # ══════════════════════════════════════════════════════════════════════════════
 emit_push_a0:
+	# Value-stack push. For depth < 9 emit `mv s[2+depth], a0` (the s-reg
+	# pool); for depth ≥ 9 spill to the runtime stack via the classic
+	# `addi sp,-4; sw a0,0(sp)` pair. expr_max_depth tracks the s-reg
+	# high-water mark only (memory slots don't need a save in the fn
+	# prologue's save block).
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	# addi sp, sp, -4  in the compiled program
-	# opcode=0x13, rd=sp=2, rs1=sp=2, f3=0, imm=-4 (0xFFC)
-	# word = 0x13 | (2<<7) | (2<<15) | (0xFFC<<20)
-	#      = 0x13 | 0x100 | 0x10000 | 0xFFC00000 = 0xFFC10113
+	lla	t0, expr_depth
+	lw	t1, 0(t0)
+	addi	t2, zero, 9
+	bge	t1, t2, epa_mem_push
+	# ── s-reg push ──
+	addi	t2, s5, 4
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
+	addi	t4, t1, 18
+	slli	t4, t4, 7
+	lui	a0, 0x50
+	addi	a0, a0, 0x13
+	or	a0, a0, t4
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	addi	t1, t1, 1
+	sw	t1, 0(t0)
+	lla	t0, expr_max_depth
+	lw	t2, 0(t0)
+	bge	t2, t1, epa_done
+	sw	t1, 0(t0)
+	j	epa_done
+epa_mem_push:
+	# ── Memory spill: addi sp,sp,-4; sw a0,0(sp) ──
+	addi	t2, s5, 8
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
 	lui	a0, 0xFFC10
 	addi	a0, a0, 0x113
-	addi	gp, zero, 7		# ew site 7 = ew_push_addi
-	j	emit_word
-ew_push_addi:
-	# sw a0, 0(sp)  in the compiled program
-	# opcode=0x23, rs1=sp=2, rs2=a0=10, f3=2, imm=0
-	# word = 0x23 | (2<<12) | (2<<15) | (10<<20) = 0x00A12023
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
 	lui	a0, 0xA12
 	addi	a0, a0, 0x023
-	addi	gp, zero, 8		# ew site 8 = ew_push_sw
-	j	emit_word
-ew_push_sw:
-	addi	gp, zero, 0		# esc site 0 = esc_ret_push
-	j	emit_stack_check
-esc_ret_push:
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	addi	t1, t1, 1
+	sw	t1, 0(t0)
+epa_done:
 	lw	gp, 0(sp)
 	addi	sp, sp, 4
 	j	emit_push_a0_disp
@@ -3364,28 +3413,43 @@ epa_d30:
 #             21: pop_cep_asg  (compile_expr_p — deref assign, pop address)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_pop_t0:
-	addi	sp, sp, -4
-	sw	gp, 0(sp)
-	# lw t0, 0(sp)  in the compiled program
-	# opcode=0x03, rd=t0=5, rs1=sp=2, f3=2, imm=0
-	# word = 0x03 | (5<<7) | (2<<12) | (2<<15) = 0x03|0x280|0x2000|0x10000
-	#      = 0x00012283
+	# Value-stack pop. Decrements expr_depth. If the new top lives in
+	# an s-register (new_depth < 9), stashes that register number
+	# (18..26) in popped_src_reg and emits nothing. If it lives in
+	# memory (new_depth >= 9), emits `lw t0, 0(sp); addi sp, sp, 4`
+	# and sets popped_src_reg = 5 (t0).
+	lla	t0, expr_depth
+	lw	t1, 0(t0)
+	beqz	t1, ept_underflow
+	addi	t1, t1, -1
+	sw	t1, 0(t0)
+	addi	t2, zero, 9
+	bge	t1, t2, ept_mem_pop
+	addi	t1, t1, 18
+	lla	t0, popped_src_reg
+	sw	t1, 0(t0)
+	j	emit_pop_t0_disp
+ept_mem_pop:
+	addi	t2, s5, 8
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
 	lui	a0, 0x12
 	addi	a0, a0, 0x283
-	addi	gp, zero, 9		# ew site 9 = ew_pop_lw
-	j	emit_word
-ew_pop_lw:
-	# addi sp, sp, 4  in the compiled program
-	# opcode=0x13, rd=sp=2, rs1=sp=2, f3=0, imm=4
-	# word = 0x13 | (2<<7) | (2<<15) | (4<<20) = 0x00410113
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
 	lui	a0, 0x410
 	addi	a0, a0, 0x113
-	addi	gp, zero, 10		# ew site 10 = ew_pop_addi
-	j	emit_word
-ew_pop_addi:
-	lw	gp, 0(sp)
-	addi	sp, sp, 4
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
+	addi	t0, zero, 5
+	lla	t1, popped_src_reg
+	sw	t0, 0(t1)
 	j	emit_pop_t0_disp
+ept_underflow:
+	addi	a0, zero, 88		# err 88: pop underflow
+	j	report_err
+
 
 emit_pop_t0_disp:
 	bnez	gp, ept_d1
@@ -3522,10 +3586,16 @@ ept_d31:
 #             2: ea_cep      (compile_expr_p '+' Pratt op)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_add:
+	# Encodes `add a0, sN, a0` where sN is the popped source from the
+	# preceding emit_pop_t0 (popped_src_reg holds N).
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA28
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA00
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 11		# ew site 11 = ew_add
 	j	emit_word
 ew_add:
@@ -3561,8 +3631,12 @@ ead_4:
 emit_sub:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0x40A28
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0x40A00
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 14		# ew site 14 = ew_sub
 	j	emit_word
 ew_sub:
@@ -3590,8 +3664,12 @@ esd_2:
 emit_xor:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA2C
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA04
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 15		# ew site 15 = ew_xor
 	j	emit_word
 ew_xor:
@@ -3620,8 +3698,12 @@ exd_2:
 emit_sll:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA29
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA01
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 18		# ew site 18 = ew_sll
 	j	emit_word
 ew_sll:
@@ -3650,8 +3732,12 @@ esll_d2:
 emit_sra:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0x40A2D
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0x40A05
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 19		# ew site 19 = ew_sra
 	j	emit_word
 ew_sra:
@@ -3679,8 +3765,12 @@ esra_d2:
 emit_srl:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA2D
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA05
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 25		# ew site 25 = ew_srl
 	j	emit_word
 ew_srl:
@@ -3705,8 +3795,12 @@ esrl_d1:
 emit_and:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA2F
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA07
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 20		# ew site 20 = ew_and
 	j	emit_word
 ew_and:
@@ -3735,8 +3829,12 @@ eand_d2:
 emit_or:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA2E
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA06
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 21		# ew site 21 = ew_or
 	j	emit_word
 ew_or:
@@ -4247,10 +4345,15 @@ eaam1_d5:
 #             1: esw_cep_asg  (compile_expr_p '*expr = val')
 # ══════════════════════════════════════════════════════════════════════════════
 emit_sw_deref:
+	# Encodes `sw a0, 0(sN)` where sN = popped_src_reg.
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA2A
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA02
 	addi	a0, a0, 0x023
+	or	a0, a0, t0
 	addi	gp, zero, 12		# ew site 12 = ew_sw_d
 	j	emit_word
 ew_sw_d:
@@ -4280,10 +4383,15 @@ esw_d3:
 #             1: esb_cep_asg  (compile_expr_p '@expr = val')
 # ══════════════════════════════════════════════════════════════════════════════
 emit_sb_deref:
+	# Encodes `sb a0, 0(sN)` where sN = popped_src_reg.
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
-	lui	a0, 0xA28
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA00
 	addi	a0, a0, 0x023
+	or	a0, a0, t0
 	addi	gp, zero, 13		# ew site 13 = ew_sb_d
 	j	emit_word
 ew_sb_d:
@@ -5055,6 +5163,13 @@ ct_struct_literal:
 	sw	t2, 4(sp)
 	add	s9, s9, t1
 
+	# Snapshot expr_depth: the upcoming push of the runtime base address
+	# goes into s[2 + entry_depth]. Each subsequent "reload base" emit
+	# reads from that fixed s-reg instead of the memory stack.
+	lla	t0, expr_depth
+	lw	t0, 0(t0)
+	sw	t0, 20(sp)
+
 	# Consume '{'.
 	addi	gp, zero, 60		# skip_ws site 60 = sw_ct_stl_lbrace
 	j	skip_ws
@@ -5091,10 +5206,15 @@ ct_stl_zero_loop:
 	lw	t0, 16(sp)
 	lw	t1, 8(sp)
 	beq	t0, t1, ct_stl_zero_done
-	# Emit: `lw t0, 0(sp)` — base in compiled program's t0.
-	#   opcode=0x03, rd=5, f3=2, rs1=2, imm=0 → 0x00012283
-	lui	a0, 0x12
-	addi	a0, a0, 0x283
+	# Emit: `addi t0, s[2+entry_depth], 0` — base in compiled program's t0.
+	#   opcode=0x13, rd=5(t0), f3=0, rs1=18+entry_depth, imm=0
+	#   base = 0x13 | (5<<7) = 0x00000293
+	lw	t2, 20(sp)		# entry_depth
+	addi	t2, t2, 18
+	slli	t2, t2, 15
+	lui	a0, 0
+	addi	a0, a0, 0x293
+	or	a0, a0, t2
 	addi	gp, zero, 80		# emit_word site 80 = ew_ct_stl_lw_base
 	j	emit_word
 ew_ct_stl_lw_base:
@@ -5256,9 +5376,13 @@ ct_stl_emit_value:
 	addi	gp, zero, 36		# compile_expr site 36 = ce_ct_stl_val
 	j	compile_expr_p
 ce_ct_stl_val:
-	# Emit `lw t0, 0(sp)` — reload base from runtime stack.
-	lui	a0, 0x12
-	addi	a0, a0, 0x283
+	# Emit `addi t0, s[2+entry_depth], 0` — reload base into t0.
+	lw	t2, 20(sp)
+	addi	t2, t2, 18
+	slli	t2, t2, 15
+	lui	a0, 0
+	addi	a0, a0, 0x293
+	or	a0, a0, t2
 	addi	gp, zero, 82		# emit_word site 82 = ew_ct_stl_lw_base2
 	j	emit_word
 ew_ct_stl_lw_base2:
@@ -5299,18 +5423,23 @@ ct_stl_next_named:
 
 ct_stl_done:
 	addi	s2, s2, 1		# consume '}'
-	# Emit `lw a0, 0(sp)` directly to pop base into a0 as the literal's
-	# result. Then `addi sp, sp, 4` to free the stack slot.
-	lui	a0, 0x12
-	addi	a0, a0, 0x503
+	# Emit `addi a0, s[2+entry_depth], 0` — get base into a0 as the
+	# literal's result. No sp adjust; we instead decrement expr_depth
+	# to release the saved s-reg slot.
+	lw	t2, 20(sp)
+	addi	t2, t2, 18
+	slli	t2, t2, 15
+	lui	a0, 0
+	addi	a0, a0, 0x513		# 0x13 | (10<<7) = base for `addi a0,...,0`
+	or	a0, a0, t2
 	addi	gp, zero, 85		# emit_word site 85 = ew_ct_stl_pop_a0
 	j	emit_word
 ew_ct_stl_pop_a0:
-	lui	a0, 0x410
-	addi	a0, a0, 0x113
-	addi	gp, zero, 86		# emit_word site 86 = ew_ct_stl_spadj
-	j	emit_word
-ew_ct_stl_spadj:
+	# Release the s-reg slot the base was saved in.
+	lla	t0, expr_depth
+	lw	t1, 0(t0)
+	addi	t1, t1, -1
+	sw	t1, 0(t0)
 	addi	sp, sp, 24
 	lla	t0, lv_kind
 	sw	zero, 0(t0)
@@ -5970,6 +6099,21 @@ elws_ct_for_hi_load:
 	addi	gp, zero, 23		# pop site 23 = pop_ct_for_cond
 	j	emit_pop_t0
 pop_ct_for_cond:
+	# emit_pop_t0 didn't materialize the popped value into t0 — for the
+	# comparison sequence below we still need it there, so emit
+	# `addi t0, sN, 0` directly to s5.
+	addi	t2, s5, 4
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0
+	addi	a0, a0, 0x293
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
 	# t0 = x, a0 = hi. Emit comparison:
 	#   exclusive:  slt a0, t0, a0             (a0 = x < hi)
 	#   inclusive:  slt a0, a0, t0 ; xori a0,a0,1  (a0 = !(hi < x) = x <= hi)
@@ -6525,6 +6669,24 @@ sfld_1:
 
 # Stub return sites — replaced by real call sites as each feature is added.
 stlk_ret_ct_primary:
+	j	halt_err
+# Dead emit_word/stack_check sites left over from the old memory-stack push/pop.
+# emit_push_a0 and emit_pop_t0 no longer use emit_word — they write directly to
+# s5 — so these labels are unreachable but still referenced by the dispatch
+# tables. Wired to halt_err defensively.
+ew_push_addi:
+	j	halt_err
+ew_push_sw:
+	j	halt_err
+ew_pop_lw:
+	j	halt_err
+ew_pop_addi:
+	j	halt_err
+esc_ret_push:
+	j	halt_err
+ew_ct_call_spadj:
+	j	halt_err
+ew_ct_stl_spadj:
 	j	halt_err
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7794,9 +7956,18 @@ cs_kw_fn:
 	lw	t1, 0(t0)
 	bnez	t1, cs_bad_fn_nested
 
-	addi	sp, sp, -64
+	addi	sp, sp, -80
 	sw	s8, 0(sp)
 	sw	s9, 4(sp)
+	# Slots 32/36/40 are new for the value-stack save area:
+	#   32(sp): saved outer expr_max_depth
+	#   36(sp): save_area_addr  (start of the 9 nop save slots in prologue)
+	#   40(sp): restore_area_addr (start of the 9 nop restore slots in epilogue)
+	# Save outer expr_max_depth and reset the fn-local one to 0.
+	lla	t0, expr_max_depth
+	lw	t1, 0(t0)
+	sw	t1, 32(sp)
+	sw	zero, 0(t0)
 
 	# Parse the function name.
 	addi	gp, zero, 39		# skip_ws site 39 = sw_cs_var_decide — wait we need a new site
@@ -8137,6 +8308,18 @@ esc_ret_fn:
 	j	emit_word
 ew_cs_fn_prol6:
 
+	# ── Reserve a single jal placeholder for the save block ──────
+	# After body compile we know max_depth. If > 0, this jal is patched
+	# to jump to a save_block emitted at the tail of the fn binary
+	# (which then jumps back to right after this slot). If max_depth
+	# == 0, it's patched to a nop and no trailer is emitted.
+	sw	s5, 36(sp)		# save_jal_addr
+	lui	a0, 0
+	addi	a0, a0, 0x6F		# jal zero, 0 (placeholder)
+	addi	gp, zero, 106		# emit_word site 106 = ew_cs_fn_save_nop
+	j	emit_word
+ew_cs_fn_save_nop:
+
 	# Emit `sw a_i, (i*4)(fp)` for each param. Words:
 	#   sw a0, 0(fp)   0x00a42023
 	#   sw a1, 4(fp)   0x00b42223
@@ -8219,6 +8402,19 @@ cs_fn_params_saved:
 	j	compile_expr_p
 ce_cs_fn_body:
 
+	# ── Frame-size adjustment for the value-stack save area ───────
+	# Snapshot locals_total so the trailer (after the epilogue) can
+	# build save/restore offsets against it, and grow s9 by max_depth*4
+	# so the frame_alloc and frame_free patchers reserve room for the
+	# save area at the top of the locals frame.
+	sw	s9, 44(sp)		# locals_total
+	lla	t0, expr_max_depth
+	lw	t6, 0(t0)		# t6 = max_depth (used several times below)
+	beqz	t6, cs_fn_skip_grow
+	slli	a0, t6, 2
+	add	s9, s9, a0
+cs_fn_skip_grow:
+
 	# ── Patch frame_alloc lui/addi to load frame_size into t0 ──────
 	# frame_size = s9. Prologue emitted lui t0, 0; addi t0, t0, 0; sub sp, sp, t0.
 	# We patch the lui's imm20 to hi20(s9) and the addi's imm12 to lo12(s9).
@@ -8271,6 +8467,20 @@ pjt_cs_fn_ret:
 	addi	t1, t1, 4
 	j	cs_fn_patch_rets
 cs_fn_patch_rets_done:
+
+	# ── Reserve a single jal placeholder for the restore block ────
+	# Mirrors the prologue's save jal: patched to jump to a restore_block
+	# in the trailer (or to nop if max_depth == 0).
+	sw	s5, 40(sp)		# restore_jal_addr
+	lui	a0, 0
+	addi	a0, a0, 0x6F		# jal zero, 0 (placeholder)
+	addi	gp, zero, 107		# emit_word site 107 = ew_cs_fn_restore_nop
+	j	emit_word
+ew_cs_fn_restore_nop:
+
+	# (Save/restore patching now happens after the entire fn body +
+	# epilogue + master_dispatch jal is emitted — see the trailer
+	# block below at cs_fn_emit_save_restore.)
 
 	# Emit frame free: compute `sp = fp + frame_size` via 3-instruction
 	# sequence so large frames (up to 2^20) work. Uses t0 as scratch.
@@ -8353,6 +8563,148 @@ ew_cs_fn_ep7:
 	j	list_append_word
 law_ret_md_patch:
 
+	# ── Value-stack save/restore trailer ──────────────────────────
+	# We deferred reservation of the save area to a single jal placeholder
+	# in the prologue (and one in the epilogue). Now we know max_depth:
+	#   max_depth == 0 → patch both jals to nop (8 bytes overhead)
+	#   max_depth >  0 → emit save_block + restore_block here, patch the
+	#                    jals to jump to them
+	#
+	# Each block ends with a `jal zero, ret_addr` that sends control back
+	# to the instruction right after the original placeholder.
+	lla	t0, expr_max_depth
+	lw	t6, 0(t0)
+	beqz	t6, cs_fn_skip_save_blocks
+
+	# ── Emit save_block ──
+	sw	s5, 48(sp)		# save_block_addr
+	sw	zero, 52(sp)		# i
+cs_fn_save_emit_loop:
+	lw	a0, 52(sp)
+	beq	a0, t6, cs_fn_save_emit_done
+	# offset = locals_total + i*4
+	lw	t0, 44(sp)		# locals_total
+	slli	t1, a0, 2
+	add	t2, t0, t1
+	# encode `sw s[2+i], offset(fp)`
+	addi	t1, a0, 18
+	slli	t1, t1, 20		# rs2
+	lui	a0, 0x42
+	addi	a0, a0, 0x023
+	or	a0, a0, t1
+	andi	t1, t2, 0x1F
+	slli	t1, t1, 7
+	or	a0, a0, t1
+	srli	t1, t2, 5
+	andi	t1, t1, 0x7F
+	slli	t1, t1, 25
+	or	a0, a0, t1
+	addi	gp, zero, 108		# emit_word site 108 = ew_cs_fn_save_emit
+	j	emit_word
+ew_cs_fn_save_emit:
+	lw	a0, 52(sp)
+	addi	a0, a0, 1
+	sw	a0, 52(sp)
+	# Reload max_depth (clobbered by emit_word via t6).
+	lla	t0, expr_max_depth
+	lw	t6, 0(t0)
+	j	cs_fn_save_emit_loop
+cs_fn_save_emit_done:
+	# Emit `jal zero, save_jal_addr + 4` to return.
+	lw	t0, 36(sp)		# save_jal_addr
+	addi	t6, t0, 4		# target
+	addi	t5, s5, 0		# this jal addr
+	# Encode jal zero, (target - this_addr)
+	sub	t6, t6, t5
+	# Use patch_jtype on a placeholder: emit placeholder, patch.
+	lui	a0, 0
+	addi	a0, a0, 0x6F
+	addi	gp, zero, 109		# emit_word site 109 = ew_cs_fn_save_back
+	j	emit_word
+ew_cs_fn_save_back:
+	# Patch the just-emitted jal to target save_jal_addr+4.
+	addi	t5, s5, -4
+	lw	t0, 36(sp)
+	addi	t6, t0, 4
+	addi	gp, zero, 22		# patch_jtype site 22 = pjt_cs_fn_save_back
+	j	patch_jtype
+pjt_cs_fn_save_back:
+
+	# ── Emit restore_block ──
+	sw	s5, 56(sp)		# restore_block_addr
+	sw	zero, 52(sp)		# i = 0
+	# Reload max_depth.
+	lla	t0, expr_max_depth
+	lw	t6, 0(t0)
+cs_fn_restore_emit_loop:
+	lw	a0, 52(sp)
+	beq	a0, t6, cs_fn_restore_emit_done
+	# offset = locals_total + i*4
+	lw	t0, 44(sp)
+	slli	t1, a0, 2
+	add	t2, t0, t1
+	# encode `lw s[2+i], offset(fp)`
+	#   opcode=0x03, rd=18+i, f3=2, rs1=8(fp), imm=offset
+	addi	t1, a0, 18
+	slli	t1, t1, 7		# rd
+	lui	a0, 0x42
+	addi	a0, a0, 0x003
+	or	a0, a0, t1
+	andi	t1, t2, 0xFFF
+	slli	t1, t1, 20
+	or	a0, a0, t1
+	addi	gp, zero, 110		# emit_word site 110 = ew_cs_fn_restore_emit
+	j	emit_word
+ew_cs_fn_restore_emit:
+	lw	a0, 52(sp)
+	addi	a0, a0, 1
+	sw	a0, 52(sp)
+	lla	t0, expr_max_depth
+	lw	t6, 0(t0)
+	j	cs_fn_restore_emit_loop
+cs_fn_restore_emit_done:
+	# Emit `jal zero, restore_jal_addr + 4` to return.
+	lui	a0, 0
+	addi	a0, a0, 0x6F
+	addi	gp, zero, 111		# emit_word site 111 = ew_cs_fn_restore_back
+	j	emit_word
+ew_cs_fn_restore_back:
+	addi	t5, s5, -4
+	lw	t0, 40(sp)
+	addi	t6, t0, 4
+	addi	gp, zero, 23		# patch_jtype site 23 = pjt_cs_fn_restore_back
+	j	patch_jtype
+pjt_cs_fn_restore_back:
+
+	# ── Patch the prologue save_jal to jump to save_block_addr ──
+	lw	t5, 36(sp)		# save_jal_addr
+	lw	t6, 48(sp)		# save_block_addr
+	addi	gp, zero, 24		# patch_jtype site 24 = pjt_cs_fn_save_jal
+	j	patch_jtype
+pjt_cs_fn_save_jal:
+	# ── Patch the epilogue restore_jal to jump to restore_block_addr ──
+	lw	t5, 40(sp)		# restore_jal_addr
+	lw	t6, 56(sp)		# restore_block_addr
+	addi	gp, zero, 25		# patch_jtype site 25 = pjt_cs_fn_restore_jal
+	j	patch_jtype
+pjt_cs_fn_restore_jal:
+	j	cs_fn_save_done
+
+cs_fn_skip_save_blocks:
+	# max_depth == 0: patch both jal placeholders to nop.
+	lw	t0, 36(sp)
+	lui	t1, 0
+	addi	t1, t1, 0x13		# nop
+	sw	t1, 0(t0)
+	lw	t0, 40(sp)
+	sw	t1, 0(t0)
+cs_fn_save_done:
+
+	# Restore outer expr_max_depth.
+	lw	t0, 32(sp)
+	lla	t1, expr_max_depth
+	sw	t0, 0(t1)
+
 	# ── Patch the skip-over jal at start of fn to point to current s5 ──
 	lw	t5, 20(sp)
 	addi	t6, s5, 0
@@ -8366,7 +8718,7 @@ pjt_cs_fn_skip:
 	lla	t0, current_fn
 	sw	zero, 0(t0)
 
-	addi	sp, sp, 64
+	addi	sp, sp, 80
 	j	cs_done
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -10947,6 +11299,12 @@ ct_fn_call:
 	# 0(sp): fn entry_addr
 	# 4(sp): num_params
 	# 8(sp): arg count parsed so far
+	# 12(sp): entry_depth (value-stack depth on entry to ct_fn_call)
+	# Snapshot entry_depth so the arg loader knows which s-regs hold the
+	# args (s[2+entry_depth] .. s[2+entry_depth+num_args-1]).
+	lla	t0, expr_depth
+	lw	t1, 0(t0)
+	sw	t1, 12(sp)
 
 	# Look up the function.
 	addi	gp, zero, 1		# fn_lookup site 1 = fnlk_ret_call
@@ -10958,6 +11316,19 @@ fnlk_ret_call:
 	lbu	t0, 36(a0)		# num_params
 	sw	t0, 4(sp)
 	sw	zero, 8(sp)
+
+	# Require entry_depth + num_params ≤ 9 so every arg lives in an
+	# s-register (the load loop doesn't handle memory-spilled args).
+	# For flex-arg asm fns (num_params == 0xFF) the worst case is 8,
+	# so use 8 for the check.
+	addi	t1, zero, 0xFF
+	bne	t0, t1, ct_call_depth_chk
+	addi	t0, zero, 8
+ct_call_depth_chk:
+	lw	t2, 12(sp)		# entry_depth
+	add	t2, t2, t0
+	addi	t1, zero, 9
+	bgt	t2, t1, ct_bad_expr_too_deep
 
 	# Skip ws, consume '(' (we peeked it already in pi_ct_var).
 	addi	gp, zero, 45		# skip_ws site 45 = sw_ct_call_lparen
@@ -11013,55 +11384,41 @@ ct_call_chk_normal:
 	bne	t0, t1, ct_bad_call_argc
 ct_call_args_ok:
 
-	# Load args into a0..a(N-1) from stack. Top of stack = last-pushed =
-	# arg_(N-1). So `lw a_(N-1), 0(sp); lw a_(N-2), 4(sp); ...`. Then
-	# addi sp, sp, N*4 to free.
+	# Load args into a0..a(N-1) from the value-stack s-regs. Each arg N
+	# was pushed at depth (entry_depth + N), so it lives in
+	# s[2 + entry_depth + N]. We emit `addi a[idx], s[..], 0` (mv) for
+	# each arg idx in 0..num_params-1, then drop expr_depth back to
+	# entry_depth to release the slots. emit_word clobbers t6, so we
+	# reload entry_depth from frame each iteration.
 	lw	t5, 4(sp)		# num_params
 	beqz	t5, ct_call_args_loaded
-	# Emit one lw per param, stepping through offsets.
-	# Use the same trick as the prologue param save but with `lw ai, (off)(sp)`.
-	#   lw a0, off(sp)  = 0x00012503 | (off<<20)
-	#   lw a1, off(sp)  = 0x00012583 | (off<<20)
-	#   ...   (rd nibble in bits 7..11)
-	# We emit registers in order a0,a1,... but their OFFSETS go
-	# (N-1)*4, (N-2)*4, ..., 0 because arg0 is deepest.
-	# Iterate idx=0..N-1: emit `lw a_idx, ((N-1-idx)*4)(sp)`.
 	addi	t3, zero, 0		# idx
 ct_call_load_loop:
 	lw	t5, 4(sp)
 	beq	t3, t5, ct_call_load_done
-	# Compute offset = (N-1-idx)*4
-	addi	t4, t5, -1
-	sub	t4, t4, t3
-	slli	t4, t4, 2		# offset in bytes
-	# Compute word:
-	#   base = 0x00012003  (lw x0, 0(sp))
-	#   rd nibble: (10 + idx) << 7
-	#   offset: t4 << 20
-	addi	t0, t3, 10		# rd index (a0 = 10)
-	slli	t0, t0, 7
-	lui	a0, 0x12
-	addi	a0, a0, 0x003
+	lw	t6, 12(sp)		# reload entry_depth
+	# rs1 = 18 + entry_depth + idx  (= s[2 + entry_depth + idx])
+	add	t0, t6, t3
+	addi	t0, t0, 18
+	slli	t0, t0, 15
+	# rd  = 10 + idx                (= a[idx])
+	addi	t1, t3, 10
+	slli	t1, t1, 7
+	# word = 0x13 | rs1 | rd
+	lui	a0, 0
+	addi	a0, a0, 0x13
 	or	a0, a0, t0
-	slli	t0, t4, 20
-	or	a0, a0, t0
+	or	a0, a0, t1
 	addi	gp, zero, 65		# emit_word site 65 = ew_ct_call_load
 	j	emit_word
 ew_ct_call_load:
 	addi	t3, t3, 1
 	j	ct_call_load_loop
 ct_call_load_done:
-	# addi sp, sp, N*4  — free the pushed arg slots.
-	lw	t5, 4(sp)
-	slli	t0, t5, 2
-	andi	t0, t0, 0xFFF
-	slli	t0, t0, 20
-	lui	a0, 0x10
-	addi	a0, a0, 0x113
-	or	a0, a0, t0
-	addi	gp, zero, 66		# emit_word site 66 = ew_ct_call_spadj
-	j	emit_word
-ew_ct_call_spadj:
+	# Release the arg slots: depth = entry_depth.
+	lw	t6, 12(sp)
+	lla	t0, expr_depth
+	sw	t6, 0(t0)
 ct_call_args_loaded:
 
 	# Allocate a new ret_id (= current ret_top count).
@@ -11228,6 +11585,9 @@ ct_bad_call_argc:
 	j	report_err
 ct_bad_call_rparen:
 	addi	a0, zero, 2		# err 2: ')'
+	j	report_err
+ct_bad_expr_too_deep:
+	addi	a0, zero, 87		# err 87: expression too deep
 	j	report_err
 ct_bad_return_outside:
 	addi	a0, zero, 43		# err 43: return outside function
@@ -12997,19 +13357,27 @@ eor_cep:
 # All comparisons leave 0 or 1 in a0. The emit sequences mirror compile_rel
 # and compile_eq from the layered parser.
 
-# '<' : slt a0, t0, a0  (word 0x00A2A533)
+# '<' : slt a0, sN, a0  (sN = popped LHS source)
 cep_em_lt:
-	lui	a0, 0xA2A
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA02
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 40
 	j	emit_cmp_word
 ecw_cep_lt_done:
 	j	cep_post_emit
 
-# '<=' : slt a0, a0, t0 (word 0x00552533) ; xori a0, a0, 1 (word 0x00154513)
+# '<=' : slt a0, a0, sN (rs2 = sN) ; xori a0, a0, 1
 cep_em_le:
-	lui	a0, 0x552
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 20
+	lui	a0, 0x52
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 41
 	j	emit_cmp_word
 ecw_cep_le_slt:
@@ -13020,19 +13388,27 @@ ecw_cep_le_slt:
 ecw_cep_le_done:
 	j	cep_post_emit
 
-# '>' : slt a0, a0, t0 (word 0x00552533)
+# '>' : slt a0, a0, sN  (rs2 = sN)
 cep_em_gt:
-	lui	a0, 0x552
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 20
+	lui	a0, 0x52
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 43
 	j	emit_cmp_word
 ecw_cep_gt_done:
 	j	cep_post_emit
 
-# '>=' : slt a0, t0, a0 ; xori a0, a0, 1
+# '>=' : slt a0, sN, a0 ; xori a0, a0, 1
 cep_em_ge:
-	lui	a0, 0xA2A
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA02
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 44
 	j	emit_cmp_word
 ecw_cep_ge_slt:
@@ -13043,19 +13419,27 @@ ecw_cep_ge_slt:
 ecw_cep_ge_done:
 	j	cep_post_emit
 
-# '<u' : sltu a0, t0, a0 (word 0x00A2B533)
+# '<u' : sltu a0, sN, a0
 cep_em_ltu:
-	lui	a0, 0xA2B
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA03
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 46
 	j	emit_cmp_word
 ecw_cep_ltu_done:
 	j	cep_post_emit
 
-# '<=u' : sltu a0, a0, t0 (word 0x00553533) ; xori a0, a0, 1
+# '<=u' : sltu a0, a0, sN ; xori a0, a0, 1
 cep_em_leu:
-	lui	a0, 0x553
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 20
+	lui	a0, 0x53
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 47
 	j	emit_cmp_word
 ecw_cep_leu_sltu:
@@ -13066,19 +13450,27 @@ ecw_cep_leu_sltu:
 ecw_cep_leu_done:
 	j	cep_post_emit
 
-# '>u' : sltu a0, a0, t0
+# '>u' : sltu a0, a0, sN
 cep_em_gtu:
-	lui	a0, 0x553
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 20
+	lui	a0, 0x53
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 49
 	j	emit_cmp_word
 ecw_cep_gtu_done:
 	j	cep_post_emit
 
-# '>=u' : sltu a0, t0, a0 ; xori a0, a0, 1
+# '>=u' : sltu a0, sN, a0 ; xori a0, a0, 1
 cep_em_geu:
-	lui	a0, 0xA2B
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA03
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 50
 	j	emit_cmp_word
 ecw_cep_geu_sltu:
@@ -13089,10 +13481,14 @@ ecw_cep_geu_sltu:
 ecw_cep_geu_done:
 	j	cep_post_emit
 
-# '==' : xor a0, t0, a0 (0x00A2C533) ; sltiu a0, a0, 1 (0x00153513)
+# '==' : xor a0, sN, a0 ; sltiu a0, a0, 1
 cep_em_eq:
-	lui	a0, 0xA2C
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA04
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 52
 	j	emit_cmp_word
 ecw_cep_eq_xor:
@@ -13103,10 +13499,14 @@ ecw_cep_eq_xor:
 ecw_cep_eq_done:
 	j	cep_post_emit
 
-# '!=' : xor a0, t0, a0 ; sltu a0, zero, a0 (0x00A03533)
+# '!=' : xor a0, sN, a0 ; sltu a0, zero, a0
 cep_em_ne:
-	lui	a0, 0xA2C
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA04
 	addi	a0, a0, 0x533
+	or	a0, a0, t0
 	addi	gp, zero, 54
 	j	emit_cmp_word
 ecw_cep_ne_xor:
@@ -13294,19 +13694,20 @@ cep_pre_assign:
 	beqz	t1, cep_bad_lvalue	# not an lvalue → halt
 
 	# If this is an IDENT target, enforce mutability.
+	# Rule: first binding sets mutability from the operator
+	#   ('=' → immutable, ':=' → mutable). On an existing var, either
+	#   operator is allowed iff the var was first-bound as mutable.
 	addi	t2, zero, 1
 	bne	t1, t2, cep_asg_skip_mut_check
 	lw	t3, 8(sp)		# op_kind (27 = '=', 28 = ':=')
 	lla	t4, lookup_was_new
 	lw	t4, 0(t4)
 	bnez	t4, cep_asg_new
-	# EXISTING var.
+	# EXISTING var: allowed iff the stored mutability flag is set.
 	lla	t5, last_ident_entry
 	lw	t5, 0(t5)
 	lbu	t6, 37(t5)
-	addi	t2, zero, 27
-	beq	t3, t2, cep_bad_immut_reassign	# '=' on existing → error
-	beqz	t6, cep_bad_immut_reassign	# ':=' on immutable → error
+	beqz	t6, cep_bad_immut_reassign
 	j	cep_asg_skip_mut_check
 cep_asg_new:
 	# NEW var — set mutability from op_kind.
@@ -13377,9 +13778,13 @@ esw_cep_asg:
 	j	cep_post_emit
 
 cep_asg_em_sh:
-	# Emit `sh a0, 0(t0)` directly (word 0x00A29023).
-	lui	a0, 0xA29
+	# Emit `sh a0, 0(sN)` where sN = popped_src_reg.
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA01
 	addi	a0, a0, 0x023
+	or	a0, a0, t0
 	addi	gp, zero, 75		# emit_word site 75 = ew_cep_asg_sh
 	j	emit_word
 ew_cep_asg_sh:
@@ -13490,9 +13895,13 @@ pop_cep_postfix:
 	beq	t5, t1, cep_pf_store_w
 	addi	t1, zero, 2
 	beq	t5, t1, cep_pf_store_b
-	# kind 4 (half): sh a0, 0(t0) = 0x00A29023
-	lui	a0, 0xA29
+	# kind 4 (half): sh a0, 0(sN) where sN = popped_src_reg
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA01
 	addi	a0, a0, 0x023
+	or	a0, a0, t0
 	addi	gp, zero, 95		# emit_word site 95 = ew_cep_pf_sh
 	j	emit_word
 ew_cep_pf_sh:
@@ -13667,9 +14076,13 @@ cep_pe_store_half:
 	addi	gp, zero, 27		# pop site 27 = pop_cep_compound_addr_h
 	j	emit_pop_t0
 pop_cep_compound_addr_h:
-	# Emit `sh a0, 0(t0)` directly.
-	lui	a0, 0xA29
+	# Emit `sh a0, 0(sN)` where sN = popped_src_reg.
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0xA01
 	addi	a0, a0, 0x023
+	or	a0, a0, t0
 	addi	gp, zero, 77		# emit_word site 77 = ew_cep_pe_sh
 	j	emit_word
 ew_cep_pe_sh:
@@ -15085,6 +15498,22 @@ cad_bad_frame_too_big:
 emit_mul:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
+	# The mul template hard-codes t0 as the LHS source. With the s-reg
+	# value-stack codegen the LHS lives in popped_src_reg = sN, so we
+	# emit a `mv t0, sN` prefix inline (bypassing emit_word for one
+	# instruction).
+	addi	t2, s5, 4
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0
+	addi	a0, a0, 0x293		# addi t0, x0, 0 → mv t0, sN
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
 	lla	t0, mul_code
 	lla	t1, mul_code_end
 emul_loop:
@@ -15177,6 +15606,20 @@ mul_code_end:
 emit_divmod_body:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
+	# Same as emit_mul: the divmod template expects the dividend in t0,
+	# but the value-stack scheme has it in sN. Emit a `mv t0, sN` prefix.
+	addi	t2, s5, 4
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0
+	addi	a0, a0, 0x293
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
 	lla	t0, divmod_code
 	lla	t1, divmod_code_end
 edmb_loop:
@@ -15301,6 +15744,19 @@ divmod_code_end:
 emit_udivmod_body:
 	addi	sp, sp, -4
 	sw	gp, 0(sp)
+	# Same prefix as emit_divmod_body: materialize sN into t0.
+	addi	t2, s5, 4
+	lla	t3, bin_end
+	lw	t3, 0(t3)
+	bgeu	t2, t3, bin_full
+	lla	t0, popped_src_reg
+	lw	t0, 0(t0)
+	slli	t0, t0, 15
+	lui	a0, 0
+	addi	a0, a0, 0x293
+	or	a0, a0, t0
+	sw	a0, 0(s5)
+	addi	s5, s5, 4
 	lla	t0, udivmod_start
 	lla	t1, udivmod_end
 eudmb_loop:
@@ -15487,7 +15943,23 @@ pjt_d20:
 	bnez	gp, pjt_d21
 	j	pjt_md_patch
 pjt_d21:
+	addi	gp, gp, -1
+	bnez	gp, pjt_d22
 	j	pjt_asm_fn_skip
+pjt_d22:
+	addi	gp, gp, -1
+	bnez	gp, pjt_d23
+	j	pjt_cs_fn_save_back
+pjt_d23:
+	addi	gp, gp, -1
+	bnez	gp, pjt_d24
+	j	pjt_cs_fn_restore_back
+pjt_d24:
+	addi	gp, gp, -1
+	bnez	gp, pjt_d25
+	j	pjt_cs_fn_save_jal
+pjt_d25:
+	j	pjt_cs_fn_restore_jal
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Error reporting. On any parse error, the site sets a0 = error code and jumps
@@ -15821,6 +16293,23 @@ macro_scratch:
 macro_scratch_top:
 	.word	0
 macro_scratch_end:
+	.word	0
+
+# ── Value-stack state (Phase 1 register-pool codegen) ────────────────────────
+# Every push (binop save, function-call arg, etc.) takes a slot from
+# s2..s10 (9 registers, callee-saved per ABI). expr_depth tracks how many
+# slots are currently in use; expr_max_depth is the high-water mark for
+# the current function, used at fn epilogue time to emit the right number
+# of save/restore instructions.
+expr_depth:
+	.word	0
+expr_max_depth:
+	.word	0
+# popped_src_reg = the register number (18..26 = s2..s10) of the most
+# recent emit_pop_t0. Set by emit_pop_t0 instead of emitting `mv t0, sN`,
+# read by the binop emit helpers (emit_add etc.) so they can use sN as
+# rs1 directly. Saves one instruction per binop.
+popped_src_reg:
 	.word	0
 
 # Flag set before lookup_or_alloc to indicate whether the upcoming
@@ -16309,6 +16798,17 @@ err_tbl:
 	.byte	1, 21
 	.ascii	"bad rept substitution"
 	.zero	9
+	# slot 86 — (reserved)
+	.byte	0, 0
+	.zero	30
+	# slot 87 — raw: expression too deep (>9 nested pushes)
+	.byte	1, 19
+	.ascii	"expression too deep"
+	.zero	11
+	# slot 88 — raw: value-stack pop underflow (compiler bug)
+	.byte	1, 25
+	.ascii	"value-stack pop underflow"
+	.zero	5
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Register name tables for asm blocks.
