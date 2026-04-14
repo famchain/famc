@@ -251,9 +251,22 @@ _start:
 	# ── Macro expansion scratch: 4 KiB ─────────────────────────────
 	lla	t1, macro_scratch
 	sw	tp, 0(t1)
+	lla	t1, macro_scratch_top
+	sw	tp, 0(t1)		# bump pointer = scratch start
 	lui	t0, 0x1			# 4 KiB
 	add	t2, tp, t0
 	lla	t1, macro_scratch_end
+	sw	t2, 0(t1)
+	addi	tp, t2, 0
+
+	# ── Macro expansion stack: 16 entries × 12 bytes = 192 bytes ──
+	lla	t1, macro_stack_base
+	sw	tp, 0(t1)
+	lla	t1, macro_stack_top
+	sw	tp, 0(t1)
+	addi	t0, zero, 192
+	add	t2, tp, t0
+	lla	t1, macro_stack_end
 	sw	t2, 0(t1)
 	addi	tp, t2, 0
 
@@ -511,17 +524,21 @@ sw_cl:
 	bge	s2, s3, sw_cl_eoi
 	j	compile_stmt
 sw_cl_eoi:
-	# End of input. If macro_active is set, the scratch buffer just got
-	# drained — restore (s2, s3) to the saved post-call resume point and
-	# keep going on the real source.
-	lla	t0, macro_active
+	# End of input. If the expansion stack is non-empty, the current
+	# scratch region just drained: pop the saved (s2, s3, scratch_top)
+	# and keep going.
+	lla	t0, macro_stack_top
 	lw	t1, 0(t0)
-	beqz	t1, compile_done
-	sw	zero, 0(t0)
-	lla	t0, macro_save_s2
-	lw	s2, 0(t0)
-	lla	t0, macro_save_s3
-	lw	s3, 0(t0)
+	lla	t2, macro_stack_base
+	lw	t3, 0(t2)
+	beq	t1, t3, compile_done
+	addi	t1, t1, -12
+	sw	t1, 0(t0)
+	lw	s2, 0(t1)
+	lw	s3, 4(t1)
+	lw	t4, 8(t1)
+	lla	t0, macro_scratch_top
+	sw	t4, 0(t0)
 	j	compile_loop
 cs_after:
 	j	compile_loop
@@ -2326,6 +2343,8 @@ parse_num:
 	bge	s2, s3, pn_done		# bare '-' yields 0 (caller validates)
 pn_after_sign:
 	lbu	t0, 0(s2)
+	addi	t1, zero, 39		# '\''
+	beq	t0, t1, pn_char
 	addi	t1, zero, '0'
 	bne	t0, t1, pn_dec
 	addi	t2, s2, 1
@@ -2336,6 +2355,87 @@ pn_after_sign:
 	addi	t1, zero, 'X'
 	beq	t0, t1, pn_hex_begin
 	j	pn_dec
+
+pn_char:
+	# Char literal: 'X' or '\X'. Reuses the same escape table as the
+	# expression-side ct_char_lit (n/t/r/0/b/f/a/v/e/\\/\'/\").
+	addi	s2, s2, 1		# consume opening '
+	bge	s2, s3, pn_bad_char
+	lbu	t0, 0(s2)
+	addi	t1, zero, 92
+	beq	t0, t1, pn_char_esc
+	addi	s2, s2, 1
+	addi	a0, t0, 0
+	j	pn_char_close
+pn_char_esc:
+	addi	s2, s2, 1		# consume backslash
+	bge	s2, s3, pn_bad_char
+	lbu	t0, 0(s2)
+	addi	s2, s2, 1
+	addi	t1, zero, 'n'
+	beq	t0, t1, pn_char_nl
+	addi	t1, zero, 't'
+	beq	t0, t1, pn_char_tab
+	addi	t1, zero, 'r'
+	beq	t0, t1, pn_char_cr
+	addi	t1, zero, '0'
+	beq	t0, t1, pn_char_nul
+	addi	t1, zero, 'b'
+	beq	t0, t1, pn_char_bs
+	addi	t1, zero, 'f'
+	beq	t0, t1, pn_char_ff
+	addi	t1, zero, 'a'
+	beq	t0, t1, pn_char_bel
+	addi	t1, zero, 'v'
+	beq	t0, t1, pn_char_vtab
+	addi	t1, zero, 'e'
+	beq	t0, t1, pn_char_esc_char
+	addi	t1, zero, 92
+	beq	t0, t1, pn_char_lit_ok
+	addi	t1, zero, 39
+	beq	t0, t1, pn_char_lit_ok
+	addi	t1, zero, 34
+	beq	t0, t1, pn_char_lit_ok
+	j	pn_bad_char
+pn_char_nl:
+	addi	a0, zero, 10
+	j	pn_char_close
+pn_char_tab:
+	addi	a0, zero, 9
+	j	pn_char_close
+pn_char_cr:
+	addi	a0, zero, 13
+	j	pn_char_close
+pn_char_nul:
+	addi	a0, zero, 0
+	j	pn_char_close
+pn_char_bs:
+	addi	a0, zero, 8
+	j	pn_char_close
+pn_char_ff:
+	addi	a0, zero, 12
+	j	pn_char_close
+pn_char_bel:
+	addi	a0, zero, 7
+	j	pn_char_close
+pn_char_vtab:
+	addi	a0, zero, 11
+	j	pn_char_close
+pn_char_esc_char:
+	addi	a0, zero, 27
+	j	pn_char_close
+pn_char_lit_ok:
+	addi	a0, t0, 0
+pn_char_close:
+	bge	s2, s3, pn_bad_char
+	lbu	t0, 0(s2)
+	addi	t1, zero, 39
+	bne	t0, t1, pn_bad_char
+	addi	s2, s2, 1
+	j	pn_done
+pn_bad_char:
+	addi	a0, zero, 34		# err 34: unknown escape sequence
+	j	report_err
 
 pn_hex_begin:
 	addi	s2, s2, 2
@@ -7021,24 +7121,26 @@ sw_cs_mc_semi:
 	addi	s2, s2, 1
 
 	# ── Begin expansion ────────────────────────────────────────────
-	# Refuse nested expansion.
-	lla	t0, macro_active
+	# Push (s2, s3, macro_scratch_top) onto the expansion stack.
+	lla	t0, macro_stack_top
 	lw	t1, 0(t0)
-	bnez	t1, cs_bad_mc_nested
-	addi	t1, zero, 1
+	lla	t2, macro_stack_end
+	lw	t3, 0(t2)
+	bgeu	t1, t3, cs_bad_mc_nested
+	sw	s2, 0(t1)
+	sw	s3, 4(t1)
+	lla	t2, macro_scratch_top
+	lw	t3, 0(t2)
+	sw	t3, 8(t1)
+	addi	t1, t1, 12
 	sw	t1, 0(t0)
-	# Save current s2/s3 (these become the resume point after expansion).
-	lla	t0, macro_save_s2
-	sw	s2, 0(t0)
-	lla	t0, macro_save_s3
-	sw	s3, 0(t0)
 
 	# Walk the body, writing into the scratch buffer with substitution.
 	lw	t3, 0(sp)		# macro entry
 	lw	a4, 32(t3)		# body_start (source ptr)
 	lw	a5, 36(t3)		# body_end
-	lla	t0, macro_scratch
-	lw	a6, 0(t0)		# scratch write ptr
+	lla	t0, macro_scratch_top
+	lw	a6, 0(t0)		# scratch write ptr (= inner_start)
 	lla	t0, macro_scratch_end
 	lw	a7, 0(t0)		# scratch end
 	# t3 stays = entry ptr (we'll re-read num_args & arg names from it).
@@ -7136,7 +7238,7 @@ cs_mc_subst_scan_done:
 	addi	t6, zero, 0		# i
 cs_mc_subst_lookup:
 	lbu	t0, 40(t3)		# num_args
-	beq	t6, t0, cs_bad_mc_subst	# not found
+	beq	t6, t0, cs_mc_subst_passthrough
 	# arg name pointer = entry + 44 + i*32
 	slli	t1, t6, 5
 	addi	t1, t1, 44
@@ -7167,6 +7269,25 @@ cs_mc_subst_arg_overflow:
 cs_mc_subst_next:
 	addi	t6, t6, 1
 	j	cs_mc_subst_lookup
+cs_mc_subst_passthrough:
+	# `\name` doesn't match any of this macro's args — copy verbatim
+	# (the backslash plus the ident bytes) so a nested rept or another
+	# expansion downstream can handle it.
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_mc_scratch
+	addi	t0, zero, 92
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t0, t4, 0
+cs_mc_subst_pass_loop:
+	beq	t0, a4, cs_mc_expand_loop
+	addi	t1, a6, 1
+	bgeu	t1, a7, cs_bad_mc_scratch
+	lbu	t1, 0(t0)
+	sb	t1, 0(a6)
+	addi	a6, a6, 1
+	addi	t0, t0, 1
+	j	cs_mc_subst_pass_loop
 cs_mc_subst_found:
 	# Copy the captured arg text (start, len) at frame slot 16 + i*8 to a6.
 	slli	t0, t6, 3
@@ -7189,12 +7310,14 @@ cs_mc_subst_copy_done:
 	j	cs_mc_expand_loop
 
 cs_mc_expand_done:
-	# Repoint s2/s3 at the scratch buffer. Subsequent compile_loop
-	# iterations will parse the expanded body as ordinary famc
-	# statements until s2 reaches s3, at which point the EOI hook in
-	# compile_loop restores the saved source position.
-	lla	t0, macro_scratch
-	lw	s2, 0(t0)
+	# Update bump pointer and point s2/s3 at the just-written region.
+	# inner_start is in the top stack entry's slot 8.
+	lla	t0, macro_scratch_top
+	sw	a6, 0(t0)
+	lla	t0, macro_stack_top
+	lw	t1, 0(t0)
+	addi	t1, t1, -12
+	lw	s2, 8(t1)		# inner_start (saved scratch_top at push)
 	addi	s3, a6, 0
 	addi	sp, sp, 80
 	j	cs_done
@@ -7394,33 +7517,34 @@ cs_rept_count_done:
 	lui	t0, 0x1
 	bgeu	a6, t0, cs_bad_rept_count
 
-	# Refuse nested expansion.
-	lla	t0, macro_active
+	# Push (s2, s3, macro_scratch_top) onto the expansion stack.
+	lla	t0, macro_stack_top
 	lw	t1, 0(t0)
-	bnez	t1, cs_bad_rept_nested
-	addi	t1, zero, 1
+	lla	t2, macro_stack_end
+	lw	t3, 0(t2)
+	bgeu	t1, t3, cs_bad_rept_nested
+	sw	s2, 0(t1)
+	sw	s3, 4(t1)
+	lla	t2, macro_scratch_top
+	lw	t3, 0(t2)
+	sw	t3, 8(t1)
+	addi	t1, t1, 12
 	sw	t1, 0(t0)
-	# Save the resume point (current s2/s3 — just past the rept body).
-	lla	t0, macro_save_s2
-	sw	s2, 0(t0)
-	lla	t0, macro_save_s3
-	sw	s3, 0(t0)
 
 	# ── Expand into scratch ─────────────────────────────────────────
 	# a4 = current iteration value (starts at low)
-	# a5 = high (with inclusive: < a5+1, exclusive: < a5)
-	#   We re-derive the "loop condition limit" inline.
+	# a5 = limit (exclusive: stop when iter >= a5)
 	lw	a4, 4(sp)		# low (current iter)
 	lw	t0, 12(sp)
 	bnez	t0, cs_rept_init_inc
-	lw	a5, 8(sp)		# high (exclusive: stop when iter >= a5)
+	lw	a5, 8(sp)		# exclusive
 	j	cs_rept_init_done
 cs_rept_init_inc:
 	lw	a5, 8(sp)
 	addi	a5, a5, 1		# inclusive: stop when iter >= a5+1
 cs_rept_init_done:
-	lla	t0, macro_scratch
-	lw	a6, 0(t0)		# scratch write ptr
+	lla	t0, macro_scratch_top
+	lw	a6, 0(t0)		# scratch write ptr (= inner_start)
 	lla	t0, macro_scratch_end
 	lw	a7, 0(t0)		# scratch end
 
@@ -7512,7 +7636,7 @@ cs_rept_subst_scan_done:
 	beqz	t6, cs_bad_rept_subst
 	# Compare against counter name (length at sp+0, bytes at sp+28).
 	lw	t0, 0(sp)
-	bne	t6, t0, cs_bad_rept_subst
+	bne	t6, t0, cs_rept_subst_passthrough
 	addi	t0, zero, 0
 cs_rept_subst_cmp:
 	beq	t0, t6, cs_rept_subst_emit
@@ -7521,9 +7645,27 @@ cs_rept_subst_cmp:
 	addi	t1, sp, 28
 	add	t1, t1, t0
 	lbu	a0, 0(t1)
-	bne	t2, a0, cs_bad_rept_subst
+	bne	t2, a0, cs_rept_subst_passthrough
 	addi	t0, t0, 1
 	j	cs_rept_subst_cmp
+cs_rept_subst_passthrough:
+	# `\name` isn't this rept's counter — copy verbatim so a downstream
+	# expansion (outer macro arg, nested rept counter) can handle it.
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_rept_scratch
+	addi	t0, zero, 92
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	addi	t0, t5, 0
+cs_rept_subst_pass_loop:
+	beq	t0, t3, cs_rept_inner
+	addi	t1, a6, 1
+	bgeu	t1, a7, cs_bad_rept_scratch
+	lbu	t1, 0(t0)
+	sb	t1, 0(a6)
+	addi	a6, a6, 1
+	addi	t0, t0, 1
+	j	cs_rept_subst_pass_loop
 cs_rept_subst_emit:
 	# Emit decimal digits of a4 into scratch. Use a small in-frame buffer
 	# to build digits in reverse, then copy out. Max 11 chars (signed
@@ -7577,10 +7719,13 @@ cs_rept_inner_done:
 	addi	a4, a4, 1
 	j	cs_rept_outer
 cs_rept_outer_done:
-	# Repoint s2/s3 at the scratch buffer; compile_loop's EOI hook will
-	# restore the saved source position when it drains.
-	lla	t0, macro_scratch
-	lw	s2, 0(t0)
+	# Update bump pointer and point s2/s3 at the just-written region.
+	lla	t0, macro_scratch_top
+	sw	a6, 0(t0)
+	lla	t0, macro_stack_top
+	lw	t1, 0(t0)
+	addi	t1, t1, -12
+	lw	s2, 8(t1)		# inner_start
 	addi	s3, a6, 0
 	addi	sp, sp, 60
 	j	cs_done
@@ -15623,20 +15768,24 @@ macro_top:
 macro_end:
 	.word	0
 
-# Expansion state. Only one expansion is active at a time (nested expansion
-# is forbidden by the macro_active flag). On entry to cs_macro_call we save
-# the source pointers and a continuation address; on asm_end we restore them.
-macro_active:
+# Expansion stack: each entry is 12 bytes  (saved s2, saved s3, saved
+# scratch_top). Push on cs_macro_call / cs_kw_rept entry; pop in
+# compile_loop's EOI hook. Capped at 16 entries (depth limit).
+#   stack empty  ⇔  macro_stack_top == macro_stack_base
+macro_stack_base:
 	.word	0
-macro_save_s2:
+macro_stack_top:
 	.word	0
-macro_save_s3:
+macro_stack_end:
 	.word	0
 
-# Scratch buffer for the expanded macro body. Allocated at startup from the
-# heap (4 KiB). Each expansion writes the substituted body here and points
-# s2/s3 at it for the asm parser to consume.
+# Scratch buffer for expanded macro/rept bodies (4 KiB). Each expansion
+# writes from `macro_scratch_top` upward, advancing it. On EOI the
+# previous scratch_top is restored — that "frees" the just-drained
+# region, so deeply nested expansions reuse the same buffer.
 macro_scratch:
+	.word	0
+macro_scratch_top:
 	.word	0
 macro_scratch_end:
 	.word	0
@@ -16107,10 +16256,10 @@ err_tbl:
 	.byte	1, 24
 	.ascii	"macro arg count mismatch"
 	.zero	6
-	# slot 81 — raw: nested macro expansion
-	.byte	1, 22
-	.ascii	"nested macro expansion"
-	.zero	8
+	# slot 81 — raw: macro/rept expansion stack overflow (max 16 deep)
+	.byte	1, 27
+	.ascii	"expansion nested too deeply"
+	.zero	3
 	# slot 82 — raw: bad macro substitution
 	.byte	1, 22
 	.ascii	"bad macro substitution"

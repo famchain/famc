@@ -1632,9 +1632,9 @@ test_error "macro arg count mismatch" \
 test_error "macro redefined" \
 	"macro X() { } macro X() { }" \
 	"Error:1:22 macro already defined"
-test_error "macro bad substitution" \
-	"macro X(a) { y = \\b; } X(5);" \
-	"Error:1:29 bad macro substitution"
+test_error "macro bare backslash in body" \
+	"macro X(a) { y = \\; } X(5);" \
+	"Error:1:28 bad macro substitution"
 test_error "macro too many args" \
 	"macro X(a,b,c,d,e,f,g,h,i) { }" \
 	"Error:1:25 too many macro args"
@@ -1659,9 +1659,19 @@ test_output "rept non-zero start" \
 test_error "rept count over cap" \
 	"rept i in 0..5000 { @0x10000000 = '0'; }" \
 	"Error:1:41 rept count out of range"
-test_error "rept bad substitution" \
-	"rept i in 0..3 { @0x10000000 = \\j; }" \
-	"Error:1:37 bad rept substitution"
+test_error "rept bare backslash in body" \
+	"rept i in 0..3 { @0x10000000 = \\; }" \
+	"Error:1:36 bad rept substitution"
+
+# ── Nested expansion (macro/rept can call each other) ──────────────────────
+test_output "rept invoking macro (counter as macro arg)" \
+	"macro PUTC(c) { @0x10000000 = \\c; } rept i in 0..3 { PUTC('0' + \\i); }" "012"
+test_output "macro invoking macro" \
+	"macro INNER(c) { @0x10000000 = \\c; } macro OUTER(c) { INNER(\\c); INNER(\\c + 1); } OUTER(65);" "AB"
+test_output "rept inside macro body" \
+	"macro do3 { rept i in 0..3 { @0x10000000 = '0' + \\i; } } do3();" "012"
+test_output "nested rept invoking macro three deep" \
+	"macro PUTC(c) { @0x10000000 = \\c; } macro do2(b) { PUTC(\\b); PUTC(\\b + 1); } rept i in 0..3 { do2('a' + \\i * 2); }" "abcdef"
 test_compiles "asm addi max positive imm (2047)" \
 	"asm { addi t0, zero, 2047 }"
 test_error "asm addi imm over 12 bits" \
@@ -1672,6 +1682,22 @@ test_compiles "asm slli max shift amount (31)" \
 test_error "asm slli shift amount too big" \
 	"asm { slli t0, t0, 32 }" \
 	"Error:1:22 asm I-type imm too big"
+
+# ── Char literals as parse_num inputs ───────────────────────────────────────
+# parse_num accepts 'X' and '\X' forms wherever it's called, so asm
+# immediates, rept bounds, and array sizes can use them too.
+test_output "asm li with char literal" \
+	"asm { li t0, 'A' lui t1, 0x10000 sb t0, 0(t1) }" "A"
+test_output "asm addi with char literal" \
+	"asm { li t0, 0 addi t0, t0, 'B' lui t1, 0x10000 sb t0, 0(t1) }" "B"
+test_output "asm li with negative char literal" \
+	"asm { li t0, -'\\n' addi t0, t0, 75 lui t1, 0x10000 sb t0, 0(t1) }" "A"
+test_output "asm li with escape sequence char literal" \
+	"asm { li t0, '\\t' lui t1, 0x10000 sb t0, 0(t1) li t0, 'A' sb t0, 0(t1) }" $'\tA'
+test_output "rept bound with char literals (inclusive)" \
+	"rept c in 'A'..='C' { @0x10000000 = \\c; }" "ABC"
+test_output "macro+asm with numeric labels and char literals" \
+	"macro count_to c { asm { li t0, \\c 1: lui t1, 0x10000 li t2, '0' add t2, t2, t0 sb t2, 0(t1) addi t0, t0, -1 bnez t0, 1b } } count_to(3); @0x10000000 = '!';" "321!"
 
 # ── Phase 5 prologue data_end patch (pc-relative auipc+addi pair) ───────────
 # For binaries larger than ~2 KiB the compile-time patch has to set BOTH the
