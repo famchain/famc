@@ -1723,10 +1723,30 @@ emit_word:
 	bgeu	s5, t6, bin_full
 	sw	a0, 0(s5)
 	addi	s5, s5, 4
-	# Clear push_safe_marker by default. Safe-leaf emitters (emit_li,
-	# emit_lw_sp) re-set it from their own dispatch return sites.
+	# Clear push_safe_marker (and the literal-only sub-marker) by
+	# default. Safe-leaf emitters (emit_li, emit_lw_sp) re-set them
+	# from their own dispatch return sites.
 	lla	t6, push_safe_marker
 	sw	zero, 0(t6)
+	lla	t6, last_li_marker
+	sw	zero, 0(t6)
+	# a0_known_zero clear: only if the just-emitted instruction
+	# writes rd=a0(=10). Decode opcode + rd at -4(s5).
+	lw	t5, -4(s5)
+	andi	t6, t5, 0x7F		# opcode (low 7 bits — bit7 is 0)
+	# Stores (0x23), branches (0x63) — no rd, leave flag alone.
+	addi	t4, zero, 0x23
+	beq	t6, t4, ew_a0z_skip
+	addi	t4, zero, 0x63
+	beq	t6, t4, ew_a0z_skip
+	# Has rd: extract bits[11:7] and compare to 10.
+	srli	t6, t5, 7
+	andi	t6, t6, 0x1F
+	addi	t4, zero, 10
+	bne	t6, t4, ew_a0z_skip
+	lla	t6, a0_known_zero
+	sw	zero, 0(t6)
+ew_a0z_skip:
 	j	emit_word_disp
 
 bin_full:
@@ -2766,8 +2786,13 @@ la_d9:
 #   Single caller:  eli_ret (compile_term)
 # ══════════════════════════════════════════════════════════════════════════════
 emit_li:
-	addi	sp, sp, -4
+	addi	sp, sp, -8
 	sw	a0, 0(sp)		# save imm
+	sw	gp, 4(sp)		# save caller's gp (for emit_li_disp)
+	# Track the start address (s5 before any emission) so a caller
+	# doing const-folding can rewind to drop the entire li sequence.
+	lla	t0, last_li_start
+	sw	s5, 0(t0)
 	lw	t0, 0(sp)
 	addi	t1, zero, 2047
 	bgt	t0, t1, eli_big
@@ -2821,14 +2846,47 @@ ew_li_lui:
 ew_li_add:
 
 eli_pop:
-	addi	sp, sp, 4
+	# Stash the literal value in last_li_value so callers (e.g. an
+	# assignment site doing const-folding) can read the constant
+	# without re-decoding the emitted instructions.
+	lw	t1, 0(sp)
+	lla	t0, last_li_value
+	sw	t1, 0(t0)
+	lw	gp, 4(sp)		# restore caller's gp for emit_li_disp
+	addi	sp, sp, 8
 	# Mark the just-emitted load-immediate as safe-to-redirect: the
 	# previous instruction is the final word of emit_li, which writes
 	# to a0 with no other consumers (the caller uses it via push or
-	# directly as a binop operand).
+	# directly as a binop operand). Set the literal-only marker too
+	# so const-folding sites can distinguish li from lw.
 	lla	t0, push_safe_marker
 	sw	s5, 0(t0)
+	lla	t0, last_li_marker
+	sw	s5, 0(t0)
+	# Update a0_known_zero based on the literal value: set if 0,
+	# clear otherwise. (emit_word's epilogue cleared it already since
+	# the addi/lui writes a0; this re-sets when the value is 0.)
+	lla	t0, last_li_value
+	lw	t1, 0(t0)
+	bnez	t1, eli_a0z_clear
+	lla	t0, a0_known_zero
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
+	j	emit_li_disp
+eli_a0z_clear:
+	lla	t0, a0_known_zero
+	sw	zero, 0(t0)
+	j	emit_li_disp
+
+emit_li_disp:
+	bnez	gp, eli_d1
 	j	eli_ret
+eli_d1:
+	addi	gp, gp, -1
+	bnez	gp, eli_d2
+	j	eli_ret_id_const
+eli_d2:
+	j	halt_err
 
 # ══════════════════════════════════════════════════════════════════════════════
 # emit_lw_sp — emit "lw a0, offset(fp)". offset (bytes, positive) in a0.
@@ -3014,9 +3072,33 @@ emit_sw_sp:
 	# instruction for small offsets, multi-instruction sequence for large.
 	addi	t0, zero, 2048
 	bgeu	a0, t0, esws_big
-	# Small path: single sw a0, off(fp)
+	# Default sw word base: rs2=a0, 0x00A42023 (= `sw a0, 0(fp)`).
 	lui	t0, 0xA42
 	addi	t0, t0, 0x023
+	# Zero-store peephole: if a0 is known to hold literal 0
+	# (a0_known_zero == 1), encode the sw with rs2=zero (x0) instead
+	# of rs2=a0. If the just-prior instruction was `addi a0, zero, 0`
+	# from emit_li, also rewind it so we drop a dead instruction.
+	# The flag survives across consecutive sw's so chains like
+	# `x := y := 0` collapse fully.
+	lla	t6, a0_known_zero
+	lw	t6, 0(t6)
+	beqz	t6, esws_no_zfold
+	# Switch to zero-rs2 base.
+	lui	t0, 0x42
+	addi	t0, t0, 0x023
+	# If the preceding emit was the addi 0 itself (last_li_marker
+	# matches), rewind it as a dead instruction.
+	lla	t6, last_li_marker
+	lw	t6, 0(t6)
+	bne	t6, s5, esws_no_zfold
+	lla	t6, last_li_start
+	lw	s5, 0(t6)
+	lla	t6, push_safe_marker
+	sw	zero, 0(t6)
+	lla	t6, last_li_marker
+	sw	zero, 0(t6)
+esws_no_zfold:
 	andi	t1, a0, 0x1F
 	slli	t1, t1, 7
 	or	t0, t0, t1
@@ -4732,9 +4814,15 @@ ct_num:
 	addi	gp, zero, 0
 	j	parse_num
 pn_ct:
+	addi	gp, zero, 0		# eli site 0 = eli_ret
 	j	emit_li
 eli_ret:
 	j	ct_deref
+eli_ret_id_const:
+	# Const-folded ct_id (la_ct → emit_li). Reuse the IDENT post-load
+	# tail by jumping into elws_ret, which handles ++/--/postfix and
+	# the deref/lvalue bookkeeping just like a normal lw fp local.
+	j	elws_ret
 
 # ── Character literal: 'x' or '\n' / '\t' / '\r' / '\0' / '\\' / '\''  ───────
 # Produces an integer value in a0 (the char's byte), emitted via emit_li so the
@@ -4816,6 +4904,7 @@ ct_char_close:
 	addi	s2, s2, 1		# consume closing '
 	# Emit `li a0, <t0>` via emit_li (it reads a0 as the immediate).
 	addi	a0, t0, 0
+	addi	gp, zero, 0		# eli site 0 = eli_ret
 	j	emit_li
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5809,6 +5898,7 @@ sw_ct_so_rparen:
 	# Emit `li a0, size` via emit_li.
 	lw	a0, 0(sp)
 	addi	sp, sp, 4
+	addi	gp, zero, 0		# eli site 0 = eli_ret
 	j	emit_li
 	# emit_li falls through to eli_ret → ct_deref → ct_done. Since we
 	# have no prefix (deref_kind = 0 at compile_unary entry, still 0),
@@ -11854,9 +11944,22 @@ pk_read_ctx:
 pk_fn_call:
 	j	ct_fn_call
 la_ct:
-	# a0 = byte offset of the variable. Stash it for potential reuse by
-	# prefix/postfix '++'/'--' (emit_lw_sp/emit_sw_sp both clobber a0).
-	# Frame shift by +4: gp@4, deref_kind@8, incdec_kind@12, saved off@0.
+	# a0 = byte offset of the variable (or, for const-folded vars, the
+	# constant value itself — see ce_cs_rhs). Check is_const flag.
+	lla	t0, last_ident_entry
+	lw	t0, 0(t0)
+	lbu	t1, 38(t0)
+	beqz	t1, la_ct_normal
+	# Const-folded: emit `li a0, value` directly. Sub-expressions
+	# downstream may try to treat this as an lvalue; that's fine —
+	# cep_pre_assign rejects existing immutable rebinds.
+	addi	sp, sp, -4
+	sw	a0, 0(sp)
+	# a0 already holds the const value (lookup returned 32(entry)).
+	addi	gp, zero, 1		# eli site 1 = eli_ret_id_const
+	j	emit_li
+la_ct_normal:
+	# Stash offset for potential reuse by prefix/postfix '++'/'--'.
 	addi	sp, sp, -4
 	sw	a0, 0(sp)
 	addi	gp, zero, 0		# elws site 0 = elws_ret
@@ -13795,6 +13898,14 @@ sw_cep_tern_colon:
 ce_cep_tern_else:
 	j	cep_tern_patch_end
 cep_tern_no_else:
+	# If the ternary's value is discarded (one-armed in stmt context),
+	# the conventional `addi a0, zero, 0` false-tail is dead — skip it.
+	# The jal_else target is already at this point, so when cond is
+	# false, control falls straight through to the post-ternary code
+	# (with garbage in a0, which is fine because no one reads it).
+	lla	t0, expr_value_discarded
+	lw	t0, 0(t0)
+	bnez	t0, ecw_cep_tern_addi
 	# Emit addi a0, zero, 0 as the missing else's value.
 	lui	a0, 0
 	addi	a0, a0, 0x513
@@ -13861,6 +13972,31 @@ cep_asg_skip_mut_check:
 
 	# Un-emit the last load (peephole: rewind s5 by 4).
 	addi	s5, s5, -4
+	# Marker-restore: the un-emitted instruction was a deref load
+	# (lbu/lh/lw a0, 0(a0)) emitted via emit_word, which cleared the
+	# marker. Inspect the new prev word; if it's one of the safe-leaf
+	# producers (lw a0, off(fp); addi a0, zero, imm; lui a0, hi)
+	# re-set push_safe_marker so the upcoming push can redirect its
+	# rd to sN. Each pattern has a distinct low-bit signature.
+	lw	t1, -4(s5)
+	# 1) lw a0, off(fp) → low20 == 0x00042503
+	slli	t2, t1, 12
+	srli	t2, t2, 12
+	lui	t3, 0x42
+	addi	t3, t3, 0x503
+	beq	t2, t3, cep_asg_remark
+	# 2) addi a0, zero, imm → low20 == 0x00000513
+	addi	t3, zero, 0x513
+	beq	t2, t3, cep_asg_remark
+	# 3) lui a0, imm → low12 == 0x00000537
+	slli	t2, t1, 20
+	srli	t2, t2, 20
+	addi	t3, zero, 0x537
+	bne	t2, t3, cep_asg_no_remark
+cep_asg_remark:
+	lla	t1, push_safe_marker
+	sw	s5, 0(t1)
+cep_asg_no_remark:
 
 	# If kind == 1 (IDENT), no push needed; just recurse and emit sw.
 	# If kind == 2 or 3 (deref), push a0 to save the address across RHS.
@@ -14577,9 +14713,12 @@ la_cs:
 	lla	t0, last_ident_entry
 	lw	t1, 0(t0)
 	sb	t3, 37(t1)
-	# Spill slot to famc's stack.
-	addi	sp, sp, -4
+	# Spill slot offset AND entry pointer to famc's stack. The entry
+	# pointer is needed at ce_cs_rhs because compiling the RHS may
+	# call lookup() on inner identifiers and clobber last_ident_entry.
+	addi	sp, sp, -8
 	sw	a0, 0(sp)
+	sw	t1, 4(sp)
 	# s2 is at the operator. Consume '=' or ':=' and compile RHS.
 	lbu	t0, 0(s2)
 	addi	t1, zero, ':'
@@ -14595,8 +14734,45 @@ cs_op_eq:
 	addi	gp, zero, 0
 	j	compile_expr_p
 ce_cs_rhs:
+	# Const-folding peephole: this site is only reached via la_cs
+	# (a new IDENT binding). If it's immutable (`=`) AND the RHS
+	# compiled down to a single emit_li (push_safe_marker == s5),
+	# record the literal in the symbol entry, drop the li, skip the
+	# sw, and reclaim the frame slot. Subsequent reads rematerialize
+	# the value inline.
+	lla	t0, assign_is_mut
+	lw	t0, 0(t0)
+	bnez	t0, ce_cs_rhs_normal
+	lla	t0, last_li_marker
+	lw	t0, 0(t0)
+	bne	t0, s5, ce_cs_rhs_normal
+	# All checks passed — fold.
+	lla	t0, last_li_start
+	lw	s5, 0(t0)		# rewind to drop the li sequence
+	# Clear both markers (we just rewound; the prior insn is no
+	# longer the safe-leaf li that the markers pointed to).
+	lla	t0, push_safe_marker
+	sw	zero, 0(t0)
+	lla	t0, last_li_marker
+	sw	zero, 0(t0)
+	# Store value in entry (which we stashed in 4(sp) at la_cs, since
+	# RHS compile may have clobbered last_ident_entry) and set the
+	# is_const flag at byte 38.
+	lw	t1, 4(sp)		# entry pointer
+	lla	t0, last_li_value
+	lw	t2, 0(t0)
+	sw	t2, 32(t1)		# bytes 32..35 = const value
+	addi	t2, zero, 1
+	sb	t2, 38(t1)		# byte 38 = is_const flag
+	# Reclaim the frame slot we allocated (most-recent allocation,
+	# so we can decrement s9 by 4 safely).
+	addi	s9, s9, -4
+	# Pop the saved offset+entry and skip the sw.
+	addi	sp, sp, 8
+	j	esws_ret
+ce_cs_rhs_normal:
 	lw	a0, 0(sp)
-	addi	sp, sp, 4
+	addi	sp, sp, 8
 	addi	gp, zero, 0		# esws site 0 = esws_ret
 	j	emit_sw_sp
 esws_ret:
@@ -15192,10 +15368,19 @@ cs_fb:
 	# Expression-statement fallback. sp = entry_sp - 4, with the entry s2
 	# saved at 0(sp). Rewind s2, call compile_expr_p, expect trailing ';'.
 	lw	s2, 0(sp)
+	# Mark the upcoming expression's top-level value as discarded so
+	# cep_pre_tern can skip a one-armed ternary's dead false-tail.
+	# The flag is only consulted at the moment cep_pre_tern emits its
+	# tail; it doesn't propagate into sub-expressions of operators.
+	lla	t0, expr_value_discarded
+	addi	t1, zero, 1
+	sw	t1, 0(t0)
 	addi	t6, zero, 0
 	addi	gp, zero, 24		# compile_expr site 24 = ce_cs_exprstmt
 	j	compile_expr_p
 ce_cs_exprstmt:
+	lla	t0, expr_value_discarded
+	sw	zero, 0(t0)
 	# If ';' follows, consume it. If expression ended with '}' (block/loop/for),
 	# the semicolon is optional.
 	bge	s2, s3, cs_exprstmt_check_brace
@@ -15959,9 +16144,13 @@ patch_jtype:
 	# Patching a jal creates a new incoming control-flow edge at the
 	# patch target. If that target is the current s5 (a join point at
 	# the emit cursor) the previous instruction is no longer the sole
-	# producer of a0 — clear push_safe_marker so emit_push_a0 won't
-	# mistakenly redirect its rd field.
+	# producer of a0 — clear all leaf markers AND a0_known_zero so
+	# downstream peepholes don't act on stale single-path information.
 	lla	t0, push_safe_marker
+	sw	zero, 0(t0)
+	lla	t0, last_li_marker
+	sw	zero, 0(t0)
+	lla	t0, a0_known_zero
 	sw	zero, 0(t0)
 	sub	t2, t6, t5		# offset = target - addr
 	# J-type range check: 21-bit signed (±1 MiB). Sign-extend bit 20 back
@@ -16460,6 +16649,40 @@ popped_src_reg:
 # literal/local load whose rd field can be safely rewritten from a0 to
 # s[2+depth] in place — saving one `mv sN, a0`.
 push_safe_marker:
+	.word	0
+# last_li_value — the immediate (full 32-bit value) of the most recent
+# emit_li call. Used by const-binding peepholes that want to record a
+# literal initializer without re-decoding the emitted instruction(s).
+# Only valid when push_safe_marker == s5 (i.e. the previous emit was an
+# emit_li and nothing has been emitted or patched since).
+last_li_value:
+	.word	0
+# last_li_start — the s5 address right before the most recent emit_li
+# began emitting. Lets a const-folding caller rewind s5 to drop the
+# entire li sequence (1 or 2 instructions) by setting s5 = last_li_start.
+last_li_start:
+	.word	0
+# last_li_marker — set to the post-emit s5 by emit_li only (not by
+# emit_lw_sp). Lets a const-folding caller distinguish "last emit was a
+# literal" from "last emit was a local load". Cleared by emit_word's
+# epilogue alongside push_safe_marker.
+last_li_marker:
+	.word	0
+# a0_known_zero — sticky flag set when a0 is known (at compile time)
+# to hold the literal value 0. Set by emit_li 0. Cleared by emit_word
+# only when the just-emitted instruction writes rd=a0(=10). Lets
+# emit_sw_sp emit `sw zero, off(fp)` even across multi-store chains
+# like `x := y := z := 0;` (sw doesn't clobber a0, so the flag stays
+# set across consecutive store emissions).
+a0_known_zero:
+	.word	0
+# expr_value_discarded — set to 1 by cs_fb (expression-statement
+# fallback) before compiling the statement's expression, restored to
+# 0 after. cep_pre_tern reads it: if set AND the ternary has no else
+# clause, the false-tail `addi a0, zero, 0` is dead (no consumer for
+# the value 0) and is skipped, along with the jal_end that would
+# normally jump over it.
+expr_value_discarded:
 	.word	0
 
 # Flag set before lookup_or_alloc to indicate whether the upcoming
