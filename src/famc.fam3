@@ -6940,13 +6940,16 @@ sw_cs_macro_lbrace:
 	lw	t3, 4(sp)
 	sw	s2, 32(t3)
 
-	# Brace-balance to find the matching '}'. We scan as raw bytes (no
-	# tokenization), so this also catches '{' / '}' inside string/char
-	# literals — for the first cut we don't try to be clever.
+	# Brace-balance to find the matching '}'. We skip string and char
+	# literals so a '{' or '}' inside one isn't mistaken for a real brace.
 	addi	t4, zero, 1
 cs_macro_body_scan:
 	bge	s2, s3, cs_bad_macro_body
 	lbu	t0, 0(s2)
+	addi	t1, zero, 39		# '\''
+	beq	t0, t1, cs_macro_body_qrun
+	addi	t1, zero, 34		# '"'
+	beq	t0, t1, cs_macro_body_qrun
 	addi	t1, zero, '{'
 	beq	t0, t1, cs_macro_body_open
 	addi	t1, zero, '}'
@@ -6960,6 +6963,25 @@ cs_macro_body_open:
 cs_macro_body_close:
 	addi	t4, t4, -1
 	beqz	t4, cs_macro_body_done
+	addi	s2, s2, 1
+	j	cs_macro_body_scan
+cs_macro_body_qrun:
+	addi	t1, t0, 0		# save quote char
+	addi	s2, s2, 1
+cs_macro_body_qloop:
+	bge	s2, s3, cs_bad_macro_body
+	lbu	t0, 0(s2)
+	addi	t2, zero, 92		# '\\'
+	beq	t0, t2, cs_macro_body_qesc
+	beq	t0, t1, cs_macro_body_qclose
+	addi	s2, s2, 1
+	j	cs_macro_body_qloop
+cs_macro_body_qesc:
+	addi	s2, s2, 1
+	bge	s2, s3, cs_bad_macro_body
+	addi	s2, s2, 1
+	j	cs_macro_body_qloop
+cs_macro_body_qclose:
 	addi	s2, s2, 1
 	j	cs_macro_body_scan
 cs_macro_body_done:
@@ -7068,13 +7090,52 @@ cs_mc_arg_capture:
 	addi	t3, zero, 8
 	bge	t2, t3, cs_bad_mc_too_many_args
 	addi	t4, s2, 0		# arg start
+	addi	t6, zero, 0		# paren depth
 cs_mc_scan_arg:
 	bge	t4, s3, cs_bad_mc_rparen
 	lbu	t0, 0(t4)
-	addi	t1, zero, ','
-	beq	t0, t1, cs_mc_scan_arg_done
+	addi	t1, zero, 39		# '\''
+	beq	t0, t1, cs_mc_scan_arg_qrun
+	addi	t1, zero, 34		# '"'
+	beq	t0, t1, cs_mc_scan_arg_qrun
+	addi	t1, zero, '('
+	beq	t0, t1, cs_mc_scan_arg_open
 	addi	t1, zero, ')'
-	beq	t0, t1, cs_mc_scan_arg_done
+	beq	t0, t1, cs_mc_scan_arg_chk_rp
+	addi	t1, zero, ','
+	beq	t0, t1, cs_mc_scan_arg_chk_comma
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg
+cs_mc_scan_arg_open:
+	addi	t6, t6, 1
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg
+cs_mc_scan_arg_chk_rp:
+	beqz	t6, cs_mc_scan_arg_done
+	addi	t6, t6, -1
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg
+cs_mc_scan_arg_chk_comma:
+	beqz	t6, cs_mc_scan_arg_done
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg
+cs_mc_scan_arg_qrun:
+	addi	t1, t0, 0		# save quote char
+	addi	t4, t4, 1
+cs_mc_scan_arg_qloop:
+	bge	t4, s3, cs_bad_mc_rparen
+	lbu	t0, 0(t4)
+	addi	t2, zero, 92
+	beq	t0, t2, cs_mc_scan_arg_qesc
+	beq	t0, t1, cs_mc_scan_arg_qclose
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg_qloop
+cs_mc_scan_arg_qesc:
+	addi	t4, t4, 1
+	bge	t4, s3, cs_bad_mc_rparen
+	addi	t4, t4, 1
+	j	cs_mc_scan_arg_qloop
+cs_mc_scan_arg_qclose:
 	addi	t4, t4, 1
 	j	cs_mc_scan_arg
 cs_mc_scan_arg_done:
@@ -7151,10 +7212,6 @@ cs_mc_expand_loop:
 	addi	t0, a6, 1
 	bgeu	t0, a7, cs_bad_mc_scratch
 	lbu	t0, 0(a4)
-	addi	t1, zero, 39		# '\''
-	beq	t0, t1, cs_mc_quote_run
-	addi	t1, zero, 34		# '"'
-	beq	t0, t1, cs_mc_quote_run
 	addi	t1, zero, 92		# '\\'
 	beq	t0, t1, cs_mc_subst
 	# Plain copy.
@@ -7163,50 +7220,13 @@ cs_mc_expand_loop:
 	addi	a4, a4, 1
 	j	cs_mc_expand_loop
 
-cs_mc_quote_run:
-	# Inside a string or char literal: copy the opening quote, then copy
-	# bytes verbatim (treating any '\X' as a 2-byte escape sequence) until
-	# the matching closing quote. Substitution is intentionally suppressed
-	# so escapes like '\n' aren't mistaken for macro args.
-	addi	t1, t0, 0		# t1 = the quote char to match
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	a4, a4, 1
-cs_mc_quote_run_loop:
-	bge	a4, a5, cs_mc_expand_done
-	addi	t0, a6, 1
-	bgeu	t0, a7, cs_bad_mc_scratch
-	lbu	t0, 0(a4)
-	addi	t2, zero, 92		# '\\'
-	beq	t0, t2, cs_mc_quote_esc
-	beq	t0, t1, cs_mc_quote_close
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	a4, a4, 1
-	j	cs_mc_quote_run_loop
-cs_mc_quote_esc:
-	# Copy the backslash and the next byte verbatim.
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	a4, a4, 1
-	bge	a4, a5, cs_mc_expand_done
-	addi	t0, a6, 1
-	bgeu	t0, a7, cs_bad_mc_scratch
-	lbu	t0, 0(a4)
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	a4, a4, 1
-	j	cs_mc_quote_run_loop
-cs_mc_quote_close:
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	a4, a4, 1
-	j	cs_mc_expand_loop
-
 cs_mc_subst:
-	# Skip the backslash and read the ident name that follows.
+	# Skip the backslash and read the ident name that follows. A bare
+	# '\' (no ident, or end of body) is passed through verbatim — the
+	# downstream parser will see it and decide whether it's valid (e.g.
+	# inside a char literal it's an escape).
 	addi	a4, a4, 1
-	bge	a4, a5, cs_bad_mc_subst
+	bge	a4, a5, cs_mc_subst_bare
 	addi	t4, a4, 0		# ident start in body
 cs_mc_subst_scan:
 	bge	a4, a5, cs_mc_subst_scan_done
@@ -7233,7 +7253,7 @@ cs_mc_subst_keep:
 cs_mc_subst_scan_done:
 	# t4..a4 is the substitution name. Look it up in arg names.
 	sub	t5, a4, t4		# name length
-	beqz	t5, cs_bad_mc_subst	# bare backslash with no name
+	beqz	t5, cs_mc_subst_bare
 	# Iterate arg slots and compare.
 	addi	t6, zero, 0		# i
 cs_mc_subst_lookup:
@@ -7288,6 +7308,16 @@ cs_mc_subst_pass_loop:
 	addi	a6, a6, 1
 	addi	t0, t0, 1
 	j	cs_mc_subst_pass_loop
+
+cs_mc_subst_bare:
+	# Bare '\': no ident follows. Emit a literal backslash so that
+	# escapes like `'\\'` survive macro expansion verbatim.
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_mc_scratch
+	addi	t0, zero, 92
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	j	cs_mc_expand_loop
 cs_mc_subst_found:
 	# Copy the captured arg text (start, len) at frame slot 16 + i*8 to a6.
 	slli	t0, t6, 3
@@ -7479,12 +7509,16 @@ sw_cs_rept_lbrace:
 	addi	s2, s2, 1
 	sw	s2, 16(sp)		# body_start
 
-	# Brace-balance to find the matching '}'. Same simple scan as
-	# macro definitions — does NOT understand string/char literals.
+	# Brace-balance to find the matching '}', skipping string and char
+	# literals so internal braces don't fool the count.
 	addi	t4, zero, 1
 cs_rept_body_scan:
 	bge	s2, s3, cs_bad_rept_body
 	lbu	t0, 0(s2)
+	addi	t1, zero, 39		# '\''
+	beq	t0, t1, cs_rept_body_qrun
+	addi	t1, zero, 34		# '"'
+	beq	t0, t1, cs_rept_body_qrun
 	addi	t1, zero, '{'
 	beq	t0, t1, cs_rept_body_open
 	addi	t1, zero, '}'
@@ -7498,6 +7532,25 @@ cs_rept_body_open:
 cs_rept_body_close:
 	addi	t4, t4, -1
 	beqz	t4, cs_rept_body_done
+	addi	s2, s2, 1
+	j	cs_rept_body_scan
+cs_rept_body_qrun:
+	addi	t1, t0, 0
+	addi	s2, s2, 1
+cs_rept_body_qloop:
+	bge	s2, s3, cs_bad_rept_body
+	lbu	t0, 0(s2)
+	addi	t2, zero, 92
+	beq	t0, t2, cs_rept_body_qesc
+	beq	t0, t1, cs_rept_body_qclose
+	addi	s2, s2, 1
+	j	cs_rept_body_qloop
+cs_rept_body_qesc:
+	addi	s2, s2, 1
+	bge	s2, s3, cs_bad_rept_body
+	addi	s2, s2, 1
+	j	cs_rept_body_qloop
+cs_rept_body_qclose:
 	addi	s2, s2, 1
 	j	cs_rept_body_scan
 cs_rept_body_done:
@@ -7558,10 +7611,6 @@ cs_rept_inner:
 	addi	t0, a6, 1
 	bgeu	t0, a7, cs_bad_rept_scratch
 	lbu	t0, 0(t3)
-	addi	t1, zero, 39		# '\''
-	beq	t0, t1, cs_rept_qrun
-	addi	t1, zero, 34		# '"'
-	beq	t0, t1, cs_rept_qrun
 	addi	t1, zero, 92		# '\\'
 	beq	t0, t1, cs_rept_subst
 	# Plain copy.
@@ -7570,45 +7619,10 @@ cs_rept_inner:
 	addi	t3, t3, 1
 	j	cs_rept_inner
 
-cs_rept_qrun:
-	addi	t1, t0, 0		# save quote char
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	t3, t3, 1
-cs_rept_qrun_loop:
-	beq	t3, t4, cs_rept_inner_done
-	addi	t0, a6, 1
-	bgeu	t0, a7, cs_bad_rept_scratch
-	lbu	t0, 0(t3)
-	addi	t2, zero, 92
-	beq	t0, t2, cs_rept_qesc
-	beq	t0, t1, cs_rept_qclose
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	t3, t3, 1
-	j	cs_rept_qrun_loop
-cs_rept_qesc:
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	t3, t3, 1
-	beq	t3, t4, cs_rept_inner_done
-	addi	t0, a6, 1
-	bgeu	t0, a7, cs_bad_rept_scratch
-	lbu	t0, 0(t3)
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	t3, t3, 1
-	j	cs_rept_qrun_loop
-cs_rept_qclose:
-	sb	t0, 0(a6)
-	addi	a6, a6, 1
-	addi	t3, t3, 1
-	j	cs_rept_inner
-
 cs_rept_subst:
 	# Skip backslash, read ident name, compare to counter name.
 	addi	t3, t3, 1
-	bge	t3, t4, cs_bad_rept_subst
+	bge	t3, t4, cs_rept_subst_bare
 	addi	t5, t3, 0		# ident start
 cs_rept_subst_scan:
 	beq	t3, t4, cs_rept_subst_scan_done
@@ -7633,7 +7647,7 @@ cs_rept_subst_keep:
 	j	cs_rept_subst_scan
 cs_rept_subst_scan_done:
 	sub	t6, t3, t5		# substituted name length
-	beqz	t6, cs_bad_rept_subst
+	beqz	t6, cs_rept_subst_bare
 	# Compare against counter name (length at sp+0, bytes at sp+28).
 	lw	t0, 0(sp)
 	bne	t6, t0, cs_rept_subst_passthrough
@@ -7666,13 +7680,32 @@ cs_rept_subst_pass_loop:
 	addi	a6, a6, 1
 	addi	t0, t0, 1
 	j	cs_rept_subst_pass_loop
+
+cs_rept_subst_bare:
+	# Bare backslash: emit it verbatim and continue.
+	addi	t0, a6, 1
+	bgeu	t0, a7, cs_bad_rept_scratch
+	addi	t0, zero, 92
+	sb	t0, 0(a6)
+	addi	a6, a6, 1
+	j	cs_rept_inner
 cs_rept_subst_emit:
 	# Emit decimal digits of a4 into scratch. Use a small in-frame buffer
-	# to build digits in reverse, then copy out. Max 11 chars (signed
-	# 32-bit), but our cap of 4096 fits in 5.
+	# to build digits in reverse, then copy out. Negative values get a
+	# leading '-' written directly to scratch, then we negate and convert
+	# the magnitude.
 	addi	sp, sp, -16
 	addi	t0, sp, 16		# write head (going down)
 	addi	a0, a4, 0		# value to convert
+	bgez	a0, cs_rept_dec_zero_check
+	# Negative: write '-' into scratch first, then take absolute value.
+	addi	t1, a6, 1
+	bgeu	t1, a7, cs_bad_rept_scratch_pop
+	addi	t1, zero, 45		# '-'
+	sb	t1, 0(a6)
+	addi	a6, a6, 1
+	sub	a0, zero, a0
+cs_rept_dec_zero_check:
 	# Special-case zero.
 	bnez	a0, cs_rept_dec_loop
 	addi	t0, t0, -1

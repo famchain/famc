@@ -1632,9 +1632,8 @@ test_error "macro arg count mismatch" \
 test_error "macro redefined" \
 	"macro X() { } macro X() { }" \
 	"Error:1:22 macro already defined"
-test_error "macro bare backslash in body" \
-	"macro X(a) { y = \\; } X(5);" \
-	"Error:1:28 bad macro substitution"
+test_output "macro substitution inside char literal" \
+	"macro show m { @0x10000000 = '\\m'; } show(A);" "A"
 test_error "macro too many args" \
 	"macro X(a,b,c,d,e,f,g,h,i) { }" \
 	"Error:1:25 too many macro args"
@@ -1659,9 +1658,8 @@ test_output "rept non-zero start" \
 test_error "rept count over cap" \
 	"rept i in 0..5000 { @0x10000000 = '0'; }" \
 	"Error:1:41 rept count out of range"
-test_error "rept bare backslash in body" \
-	"rept i in 0..3 { @0x10000000 = \\; }" \
-	"Error:1:36 bad rept substitution"
+test_output "rept counter inside char literal" \
+	"rept i in 0..3 { @0x10000000 = '0' + \\i; }" "012"
 
 # ── Nested expansion (macro/rept can call each other) ──────────────────────
 test_output "rept invoking macro (counter as macro arg)" \
@@ -1672,6 +1670,23 @@ test_output "rept inside macro body" \
 	"macro do3 { rept i in 0..3 { @0x10000000 = '0' + \\i; } } do3();" "012"
 test_output "nested rept invoking macro three deep" \
 	"macro PUTC(c) { @0x10000000 = \\c; } macro do2(b) { PUTC(\\b); PUTC(\\b + 1); } rept i in 0..3 { do2('a' + \\i * 2); }" "abcdef"
+
+# ── Quote/paren awareness in macro/rept body and arg capture ────────────────
+# Brace-balance during definition must skip braces inside string and char
+# literals; arg capture at the call site must skip commas inside both nested
+# parens and string/char literals.
+test_output "brace inside char literal in macro body" \
+	"macro b { @0x10000000 = '{'; @0x10000000 = '}'; } b();" "{}"
+test_output "brace inside char literal in rept body" \
+	"rept i in 0..3 { @0x10000000 = '}'; @0x10000000 = '0' + \\i; }" "}0}1}2"
+test_output "macro arg with parenthesized fn call (paren tracking)" \
+	"fn add(a, b) { a + b } macro use v { @0x10000000 = \\v; } use(add(60, 5));" "A"
+test_output "macro arg with comma inside nested parens" \
+	"fn add(a, b) { a + b } macro show v { @0x10000000 = \\v; } show((add(60, 5)));" "A"
+test_output "negative rept iteration with positive offset" \
+	"rept i in -2..3 { x := \\i + 67; @0x10000000 = x; }" "ABCDE"
+test_output "rept counter as negative literal substitution" \
+	"rept i in -1..2 { y := 0 - \\i + 65; @0x10000000 = y; }" "BA@"
 test_compiles "asm addi max positive imm (2047)" \
 	"asm { addi t0, zero, 2047 }"
 test_error "asm addi imm over 12 bits" \
