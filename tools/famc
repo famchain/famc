@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ASM="$ROOT_DIR/bin/famc"
 SRC="$1"
+STDLIB="$ROOT_DIR/lib/stdlib.fam"
 
 if [ ! -e "$ASM" ]; then
 	echo "Error: $ASM not found"
@@ -31,7 +32,7 @@ else
 	OUT="${SRC%.*}.bin"
 fi
 
-(cat "$SRC"; printf '\004') | qemu-system-riscv32 \
+(cat $STDLIB $SRC; printf '\004') | qemu-system-riscv32 \
 	-machine virt \
 	-cpu rv32,m=false,a=false,f=false,d=false,c=false,zawrs=false,zfa=false,zfh=false,zfhmin=false,zcb=false,zcd=false,zcf=false,zcmp=false,zcmt=false,zicsr=false,zifencei=false \
 	-nographic \
