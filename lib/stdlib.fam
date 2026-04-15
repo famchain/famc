@@ -3,7 +3,7 @@ FILE: stdlib.fam
 */
 
 __UART = 0x10000000;
-fn print_str(s) {
+fn puts(s) {
 	loop {
 		@s ? @__UART = @s++ : break;
 	}
